@@ -70,7 +70,7 @@ def test_built_so(ext_name: TestExtension) -> None:
     """
     Verifies that the built shared library works
     """
-    with build_temp_extension(ext_name) as shared_lib_path:
+    with build_temp_extension(ext_name):
         ext_mod = importlib.import_module(ext_name)
 
     match ext_name:

@@ -6,7 +6,7 @@ description = "Tooling around MStar PLC TX calibration"
 requires-python = ">=3.12"
 authors = [{ name = "Baptiste Pestourie" }]
 
-dependencies = ["setuptools"]
+dependencies = ["setuptools", "ziglang"]
 
 [project.urls]
 Homepage = "https://github.com/Hedwyn/smelt"

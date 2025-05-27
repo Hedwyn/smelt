@@ -1,10 +1,17 @@
+"""
+Defines a distutils compiler based on Zig.
+
+@date: 27.05.2025
+@author: Baptiste Pestourie
+"""
+
 from __future__ import annotations
 
 import os
+import sys
 import sysconfig
 import tempfile
 from distutils.compilers.C.unix import Compiler  # type: ignore[import-not-found]
-from distutils.sysconfig import customize_compiler  # type: ignore[import-not-found]
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -19,19 +26,20 @@ class ZigCompiler(Compiler):
     add .zig files to the list of accepted extensions.
     """
 
+    zig_base_path: ClassVar[list[str]] = [sys.executable, "-m", "ziglang"]
     # Expanding to add .zig files
     src_extensions: ClassVar[list[str]] = Compiler.src_extensions + [".zig"]
 
     executables = {
         "preprocessor": None,
-        "compiler": ["zig cc"],
-        "compiler_so": ["zig cc"],
-        "compiler_cxx": ["zig c++"],
-        "compiler_so_cxx": ["zig c++"],
-        "linker_so": ["zig cc", "-shared"],
-        "linker_so_cxx": ["zig c++", "-shared"],
-        "linker_exe": ["zig cc"],
-        "linker_exe_cxx": ["zig c++", "-shared"],
+        "compiler": [*zig_base_path, "cc"],
+        "compiler_so": [*zig_base_path, "cc"],
+        "compiler_cxx": [*zig_base_path, "c++"],
+        "compiler_so_cxx": [*zig_base_path, "c++"],
+        "linker_so": [*zig_base_path, "cc", "-shared"],
+        "linker_so_cxx": [*zig_base_path, "c++", "-shared"],
+        "linker_exe": [*zig_base_path, "cc"],
+        "linker_exe_cxx": [*zig_base_path, "c++", "-shared"],
         "archiver": ["ar", "-cr"],
         "ranlib": None,
     }
@@ -50,18 +58,17 @@ def compile_extension(
     ----------
     extension_path: PathLike
         Path to the source file to compile
-    
+
     compiler: Compiler | None
         The compiler to use,
         spawns a ZigCompiler if omitted
-    
+
     dest_folder: PathLike
         The folder in which to place the built shared library.
         Defaults to cwd.
     """
     extension_path = Path(extension_path)
     compiler = compiler or ZigCompiler()
-    customize_compiler(compiler)
     ext_name = extension_path.name
 
     if extension_path.suffix not in compiler.src_extensions:
