@@ -15,6 +15,8 @@ from distutils.compilers.C.unix import Compiler  # type: ignore[import-not-found
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
+from setuptools import Extension
+
 if TYPE_CHECKING:
     from os import PathLike
 
@@ -46,7 +48,7 @@ class ZigCompiler(Compiler):
 
 
 def compile_extension(
-    extension_path: PathLike,
+    extension: PathLike | Extension,
     compiler: Compiler | None = None,
     dest_folder: PathLike | None = None,
 ) -> str:
@@ -67,28 +69,48 @@ def compile_extension(
         The folder in which to place the built shared library.
         Defaults to cwd.
     """
-    extension_path = Path(extension_path)
     compiler = compiler or ZigCompiler()
-    ext_name = extension_path.name
+    include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
+    library_dirs = [sysconfig.get_config_var("LIBDIR")]
 
-    if extension_path.suffix not in compiler.src_extensions:
-        raise ValueError(
-            f"Unsupported extension: {extension_path.suffix} "
-            f"Supported values: {",".join(compiler.src_extensions)}"
+    if isinstance(extension, os.PathLike):
+        # building an extension object for a single source file
+        extension = Path(extension)
+        ext_name = extension.name
+
+        if extension.suffix not in compiler.src_extensions:
+            raise ValueError(
+                f"Unsupported extension: {extension.suffix} "
+                f"Supported values: {",".join(compiler.src_extensions)}"
+            )
+        extension_obj = Extension(
+            name=extension.name.replace(extension.suffix, ""),
+            sources=[
+                str(extension),
+            ],
         )
+    else:
+        extension_obj = extension
+        ext_name = extension.name
 
     # Compile the C file
     with tempfile.TemporaryDirectory() as build_folder:
         objects = compiler.compile(
-            sources=[
-                extension_path,
-            ],
+            sources=extension_obj.sources,
             output_dir=build_folder,
+            include_dirs=include_dirs + extension_obj.include_dirs,
+            extra_postargs=extension_obj.extra_compile_args or [],
         )
         # Link it into a shared object
         so_suffix = sysconfig.get_config_var("EXT_SUFFIX")
-        ext_name = ext_name.replace(extension_path.suffix, so_suffix)
+        ext_name = extension_obj.name + so_suffix
 
         output_dir = dest_folder or "."
-        compiler.link_shared_object(objects, ext_name, output_dir=str(output_dir))
+        compiler.link_shared_object(
+            objects,
+            ext_name,
+            output_dir=str(output_dir),
+            library_dirs=extension_obj.library_dirs + library_dirs,
+            runtime_library_dirs=extension_obj.runtime_library_dirs,
+        )
     return os.path.join(output_dir, ext_name)
