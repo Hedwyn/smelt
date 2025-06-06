@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib
 import os
+import platform
+import sysconfig
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final, Generator, Literal, assert_never, cast, get_args
@@ -17,7 +19,7 @@ import pytest
 from mypyc.build import mypycify
 from setuptools import Extension
 
-from smelt.compiler import compile_extension
+from smelt.compiler import PYCONFIG_PATH, compile_extension, get_extension_suffix
 
 TEST_FOLDER: Final[Path] = Path(__file__).parent
 EXTENSION_FOLDER = TEST_FOLDER / "extensions"
@@ -30,6 +32,60 @@ TestModule = Literal["fib"]
 
 AVAILABLE_EXTENSIONS: list[str] = list(get_args(TestExtension))
 AVAILABLE_MODULES: Final[list[str]] = list(get_args(TestModule))
+
+
+@pytest.fixture(scope="session")
+def local_platform_triple() -> str:
+    """
+    Returns
+    -------
+    str
+        Platform triple of the device running this test suite
+        Will be used to check some details of the output of native compilation
+        tests, as their outputs are by definition platform dependant.
+    """
+    # harc-ocoding gnu
+    system = platform.system().lower()
+    match system:
+        case "darwin":
+            return f"{platform.machine()}-apple-darwin"
+
+        case "windows":
+            # TODO: one might actually use mingw32 on Windows
+            # which would make this triple incorrect...
+            # maybe use sysconfig.get_platform() ?
+            return f"{platform.machine()}-windows-msvc"
+
+        case "linux":
+            return f"{platform.machine()}-linux-gnu"
+
+        case _:
+            raise RuntimeError(f"Running tests on unsupported OS: {system}")
+
+
+def test_so_extension_suffix(local_platform_triple: str) -> None:
+    """
+    Checks that `get_extension_suffix` produces the same output
+    as the sysconfig EXT_SUFFIX when used on the local platform
+    """
+    so_suffix = get_extension_suffix(local_platform_triple)
+    assert so_suffix == sysconfig.get_config_var("EXT_SUFFIX")
+
+
+@pytest.mark.parametrize(
+    "python_version,platform_triple",
+    [
+        ["python3.12", "aarch64-linux-gnu"],
+    ],
+)
+def test_pyconfig_headers_bundled(python_version: str, platform_triple: str) -> None:
+    """
+    Verifies that the pyconfig.h headers are properly bundled
+    as package data
+    """
+    base_path = Path(PYCONFIG_PATH)
+    pyconfig_path = base_path / platform_triple / python_version / "pyconfig.h"
+    assert os.path.exists(pyconfig_path), f"Missing pyconfig.h @{pyconfig_path}"
 
 
 @contextmanager
