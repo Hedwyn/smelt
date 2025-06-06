@@ -12,13 +12,25 @@ import sys
 import sysconfig
 import tempfile
 from distutils.compilers.C.unix import Compiler  # type: ignore[import-not-found]
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
+import warnings
 
 from setuptools import Extension
 
 if TYPE_CHECKING:
     from os import PathLike
+
+
+class SupportedPlatforms(StrEnum):
+    """
+    All the target platforms supported from cross-compilation.
+    Value of the enum corresponds the platform name as expected by Zig compiler.
+    """
+
+    AARCH64_LINUX = "aarch64-linux"
+    # TODO: add more
 
 
 class ZigCompiler(Compiler):
@@ -51,6 +63,7 @@ def compile_extension(
     extension: PathLike | Extension,
     compiler: Compiler | None = None,
     dest_folder: PathLike | None = None,
+    crosscompile: SupportedPlatforms | None = None,
 ) -> str:
     """
     Standalone function compiling a low-level extension (C, C++ or Zig)
@@ -94,11 +107,21 @@ def compile_extension(
         ext_name = extension.name
 
     # Compile the C file
+    extra_preargs: list[str] = []
+    if crosscompile is not None:
+        # TODO: generate/obtain pyconfig.h for the target platform
+        warnings.warn(
+            "Support for cross-compiling is not complete yet."
+            "Compilation will likely fail"
+        )
+        extra_preargs.append(crosscompile.value)
+
     with tempfile.TemporaryDirectory() as build_folder:
         objects = compiler.compile(
             sources=extension_obj.sources,
             output_dir=build_folder,
             include_dirs=include_dirs + extension_obj.include_dirs,
+            extra_preargs=extra_preargs,
             extra_postargs=extension_obj.extra_compile_args or [],
         )
         # Link it into a shared object
