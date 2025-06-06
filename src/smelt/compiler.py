@@ -11,16 +11,38 @@ import os
 import sys
 import sysconfig
 import tempfile
+import warnings
 from distutils.compilers.C.unix import Compiler  # type: ignore[import-not-found]
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
-import warnings
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from setuptools import Extension
 
 if TYPE_CHECKING:
     from os import PathLike
+
+_SMELT_ROOT: Final[str] = os.path.dirname(__file__)
+PYCONFIG_PATH: Final[str] = os.path.join(_SMELT_ROOT, "pyconfig")
+
+
+def get_extension_suffix(target_triple: str) -> str:
+    """
+    Generate the C extension module filename.
+
+    Parameters
+    ----------
+    target_triple: str
+        The target triple, e.g., 'aarch64-linux-gnu'.
+
+    Returns
+    -------
+    str
+        The extension filename, e.g., '.cpython-312-aarch64-linux-gnu.so'
+    """
+    major = sys.version_info.major
+    minor = sys.version_info.minor
+    return f".cpython-{major}{minor}-{target_triple}.so"
 
 
 class SupportedPlatforms(StrEnum):
@@ -29,8 +51,22 @@ class SupportedPlatforms(StrEnum):
     Value of the enum corresponds the platform name as expected by Zig compiler.
     """
 
+    # TODO: parametrize OS
     AARCH64_LINUX = "aarch64-linux"
+    X86_64_FAMILY = "x86_64"
     # TODO: add more
+
+    def get_triple_name(self) -> str:
+        """
+        Returns the "triple" platform name <arch>-<os>-<libc>
+        as used by Python for this target.
+        Note: automatically assumed libc here, as there's no support currently for other options.
+        """
+        # Note: Python can be built for multiple LibCs:
+        # gnu, musl, android...
+        # Currently hard-coding LibC, which would be the choices for 95%+ projects
+        # out there. Other libC might be considered later
+        return self.value + "-gnu"
 
 
 class ZigCompiler(Compiler):
@@ -115,6 +151,11 @@ def compile_extension(
             "Compilation will likely fail"
         )
         extra_preargs.append(crosscompile.value)
+        # adding pyconfig
+        include_dirs.append(PYCONFIG_PATH)
+        so_suffix = get_extension_suffix(crosscompile.get_triple_name())
+    else:
+        so_suffix = sysconfig.get_config_var("EXT_SUFFIX")
 
     with tempfile.TemporaryDirectory() as build_folder:
         objects = compiler.compile(
@@ -125,7 +166,6 @@ def compile_extension(
             extra_postargs=extension_obj.extra_compile_args or [],
         )
         # Link it into a shared object
-        so_suffix = sysconfig.get_config_var("EXT_SUFFIX")
         ext_name = extension_obj.name + so_suffix
 
         output_dir = dest_folder or "."
