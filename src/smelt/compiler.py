@@ -147,10 +147,10 @@ def compile_extension(
     if crosscompile is not None:
         # TODO: generate/obtain pyconfig.h for the target platform
         warnings.warn(
-            "Support for cross-compiling is not complete yet."
-            "Compilation will likely fail"
+            "Support for cross-compiling is experimental.\n"
+            "Do not assume stability from the built artifacts"
         )
-        extra_preargs.append(crosscompile.value)
+        extra_preargs.append(f"--target={crosscompile.value}")
         # adding pyconfig
         include_dirs.append(PYCONFIG_PATH)
         so_suffix = get_extension_suffix(crosscompile.get_triple_name())
@@ -175,5 +175,6 @@ def compile_extension(
             output_dir=str(output_dir),
             library_dirs=extension_obj.library_dirs + library_dirs,
             runtime_library_dirs=extension_obj.runtime_library_dirs,
+            extra_preargs=extra_preargs,
         )
     return os.path.join(output_dir, ext_name)

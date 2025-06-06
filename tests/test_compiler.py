@@ -19,7 +19,12 @@ import pytest
 from mypyc.build import mypycify
 from setuptools import Extension
 
-from smelt.compiler import PYCONFIG_PATH, compile_extension, get_extension_suffix
+from smelt.compiler import (
+    PYCONFIG_PATH,
+    SupportedPlatforms,
+    compile_extension,
+    get_extension_suffix,
+)
 
 TEST_FOLDER: Final[Path] = Path(__file__).parent
 EXTENSION_FOLDER = TEST_FOLDER / "extensions"
@@ -91,13 +96,16 @@ def test_pyconfig_headers_bundled(python_version: str, platform_triple: str) -> 
 @contextmanager
 def build_temp_extension(
     ext_name: TestModule | TestExtension,
+    crosscompile: SupportedPlatforms | None = None,
 ) -> Generator[str, None, None]:
     if ext_name in AVAILABLE_MODULES:
         cast(TestModule, ext_name)
         (extension,) = mypycify_module(ext_name)
-        shared_lib_path = compile_extension(extension)
+        shared_lib_path = compile_extension(extension, crosscompile=crosscompile)
     else:
-        shared_lib_path = compile_extension(get_extension_path(ext_name))
+        shared_lib_path = compile_extension(
+            get_extension_path(ext_name), crosscompile=crosscompile
+        )
     try:
         yield shared_lib_path
     finally:
@@ -154,6 +162,24 @@ def test_compiler_builds_so(ext_name: TestExtension) -> None:
     Verifies that the compiler is able to build a shared library
     """
     with build_temp_extension(ext_name) as shared_lib_path:
+        assert os.path.exists(shared_lib_path)
+        assert shared_lib_path.endswith(".so")
+    assert not os.path.exists(
+        shared_lib_path
+    ), "`build_temp_extension` fixture did not clean-up properly"
+
+
+@pytest.mark.parametrize("ext_name", AVAILABLE_EXTENSIONS)
+@pytest.mark.parametrize("platform", [SupportedPlatforms.AARCH64_LINUX])
+def test_compiler_crosscompiled_so(
+    ext_name: TestExtension, platform: SupportedPlatforms
+) -> None:
+    """
+    Verifies that the compiler is able to build a shared library for a foreign platform.
+    Does not verify that the shared library works - this requires tooling beyond
+    what a isolated Python test session can do.
+    """
+    with build_temp_extension(ext_name, crosscompile=platform) as shared_lib_path:
         assert os.path.exists(shared_lib_path)
         assert shared_lib_path.endswith(".so")
     assert not os.path.exists(
