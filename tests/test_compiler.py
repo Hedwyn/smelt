@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import os
 import platform
+import shutil
 import sysconfig
 from contextlib import contextmanager
 from pathlib import Path
@@ -109,6 +110,8 @@ def build_temp_extension(
     try:
         yield shared_lib_path
     finally:
+        if extensions_folder := os.environ.get("SAVE_EXTENSIONS", None):
+            shutil.copy(shared_lib_path, extensions_folder)
         os.remove(shared_lib_path)
 
 
