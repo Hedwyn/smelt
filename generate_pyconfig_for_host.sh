@@ -11,5 +11,5 @@ fi
 BUILD=$(uname -m)-linux-gnu
 HOST=${1}-linux-${3:-gnu}
 echo "Building on ${BUILD} for ${HOST}"
-CONFIG_SITE=./config.site ./${2}/configure --host=${HOST} --build=${BUILD} --prefix=${PWD}/python/${2}/build-${1}\
+CONFIG_SITE=./config.site CC="zig cc -target arm-linux-gnueabihf" ./${2}/configure --host=${HOST} --build=${BUILD} --prefix=${PWD}/python/${2}/build-${1}\
     --disable-ipv6 --with-build-python
