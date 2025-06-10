@@ -53,7 +53,8 @@ class SupportedPlatforms(StrEnum):
 
     # TODO: parametrize OS
     AARCH64_LINUX = "aarch64-linux"
-    X86_64_FAMILY = "x86_64"
+    ARMV7L_LINUX = "arm-linux-gnueabihf"
+    X86_64_LINUX = "x86_64-linux"
     # TODO: add more
 
     def get_triple_name(self) -> str:
@@ -66,6 +67,8 @@ class SupportedPlatforms(StrEnum):
         # gnu, musl, android...
         # Currently hard-coding LibC, which would be the choices for 95%+ projects
         # out there. Other libC might be considered later
+        if self == SupportedPlatforms.ARMV7L_LINUX:
+            return self.value
         return self.value + "-gnu"
 
 

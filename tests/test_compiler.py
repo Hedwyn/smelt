@@ -173,7 +173,9 @@ def test_compiler_builds_so(ext_name: TestExtension) -> None:
 
 
 @pytest.mark.parametrize("ext_name", AVAILABLE_EXTENSIONS)
-@pytest.mark.parametrize("platform", [SupportedPlatforms.AARCH64_LINUX])
+@pytest.mark.parametrize(
+    "platform", [SupportedPlatforms.AARCH64_LINUX, SupportedPlatforms.ARMV7L_LINUX]
+)
 def test_compiler_crosscompiled_so(
     ext_name: TestExtension, platform: SupportedPlatforms
 ) -> None:
