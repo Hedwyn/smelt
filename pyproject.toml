@@ -11,6 +11,9 @@ dependencies = ["setuptools", "ziglang"]
 [project.urls]
 Homepage = "https://github.com/Hedwyn/smelt"
 
+[project.optional-dependencies]
+tests = ["pytest", "mypy[mypyc]"]
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 
