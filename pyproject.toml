@@ -2,7 +2,7 @@
 [project]
 name = "smelt"
 version = "0.1.0"
-description = "Tooling around MStar PLC TX calibration"
+description = "Binary orchestrator for Python packages"
 requires-python = ">=3.12"
 authors = [{ name = "Baptiste Pestourie" }]
 
