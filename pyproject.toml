@@ -13,6 +13,7 @@ Homepage = "https://github.com/Hedwyn/smelt"
 
 [project.optional-dependencies]
 tests = ["pytest", "mypy[mypyc]"]
+nuitka= ["nuitka"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

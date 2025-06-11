@@ -34,6 +34,12 @@ def compile_with_nuitka(
     Compiles the module given by `path`.
     Follows imports by default, but can be disabled with `no_follow_imports`.
     """
+    try:
+        import nuitka
+    except ImportError:
+        raise ImportError(
+            "Nuitka is not installed. Please install this package with nuitka extra: `pip install smelt[nuitka]`."
+        )
     cmd = list(NUITKA_ENTRYPOINT)
     if not no_follow_imports:
         cmd.append("--follow-imports")
