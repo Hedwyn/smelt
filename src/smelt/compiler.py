@@ -12,7 +12,7 @@ import sys
 import sysconfig
 import tempfile
 import warnings
-from distutils.compilers.C.unix import Compiler  # type: ignore[import-not-found]
+from distutils.compilers.C.unix import Compiler
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Final
@@ -99,9 +99,9 @@ class ZigCompiler(Compiler):
 
 
 def compile_extension(
-    extension: PathLike | Extension,
+    extension: PathLike[str] | Extension,
     compiler: Compiler | None = None,
-    dest_folder: PathLike | None = None,
+    dest_folder: PathLike[str] | None = None,
     crosscompile: SupportedPlatforms | None = None,
 ) -> str:
     """
@@ -110,14 +110,14 @@ def compile_extension(
 
     Parameters
     ----------
-    extension_path: PathLike
+    extension_path: PathLike[str]
         Path to the source file to compile
 
     compiler: Compiler | None
         The compiler to use,
         spawns a ZigCompiler if omitted
 
-    dest_folder: PathLike
+    dest_folder: PathLike[str]
         The folder in which to place the built shared library.
         Defaults to cwd.
     """
