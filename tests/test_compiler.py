@@ -34,7 +34,7 @@ MODULE_FOLDER = TEST_FOLDER / "modules"
 
 # All the extensions available in `extensions` folder
 TestExtension = Literal["hello"]
-TestModule = Literal["fib"]
+TestModule = Literal["fib", "entrypoint"]
 
 AVAILABLE_EXTENSIONS: list[str] = list(get_args(TestExtension))
 AVAILABLE_MODULES: Final[list[str]] = list(get_args(TestModule))
