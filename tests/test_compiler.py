@@ -223,10 +223,25 @@ def test_compiler_built_mypyc(mod_name: TestModule) -> None:
         assert os.path.exists(shared_lib_path)
         assert shared_lib_path.endswith(".so")
         ext_mod = importlib.import_module(mod_name)
-    match mod_name:
-        case "fib":
-            fib = ext_mod.fib
-            assert fib(10) == 55
 
-        case _ as unreachable:
-            assert_never(unreachable)
+        match mod_name:
+            case "fib":
+                fib = ext_mod.fib
+                assert fib(10) == 55
+
+            case "entrypoint":
+                import subprocess
+                import sys
+
+                p = subprocess.run(
+                    [sys.executable, "-c", "import " + mod_name, "10"],
+                    check=True,
+                )
+                # .so modules cannot be run as main,
+                # so just checking here that it imports without errors
+                assert p.returncode == 0, (
+                    "Entrypoint module did not run successfully.: " + shared_lib_path
+                )
+
+            case _ as unreachable:
+                assert_never(unreachable)
