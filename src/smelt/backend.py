@@ -17,7 +17,7 @@ from pathlib import Path
 from mypyc.build import mypycify
 
 from smelt.compiler import compile_extension
-from smelt.nuitkaify import compile_with_nuitka
+from smelt.nuitkaify import Stdout, compile_with_nuitka
 
 
 class SmeltError(Exception):
@@ -51,7 +51,7 @@ class SmeltConfig:
         return "\n".join(lines)
 
 
-def run_backend(config: SmeltConfig) -> None:
+def run_backend(config: SmeltConfig, stdout: Stdout | None = None) -> None:
     # Starting with C extensions
     warnings.warn(
         "`run_backend` implementation is not fully implemented yet and will only "
@@ -77,6 +77,11 @@ def run_backend(config: SmeltConfig) -> None:
         so_final_path = parent_folder_path / os.path.basename(built_so_path)
         shutil.move(built_so_path, so_final_path)
 
+    # Note: mypyc has a runtime shipped as a separate extension
+    # this runtime should be named modname__mypy
+    # we need to keep track of it to include to nuitka,
+    # as it would be invisible otherwise
+    mypy_runtime_extensions: list[str] = []
     for mypyc_extension in config.mypyc:
         try:
             mod = importlib.import_module(mypyc_extension)
@@ -89,11 +94,27 @@ def run_backend(config: SmeltConfig) -> None:
         extensions = mypycify([mod.__file__], include_runtime_files=True)
         mod_folder = Path(mod.__file__).parent
         for ext in extensions:
-            ext_name = mypyc_extension.split(".")[-1]
+            ext_name = ext.name.split(".")[-1]
+            is_runtime = "__mypyc" in ext_name
             built_so_path = compile_extension(ext)
             built_so_path.replace(mod.__name__, ext_name)
             # TODO: see above
             so_final_path = mod_folder / os.path.basename(built_so_path).replace(
-                mypyc_extension, ext_name
+                ext.name, ext_name
             )
             shutil.move(built_so_path, so_final_path)
+            if is_runtime:
+                mypy_runtime_extensions.append(ext.name)
+    # nuitka compile
+    entrypoint = config.entrypoint
+    try:
+        entrypoint_mod = importlib.import_module(entrypoint)
+    except ImportError as exc:
+        msg = f"Failed to import entrypoint: {entrypoint}"
+        raise SmeltMissingModule(msg) from exc
+    assert (
+        entrypoint_mod.__file__ is not None
+    ), f"Failed to locate entrypoint: {entrypoint}"
+    compile_with_nuitka(
+        entrypoint_mod.__file__, stdout=stdout, include_modules=mypy_runtime_extensions
+    )

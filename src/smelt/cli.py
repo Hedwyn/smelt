@@ -87,4 +87,4 @@ def build_standalone_binary(package_path: str) -> None:
         click.echo(f"Smelt config is incorrect: {exc}")
         return
 
-    run_backend(config)
+    run_backend(config, stdout="stdout")
