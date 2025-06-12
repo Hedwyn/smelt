@@ -126,6 +126,9 @@ def compile_extension(
     library_dirs = [sysconfig.get_config_var("LIBDIR")]
 
     if isinstance(extension, os.PathLike):
+        if not os.path.exists(extension):
+            raise FileNotFoundError(f"Extension does not exists: {extension}")
+
         # building an extension object for a single source file
         extension = Path(extension)
         ext_name = extension.name
@@ -180,4 +183,6 @@ def compile_extension(
             runtime_library_dirs=extension_obj.runtime_library_dirs,
             extra_preargs=extra_preargs,
         )
-    return os.path.join(output_dir, ext_name)
+    so_path = os.path.join(output_dir, ext_name)
+    assert os.path.exists(so_path)
+    return so_path
