@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 authors = [{ name = "Baptiste Pestourie" }]
 dependencies=["click"]
 
+[project.scripts]
+minimal-demo="minimal.cli:minimal"
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 
