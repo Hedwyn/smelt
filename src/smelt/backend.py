@@ -11,7 +11,7 @@ import importlib
 import os
 import shutil
 import warnings
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from mypyc.build import mypycify
@@ -38,6 +38,17 @@ class SmeltConfig:
     mypyc: list[str]
     c_extensions: list[str]
     entrypoint: str
+
+    def __str__(self) -> str:
+        """
+        A human-friendly stringified version of this config.
+        """
+        lines: list[str] = []
+        for field_name, value in asdict(self).items():
+            if isinstance(value, list):
+                value = ",".join(value)
+            lines.append(f"{field_name:20}: {value}")
+        return "\n".join(lines)
 
 
 def run_backend(config: SmeltConfig) -> None:
