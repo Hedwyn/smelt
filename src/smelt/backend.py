@@ -64,17 +64,36 @@ def run_backend(config: SmeltConfig) -> None:
         # Also, this only works in editable mode
         # modules
         try:
-            parent_mod = importlib.import_module(parent_path)
+            mod = importlib.import_module(parent_path)
         except ImportError as exc:
             msg = f"Failed to import {parent_path} while looking for extension {c_extension}"
             raise SmeltMissingModule(msg) from exc
-        assert (
-            parent_mod.__file__ is not None
-        ), f"Cannot locate C extension parent path {parent_mod}"
-        parent_folder_path = Path(parent_mod.__file__).parent
+        assert mod.__file__ is not None, f"Cannot locate C extension parent path {mod}"
+        parent_folder_path = Path(mod.__file__).parent
         c_extension_path = parent_folder_path / (extension_name + ".c")
 
         # TODO: we should probably run that logic in temp folder
         built_so_path = compile_extension(c_extension_path)
         so_final_path = parent_folder_path / os.path.basename(built_so_path)
         shutil.move(built_so_path, so_final_path)
+
+    for mypyc_extension in config.mypyc:
+        try:
+            mod = importlib.import_module(mypyc_extension)
+        except ImportError as exc:
+            msg = f"Failed to import {mypyc_extension} while trying to mypycify"
+            raise SmeltMissingModule(msg) from exc
+        assert mod.__file__ is not None, f"Cannot module to mypycify: {mypyc_extension}"
+        # TODO: seems that mypy detects the package and names the module package.mod
+        # automatically ?
+        extensions = mypycify([mod.__file__], include_runtime_files=True)
+        mod_folder = Path(mod.__file__).parent
+        for ext in extensions:
+            ext_name = mypyc_extension.split(".")[-1]
+            built_so_path = compile_extension(ext)
+            built_so_path.replace(mod.__name__, ext_name)
+            # TODO: see above
+            so_final_path = mod_folder / os.path.basename(built_so_path).replace(
+                mypyc_extension, ext_name
+            )
+            shutil.move(built_so_path, so_final_path)
