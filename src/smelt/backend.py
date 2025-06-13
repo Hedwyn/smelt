@@ -105,6 +105,12 @@ class SmeltConfig:
 
 
 def run_backend(config: SmeltConfig, stdout: Stdout | None = None) -> None:
+    """
+    Runs the whole backend pipeline:
+    * C extensions compilation
+    * mypyc extensions
+    * Nuitka compilation
+    """
     # Starting with C extensions
     warnings.warn(
         "`run_backend` implementation is not fully implemented yet and will only "

@@ -1,5 +1,8 @@
 """
 Command-line interface for Smelt
+
+@date: 12.06.2025
+@author: Baptiste Pestourie
 """
 
 from __future__ import annotations
@@ -22,6 +25,15 @@ type TomlData = dict[str, str | list[str] | TomlData]
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+SMELT_ASCCI_ART: str = r"""
+ ____                 _ _
+/ ___| _ __ ___   ___| | |_
+\___ \| '_ ` _ \ / _ \ | __|
+ ___) | | | | | |  __/ | |_
+|____/|_| |_| |_|\___|_|\__|
+
+"""
 
 
 def wrap_smelt_errors(
@@ -72,6 +84,10 @@ def parse_config(toml_data: TomlData) -> SmeltConfig:
 
 
 def parse_config_from_pyproject(toml_data: TomlData) -> SmeltConfig:
+    """
+    Extracts Smelt config from TOML data coming out of a pyproject.toml
+    If parsing a smelt config file directly, use `parse_config` instead.
+    """
     tool_config = toml_data.get("tool", {})
     if not isinstance(tool_config, dict):
         raise SmeltConfigError(
@@ -91,7 +107,10 @@ def parse_config_from_pyproject(toml_data: TomlData) -> SmeltConfig:
 
 @click.group()
 def smelt() -> None:
-    pass
+    """
+    Entrypoint for Smelt frontend
+    """
+    click.echo(SMELT_ASCCI_ART)
 
 
 @smelt.command()

@@ -23,7 +23,7 @@ entrypoint="minimal.cli"
 @pytest.fixture
 def toml_data() -> TomlData:
     """
-    Example TOML data as it would be extraced from pyproject.toml
+    Example TOML data as it would be extracted from pyproject.toml
     """
     return tomllib.loads(SAMPLE_CONFIG)
 
