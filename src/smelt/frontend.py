@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 from contextlib import contextmanager
-from typing import Callable, Generator, ParamSpec, TypeVar
+from typing import Callable, Generator, ParamSpec, TypeVar, cast
 
 import click
 import tomllib
@@ -58,15 +58,20 @@ def wrap_smelt_errors(
 
 def parse_config(toml_data: TomlData) -> SmeltConfig:
     """
-    Parses a TOML smelt conffig and returns the dataclass representation.
+    Parses a TOML smelt config and returns the dataclass representation.
     TOML data might come from a dedicated smelt config file or from pyproject.toml.
     For the latter, smelt config should be found under [tool.smelt].
     Use `parse_config_from_pyproject` to get a standalone implementation.
     """
-    c_extensions = toml_data.get("c_extensions", [])
-    assert isinstance(c_extensions, list) and all(
-        (isinstance(elem, str) for elem in c_extensions)
-    ), c_extensions
+    _c_extensions = toml_data.get("c_extensions", [])
+    assert isinstance(_c_extensions, dict)
+    assert all(
+        (
+            isinstance(key, str) and isinstance(val, str)
+            for key, val in _c_extensions.items()
+        )
+    ), _c_extensions
+    c_extensions = cast(dict[str, str], _c_extensions)
     mypyc = toml_data.get("mypyc", [])
     assert isinstance(mypyc, list) and all(
         (isinstance(elem, str) for elem in c_extensions)
@@ -150,4 +155,4 @@ def build_standalone_binary(package_path: str) -> None:
         click.echo("No pyproject.toml not found.")
         return
     config = parse_config_from_pyproject(toml_data)
-    run_backend(config, stdout="stdout")
+    run_backend(config, stdout="stdout", project_root=package_path)

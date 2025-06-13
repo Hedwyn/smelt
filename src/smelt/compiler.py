@@ -99,7 +99,7 @@ class ZigCompiler(Compiler):
 
 
 def compile_extension(
-    extension: PathLike[str] | Extension,
+    extension: Path | str | Extension,
     compiler: Compiler | None = None,
     dest_folder: PathLike[str] | None = None,
     crosscompile: SupportedPlatforms | None = None,
@@ -110,8 +110,9 @@ def compile_extension(
 
     Parameters
     ----------
-    extension_path: PathLike[str]
-        Path to the source file to compile
+    extension_path: Path | str | Extension
+        Path to the source file to compile,
+        or a pre-built Extension object
 
     compiler: Compiler | None
         The compiler to use,
@@ -125,7 +126,7 @@ def compile_extension(
     include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
     library_dirs = [sysconfig.get_config_var("LIBDIR")]
 
-    if isinstance(extension, os.PathLike):
+    if isinstance(extension, (str, Path)):
         if not os.path.exists(extension):
             raise FileNotFoundError(f"Extension does not exists: {extension}")
 

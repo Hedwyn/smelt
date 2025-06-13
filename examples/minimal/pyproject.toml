@@ -14,5 +14,7 @@ package-dir = { "" = "src" }
 
 [tool.smelt]
 mypyc = ["minimal.fib"]
-c_extensions=["minimal.hello"]
 entrypoint="minimal.cli"
+
+[tool.smelt.c_extensions]
+"minimal.hello"="src/minimal/hello.c"
