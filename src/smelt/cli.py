@@ -5,6 +5,9 @@ Command-line interface for Smelt
 from __future__ import annotations
 
 import os
+import sys
+from contextlib import contextmanager
+from typing import Callable, Generator, ParamSpec, TypeVar
 
 import click
 import tomllib
@@ -17,9 +20,37 @@ class SmeltConfigError(SmeltError): ...
 
 type TomlData = dict[str, str | list[str] | TomlData]
 
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def wrap_smelt_errors(
+    should_exist: bool = True, exit_code: int = 1
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """
+    Captures `SmeltError` exceptions and displays them to the user in a nicer way.
+    """
+
+    @contextmanager
+    def wrapper() -> Generator[None, None, None]:
+        try:
+            yield
+        except SmeltError as exc:
+            click.echo("/!\\  [Smelt] An error occured:")
+            click.echo(exc)
+            if should_exist:
+                sys.exit(exit_code)
+
+    return wrapper()
+
 
 def parse_config(toml_data: TomlData) -> SmeltConfig:
-    """ """
+    """
+    Parses a TOML smelt conffig and returns the dataclass representation.
+    TOML data might come from a dedicated smelt config file or from pyproject.toml.
+    For the latter, smelt config should be found under [tool.smelt].
+    Use `parse_config_from_pyproject` to get a standalone implementation.
+    """
     c_extensions = toml_data.get("c_extensions", [])
     assert isinstance(c_extensions, list) and all(
         (isinstance(elem, str) for elem in c_extensions)
@@ -40,6 +71,24 @@ def parse_config(toml_data: TomlData) -> SmeltConfig:
     )
 
 
+def parse_config_from_pyproject(toml_data: TomlData) -> SmeltConfig:
+    tool_config = toml_data.get("tool", {})
+    if not isinstance(tool_config, dict):
+        raise SmeltConfigError(
+            f"`tool` section in toml data is not a dictionary, got {tool_config}. "
+            "Does the TOML data come from a valid pyproject ?"
+        )
+    smelt_config = tool_config.get("smelt", None)
+    if smelt_config is None:
+        raise SmeltConfigError("No smelt config defined in pyproject")
+
+    if not isinstance(smelt_config, dict):
+        raise SmeltConfigError(
+            f"`smelt` section should be a dictionary, got {smelt_config}. "
+        )
+    return parse_config(smelt_config)
+
+
 @click.group()
 def smelt() -> None:
     pass
@@ -52,15 +101,18 @@ def smelt() -> None:
     default=".",
     type=str,
 )
+@wrap_smelt_errors()
 def show_config(path: str) -> None:
+    """
+    Shows the smelt config as defined in the passed file
+    """
     try:
         with open(os.path.join(path, "pyproject.toml"), "rb") as f:
             toml_data = tomllib.load(f)
     except FileNotFoundError:
         click.echo("No pyproject.toml not found.")
         return
-    smelt_config = toml_data.get("tool", {}).get("smelt", {})
-    print(parse_config(smelt_config))
+    print(parse_config_from_pyproject(toml_data))
 
 
 @smelt.command()
@@ -70,6 +122,7 @@ def show_config(path: str) -> None:
     default=".",
     type=str,
 )
+@wrap_smelt_errors()
 def build_standalone_binary(package_path: str) -> None:
     try:
         with open(os.path.join(package_path, "pyproject.toml"), "rb") as f:
@@ -77,14 +130,5 @@ def build_standalone_binary(package_path: str) -> None:
     except FileNotFoundError:
         click.echo("No pyproject.toml not found.")
         return
-    smelt_config = toml_data.get("tool", {}).get("smelt", {})
-    if smelt_config == {}:
-        click.echo("Targeted prject does not seem to use smelt: no smelt config found")
-        return
-    try:
-        config = parse_config(smelt_config)
-    except SmeltConfigError as exc:
-        click.echo(f"Smelt config is incorrect: {exc}")
-        return
-
+    config = parse_config_from_pyproject(toml_data)
     run_backend(config, stdout="stdout")
