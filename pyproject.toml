@@ -9,7 +9,7 @@ authors = [{ name = "Baptiste Pestourie" }]
 dependencies = ["setuptools", "ziglang"]
 
 [project.scripts]
-smelt = "smelt.cli:smelt"
+smelt = "smelt.frontend:smelt"
 [project.urls]
 Homepage = "https://github.com/Hedwyn/smelt"
 
