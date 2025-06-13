@@ -23,6 +23,9 @@ from mypyc.build import mypycify
 from smelt.compiler import compile_extension
 from smelt.nuitkaify import Stdout, compile_with_nuitka
 
+# TODO: replace .so references to a variable that's set to .so
+# for Unix-like and .dll for Windows
+
 
 class SmeltError(Exception):
     """
@@ -62,9 +65,14 @@ def import_shadowed_module(path: str) -> Generator[ModuleType, None, None]:
             backup_path = os.path.join(tmp, os.path.basename(mod_path))
             shutil.copy(mod_path, backup_path)
             os.remove(mod_path)
+            os.sync()
 
             try:
-                yield importlib.import_module(path)
+                # using reload as otherwise importlib will use the cache
+                # and re-import the now deleted .so
+                mod = importlib.reload(mod)
+                assert mod.__file__ is not None and not (mod.__file__.endswith(".so"))
+                yield mod
             except ImportError as exc:
                 msg = f"Failed to import {path} while trying to mypycify"
                 raise SmeltMissingModule(msg) from exc
