@@ -15,6 +15,7 @@ Homepage = "https://github.com/Hedwyn/smelt"
 
 [project.optional-dependencies]
 tests = ["pytest", "mypy[mypyc]"]
+cli=["click"]
 nuitka= ["nuitka"]
 
 [tool.setuptools]

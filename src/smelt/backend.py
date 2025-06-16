@@ -18,7 +18,6 @@ from pathlib import Path
 from types import ModuleType
 from typing import Generator
 
-import mypy.api
 from mypyc.build import mypycify
 
 from smelt.compiler import compile_extension

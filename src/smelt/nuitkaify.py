@@ -67,7 +67,6 @@ def compile_with_nuitka(
     _logger.debug("Running %s", " ".join(cmd))
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    print(cmd)
     while True:
         assert proc.stdout is not None, "Process not created with stdout in PIPE mode"
         line = proc.stdout.readline()

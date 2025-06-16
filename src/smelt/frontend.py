@@ -159,3 +159,20 @@ def build_standalone_binary(package_path: str) -> None:
         return
     config = parse_config_from_pyproject(toml_data)
     run_backend(config, stdout="stdout", project_root=package_path)
+
+
+@smelt.command()
+@click.argument(
+    "entrypoint-path",
+    type=str,
+)
+@wrap_smelt_errors()
+def nuitkaify(entrypoint_path: str) -> None:
+    """
+    Standalone command to run the nuitka wrapper in this package.
+    This is mainly intended for manual self-testing, if you only need nuitka
+    features you should probably just call nuitka directly.
+    """
+    from smelt.nuitkaify import compile_with_nuitka
+
+    compile_with_nuitka(entrypoint_path, stdout="stdout")
