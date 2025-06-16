@@ -72,10 +72,13 @@ def parse_config(toml_data: TomlData) -> SmeltConfig:
         )
     ), _c_extensions
     c_extensions = cast(dict[str, str], _c_extensions)
-    mypyc = toml_data.get("mypyc", [])
-    assert isinstance(mypyc, list) and all(
-        (isinstance(elem, str) for elem in c_extensions)
-    ), mypyc
+    _mypyc = toml_data.get("mypyc", {})
+    assert isinstance(_mypyc, dict)
+    assert all(
+        (isinstance(key, str) and isinstance(val, str) for key, val in _mypyc.items())
+    ), _mypyc
+    mypyc = cast(dict[str, str], _mypyc)
+
     entrypoint = toml_data.get("entrypoint", None)
     if entrypoint is None:
         # for now, raising

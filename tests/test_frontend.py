@@ -14,11 +14,13 @@ from smelt.frontend import TomlData, parse_config_from_pyproject
 
 SAMPLE_CONFIG: str = """\
 [tool.smelt]
-mypyc = ["minimal.fib"]
 entrypoint="minimal.cli"
 
 [tool.smelt.c_extensions]
 "minimal.hello"="src/minimal/hello.c"
+
+[tool.smelt.mypyc]
+"minimal.fib" = "src/minimal/fib.py"
 """
 
 
@@ -37,4 +39,4 @@ def test_parse(toml_data: TomlData) -> None:
     config = parse_config_from_pyproject(toml_data)
     assert config.entrypoint == "minimal.cli"
     assert config.c_extensions == {"minimal.hello": "src/minimal/hello.c"}
-    assert config.mypyc == ["minimal.fib"]
+    assert config.mypyc == {"minimal.fib": "src/minimal/fib.py"}

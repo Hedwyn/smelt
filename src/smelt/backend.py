@@ -18,6 +18,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Generator
 
+import mypy.api
 from mypyc.build import mypycify
 
 from smelt.compiler import compile_extension
@@ -88,7 +89,7 @@ class SmeltConfig:
     Defines how the smelt backend should run
     """
 
-    mypyc: list[str]
+    mypyc: dict[str, str]
     c_extensions: dict[str, str]
     entrypoint: str
 
@@ -135,12 +136,13 @@ def run_backend(
     # we need to keep track of it to include to nuitka,
     # as it would be invisible otherwise
     mypy_runtime_extensions: list[str] = []
-    for mypyc_extension in config.mypyc:
+    for mypyc_extension, ext_path in config.mypyc.items():
         with import_shadowed_module(mypyc_extension) as mod:
             # TODO: seems that mypy detects the package and names the module package.mod
             # automatically ?
+            mypyc_extpath = os.path.join(project_root, ext_path)
             assert mod.__file__ is not None
-            extensions = mypycify([mod.__file__], include_runtime_files=True)
+            extensions = mypycify([mypyc_extpath], include_runtime_files=True)
             mod_folder = Path(mod.__file__).parent
             for ext in extensions:
                 ext_name = ext.name.split(".")[-1]

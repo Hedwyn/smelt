@@ -13,8 +13,10 @@ minimal-demo="minimal.cli:minimal"
 package-dir = { "" = "src" }
 
 [tool.smelt]
-mypyc = ["minimal.fib"]
 entrypoint="minimal.cli"
 
 [tool.smelt.c_extensions]
 "minimal.hello"="src/minimal/hello.c"
+
+[tool.smelt.mypyc]
+"minimal.fib" = "src/minimal/fib.py"
