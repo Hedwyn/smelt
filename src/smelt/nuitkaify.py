@@ -19,13 +19,29 @@ import logging
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import Final, Iterable, Literal
+
+from setuptools import Extension
 
 _logger = logging.getLogger(__name__)
 
 NUITKA_ENTRYPOINT: Final[tuple[str, ...]] = (sys.executable, "-m", "nuitka")
 
 type Stdout = Literal["stdout", "logger"]
+
+
+def locate_nuitka_headers() -> list[Path]:
+    header_folders: list[Path] = []
+    import nuitka
+
+    nuitka_root = Path(nuitka.__file__).parent
+    header_folders.append(nuitka_root / "build" / "static_src")
+    header_folders.append(nuitka_root / "build" / "inline_copy" / "libbacktrace")
+    header_folders.append(nuitka_root / "build" / "inline_copy" / "zlib")
+    header_folders.append(nuitka_root / "build" / "include")
+
+    return header_folders
 
 
 def compile_with_nuitka(
@@ -83,3 +99,70 @@ def compile_with_nuitka(
     bin_path = os.path.basename(path).replace(".py", expected_extension)
     assert os.path.exists(bin_path)
     return bin_path
+
+
+def nuitkaify_module(
+    path: str,
+    no_follow_imports: bool = False,
+    stdout: Stdout | None = None,
+    include_modules: Iterable[str] | None = None,
+    include_packages: Iterable[str] | None = None,
+) -> Extension:
+    """
+    Compiles the module given by `path`.
+    Follows imports by default, but can be disabled with `no_follow_imports`.
+    """
+    cmd = list(NUITKA_ENTRYPOINT)
+    if not no_follow_imports:
+        cmd.append("--follow-imports")
+    cmd.append("--onefile")
+    cmd.append("--clang")
+    cmd.append("--generate-c-only")
+
+    cmd.append(path)
+
+    # handling special flags
+    if include_modules:
+        for mod in include_modules:
+            cmd.append(f"--include-module={mod}")
+
+    if include_packages:
+        for package in include_packages:
+            cmd.append(f"--include-package={package}")
+
+    _logger.debug("Running %s", " ".join(cmd))
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    while True:
+        assert proc.stdout is not None, "Process not created with stdout in PIPE mode"
+        line = proc.stdout.readline()
+        if not line:
+            break
+        decoded_line = line.decode().rstrip()
+        if stdout == "logger":
+            _logger.info(decoded_line)
+        elif stdout == "stdout":
+            print(decoded_line)
+
+    _logger.info("[Nuitka]: %d", proc.returncode)
+    modname = os.path.basename(path)
+    build_folder = modname.replace(".py", ".build")
+    assert os.path.exists(build_folder)
+    c_sources = [
+        os.path.join(build_folder, f)
+        for f in os.listdir(build_folder)
+        if f.endswith(".c")
+    ]
+    assert (
+        c_sources
+    ), "Nuitka did not produce any C file or build folder path logic is incorrect"
+    header_sources = locate_nuitka_headers()
+    header_sources.append(build_folder)
+    # patching build_definitions.h, as we don't need extensions
+    open(os.path.join(build_folder, "build_definitions.h"), "w+").close()
+
+    return Extension(
+        name=modname.replace(".py", ""),
+        sources=c_sources,
+        include_dirs=[str(f) for f in header_sources],
+    )

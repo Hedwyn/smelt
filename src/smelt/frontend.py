@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from contextlib import contextmanager
 from typing import Callable, Generator, ParamSpec, TypeVar, cast
 
@@ -16,6 +17,7 @@ import click
 import tomllib
 
 from smelt.backend import SmeltConfig, SmeltError, run_backend
+from smelt.compiler import compile_extension
 
 
 class SmeltConfigError(SmeltError): ...
@@ -176,3 +178,25 @@ def nuitkaify(entrypoint_path: str) -> None:
     from smelt.nuitkaify import compile_with_nuitka
 
     compile_with_nuitka(entrypoint_path, stdout="stdout")
+
+
+@smelt.command()
+@click.argument(
+    "module-path",
+    type=str,
+)
+@wrap_smelt_errors()
+def compile_module(module_path: str) -> None:
+    """
+    Standalone command to run the nuitka wrapper in this package.
+    This is mainly intended for manual self-testing, if you only need nuitka
+    features you should probably just call nuitka directly.
+    """
+    from smelt.nuitkaify import nuitkaify_module
+
+    warnings.warn(
+        "This entrypoint is under constrution and will not produce functional .so"
+    )
+    ext = nuitkaify_module(module_path, stdout="stdout")
+    so_path = compile_extension(ext)
+    click.echo(f".so path {so_path}")
