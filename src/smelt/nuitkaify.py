@@ -30,6 +30,18 @@ NUITKA_ENTRYPOINT: Final[tuple[str, ...]] = (sys.executable, "-m", "nuitka")
 
 type Stdout = Literal["stdout", "logger"]
 
+# TODO: this should be built dynamically, obviously
+NUITKA_MACROS = [
+    ("_XOPEN_SOURCE", None),
+    ("__NUITKA_NO_ASSERT__", None),
+    ("_NUITKA_CONSTANTS_FROM_CODE", None),
+    ("_NUITKA_FROZEN", 0),
+    # TODO:
+    # Note: seems that that one was NUITKA_MODULE_MODE
+    # and was renamed around Nuitka 2.7.9 to _NUIKA_MODULE
+    ("_NUITKA_MODULE_MODE", 1),
+]
+
 
 def locate_nuitka_headers() -> list[Path]:
     header_folders: list[Path] = []
@@ -113,13 +125,9 @@ def nuitkaify_module(
     Follows imports by default, but can be disabled with `no_follow_imports`.
     """
     cmd = list(NUITKA_ENTRYPOINT)
-    if not no_follow_imports:
-        cmd.append("--follow-imports")
-    cmd.append("--onefile")
-    cmd.append("--clang")
-    cmd.append("--generate-c-only")
-
+    cmd.append("--module")
     cmd.append(path)
+    cmd.append("--generate-c-only")
 
     # handling special flags
     if include_modules:
@@ -131,7 +139,6 @@ def nuitkaify_module(
             cmd.append(f"--include-package={package}")
 
     _logger.debug("Running %s", " ".join(cmd))
-
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     while True:
         assert proc.stdout is not None, "Process not created with stdout in PIPE mode"
@@ -156,13 +163,14 @@ def nuitkaify_module(
     assert (
         c_sources
     ), "Nuitka did not produce any C file or build folder path logic is incorrect"
-    header_sources = locate_nuitka_headers()
+    header_sources = [str(f) for f in locate_nuitka_headers()]
     header_sources.append(build_folder)
     # patching build_definitions.h, as we don't need extensions
     open(os.path.join(build_folder, "build_definitions.h"), "w+").close()
-
     return Extension(
         name=modname.replace(".py", ""),
         sources=c_sources,
-        include_dirs=[str(f) for f in header_sources],
+        include_dirs=header_sources,
+        define_macros=NUITKA_MACROS,
+        libraries=["m", "dl", "z"],
     )

@@ -171,15 +171,19 @@ def compile_extension(
             include_dirs=include_dirs + extension_obj.include_dirs,
             extra_preargs=extra_preargs,
             extra_postargs=extension_obj.extra_compile_args or [],
+            macros=extension_obj.define_macros,
         )
+
         # Link it into a shared object
         ext_name = extension_obj.name + so_suffix
 
         output_dir = dest_folder or "."
+
         compiler.link_shared_object(
             objects,
             ext_name,
             output_dir=str(output_dir),
+            libraries=extension_obj.libraries,
             library_dirs=extension_obj.library_dirs + library_dirs,
             runtime_library_dirs=extension_obj.runtime_library_dirs,
             extra_preargs=extra_preargs,

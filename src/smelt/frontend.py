@@ -195,7 +195,7 @@ def compile_module(module_path: str) -> None:
     from smelt.nuitkaify import nuitkaify_module
 
     warnings.warn(
-        "This entrypoint is under constrution and will not produce functional .so"
+        "This entrypoint is under construction and will not produce functional .so"
     )
     ext = nuitkaify_module(module_path, stdout="stdout")
     so_path = compile_extension(ext)
