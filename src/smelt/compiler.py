@@ -165,6 +165,8 @@ def compile_extension(
         so_suffix = sysconfig.get_config_var("EXT_SUFFIX")
 
     with tempfile.TemporaryDirectory() as build_folder:
+        # TODO: investigate the pure setuptools alternative
+        # as the distutils compiler is deprecated
         objects = compiler.compile(
             sources=extension_obj.sources,
             output_dir=build_folder,

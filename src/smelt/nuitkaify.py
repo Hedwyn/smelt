@@ -20,7 +20,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Final, Iterable, Literal
+from typing import Final, Iterable, Iterator, Literal
 
 from setuptools import Extension
 
@@ -42,6 +42,18 @@ NUITKA_MACROS = [
     ("_NUITKA_MODULE_MODE", 1),
 ]
 
+NUITKA_MINIMAL_FLAGS: Final[tuple[str, ...]] = (
+    "-std=c11",
+    "-fwrapv",
+    "-pipe",
+    "-w",
+    "-fvisibility=hidden",
+    "-fvisibility-inlines-hidden",
+    "-Wno-unused-but-set-variable",
+    "-O3",
+    "-fPIC",
+)
+
 
 def locate_nuitka_headers() -> list[Path]:
     header_folders: list[Path] = []
@@ -54,6 +66,21 @@ def locate_nuitka_headers() -> list[Path]:
     header_folders.append(nuitka_root / "build" / "include")
 
     return header_folders
+
+
+def iterate_nuitka_c_sources(build_folder: str) -> Iterator[Path]:
+    """
+    Iterates over all C sources that should be compiled from the passed build fodler
+    """
+    root = Path(build_folder)
+    for f in os.listdir(build_folder):
+        if f.endswith(".c"):
+            yield root / f
+
+    static_src = root / "static_src"
+    for f in os.listdir(static_src):
+        if f.endswith(".c"):
+            yield static_src / f
 
 
 def compile_with_nuitka(
@@ -127,7 +154,17 @@ def nuitkaify_module(
     cmd = list(NUITKA_ENTRYPOINT)
     cmd.append("--module")
     cmd.append(path)
-    cmd.append("--generate-c-only")
+    # TODO: the clean approach will to use the `--generate-c-only` since we want to
+    # compile ourselves, however, when enabled nuitka generates the C code
+    # but does not copy the static source files from its own package
+    # These static files can be found in the .build folder when running a full build
+    # but not when using generate-c-only.
+    # The logic to find the ones that are required is not so trivial (nuitka only includes the ones)
+    # that are actually needed, we we would have to tap into the scons stuff to extract them
+    # ideal way would to do a dry run to extract all the build system data instead of trying
+    # to reproduce it
+    # As it now, nuitka will do the full compilation only for us to recompile again
+    # cmd.append("--generate-c-only")
 
     # handling special flags
     if include_modules:
@@ -155,14 +192,11 @@ def nuitkaify_module(
     modname = os.path.basename(path)
     build_folder = modname.replace(".py", ".build")
     assert os.path.exists(build_folder)
-    c_sources = [
-        os.path.join(build_folder, f)
-        for f in os.listdir(build_folder)
-        if f.endswith(".c")
-    ]
+    c_sources = [str(src) for src in iterate_nuitka_c_sources(build_folder)]
     assert (
         c_sources
     ), "Nuitka did not produce any C file or build folder path logic is incorrect"
+    print(c_sources)
     header_sources = [str(f) for f in locate_nuitka_headers()]
     header_sources.append(build_folder)
     # patching build_definitions.h, as we don't need extensions
@@ -173,4 +207,5 @@ def nuitkaify_module(
         include_dirs=header_sources,
         define_macros=NUITKA_MACROS,
         libraries=["m", "dl", "z"],
+        extra_compile_args=list(NUITKA_MINIMAL_FLAGS),
     )
