@@ -196,7 +196,6 @@ def nuitkaify_module(
     assert (
         c_sources
     ), "Nuitka did not produce any C file or build folder path logic is incorrect"
-    print(c_sources)
     header_sources = [str(f) for f in locate_nuitka_headers()]
     header_sources.append(build_folder)
     # patching build_definitions.h, as we don't need extensions

@@ -7,7 +7,10 @@ Defines a distutils compiler based on Zig.
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
+import subprocess
 import sys
 import sysconfig
 import tempfile
@@ -24,6 +27,8 @@ if TYPE_CHECKING:
 
 _SMELT_ROOT: Final[str] = os.path.dirname(__file__)
 PYCONFIG_PATH: Final[str] = os.path.join(_SMELT_ROOT, "pyconfig")
+
+_logger = logging.getLogger(__name__)
 
 
 def get_extension_suffix(target_triple: str) -> str:
@@ -98,11 +103,66 @@ class ZigCompiler(Compiler):
     }
 
 
+def zig_build_lib(
+    name: str,
+    object_files: list[str],
+    crosscompile: SupportedPlatforms | None = None,
+) -> str:
+    """
+    Builds a shared library using Zig's native interface (build-lib)
+    instead of zig cc.
+
+    Parameters
+    ----------
+    name: str
+        The name of the library to build, without extension.
+
+    object_files: list[str]
+        List of object files to include in the shared library.
+
+    crosscompile: SupportedPlatforms | None
+        The target platform for cross-compilation.
+        If None, builds for the current platform.
+
+    Returns
+    -------
+    str
+        The path to the built shared library.
+    """
+    cmd = ["python", "-m", "ziglang", "build-lib"]
+    if crosscompile is not None:
+        cmd.extend(["-target", crosscompile.value])
+    # we need position independant code
+    cmd.append("-dynamic")
+    # as we'll wrapp this into a shared library later
+    cmd.append("-fPIC")
+    # Python itself is only linked at runtime,
+    # so we need to allow undefined symbols
+    cmd.append("-fallow-shlib-undefined")
+    cmd.extend(["--name", name])
+    cmd.extend(object_files)
+
+    _logger.info("Running zig build-lib: \n%s", " ".join(cmd))
+    subprocess.run(cmd)
+    # Note: zig build-lib will produce a file named lib{name}.so
+
+    if crosscompile is not None:
+        suffix = get_extension_suffix(crosscompile.get_triple_name())
+    else:
+        suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    # copying
+    dest_name = f"{name}.{suffix}"
+    # copying the shared library to the expected name
+    shutil.move(f"lib{name}.so", dest_name)
+    return dest_name
+
+
 def compile_extension(
     extension: Path | str | Extension,
     compiler: Compiler | None = None,
     dest_folder: PathLike[str] | None = None,
     crosscompile: SupportedPlatforms | None = None,
+    use_zig_native_interface: bool = False,
 ) -> str:
     """
     Standalone function compiling a low-level extension (C, C++ or Zig)
@@ -181,15 +241,18 @@ def compile_extension(
 
         output_dir = dest_folder or "."
 
-        compiler.link_shared_object(
-            objects,
-            ext_name,
-            output_dir=str(output_dir),
-            libraries=extension_obj.libraries,
-            library_dirs=extension_obj.library_dirs + library_dirs,
-            runtime_library_dirs=extension_obj.runtime_library_dirs,
-            extra_preargs=extra_preargs,
-        )
+        if not use_zig_native_interface:
+            compiler.link_shared_object(
+                objects,
+                ext_name,
+                output_dir=str(output_dir),
+                libraries=extension_obj.libraries,
+                library_dirs=extension_obj.library_dirs + library_dirs,
+                runtime_library_dirs=extension_obj.runtime_library_dirs,
+                extra_preargs=extra_preargs,
+            )
+        else:
+            zig_build_lib(extension.name, objects, crosscompile=crosscompile)
     so_path = os.path.join(output_dir, ext_name)
     assert os.path.exists(so_path)
     return so_path

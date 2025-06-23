@@ -198,5 +198,5 @@ def compile_module(module_path: str) -> None:
         "This entrypoint is under construction and will not produce functional .so"
     )
     ext = nuitkaify_module(module_path, stdout="stdout")
-    so_path = compile_extension(ext)
+    so_path = compile_extension(ext, use_zig_native_interface=True)
     click.echo(f".so path {so_path}")
