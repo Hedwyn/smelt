@@ -151,9 +151,9 @@ def zig_build_lib(
     else:
         suffix = sysconfig.get_config_var("EXT_SUFFIX")
     # copying
-    dest_name = f"{name}.{suffix}"
+    dest_name = f"{name}{suffix}"
     # copying the shared library to the expected name
-    shutil.move(f"lib{name}.so", dest_name)
+    shutil.copy(f"lib{name}.so", dest_name)
     return dest_name
 
 
@@ -254,5 +254,5 @@ def compile_extension(
         else:
             zig_build_lib(extension.name, objects, crosscompile=crosscompile)
     so_path = os.path.join(output_dir, ext_name)
-    assert os.path.exists(so_path)
+    assert os.path.exists(so_path), so_path
     return so_path

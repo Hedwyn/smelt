@@ -17,7 +17,7 @@ import click
 import tomllib
 
 from smelt.backend import SmeltConfig, SmeltError, run_backend
-from smelt.compiler import compile_extension
+from smelt.compiler import SupportedPlatforms, compile_extension
 
 
 class SmeltConfigError(SmeltError): ...
@@ -185,8 +185,14 @@ def nuitkaify(entrypoint_path: str) -> None:
     "module-path",
     type=str,
 )
+@click.option(
+    "-cp",
+    "--crosscompile",
+    type=click.Choice([platform.value for platform in SupportedPlatforms]),
+    default=None,
+)
 @wrap_smelt_errors()
-def compile_module(module_path: str) -> None:
+def compile_module(module_path: str, crosscompile: str | None) -> None:
     """
     Standalone command to run the nuitka wrapper in this package.
     This is mainly intended for manual self-testing, if you only need nuitka
@@ -194,9 +200,12 @@ def compile_module(module_path: str) -> None:
     """
     from smelt.nuitkaify import nuitkaify_module
 
+    target_platform = SupportedPlatforms(crosscompile) if crosscompile else None
     warnings.warn(
         "This entrypoint is under construction and will not produce functional .so"
     )
     ext = nuitkaify_module(module_path, stdout="stdout")
-    so_path = compile_extension(ext, use_zig_native_interface=True)
+    so_path = compile_extension(
+        ext, use_zig_native_interface=True, crosscompile=target_platform
+    )
     click.echo(f".so path {so_path}")
