@@ -8,6 +8,7 @@ Command-line interface for Smelt
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import warnings
 from contextlib import contextmanager
@@ -38,6 +39,50 @@ SMELT_ASCCI_ART: str = r"""
 """
 
 
+def _compile_module_with_nuitka(
+    module_path: str, crosscompile: str | None, shadow: bool
+) -> str:
+    from smelt.nuitkaify import nuitkaify_module
+
+    target_platform = SupportedPlatforms(crosscompile) if crosscompile else None
+    warnings.warn(
+        "This entrypoint is under construction and will not produce functional .so"
+    )
+    ext = nuitkaify_module(module_path, stdout="stdout")
+    so_path = compile_extension(
+        ext, use_zig_native_interface=True, crosscompile=target_platform
+    )
+    if not shadow:
+        return so_path
+
+    source_module_folder = os.path.dirname(module_path)
+    dest_path = os.path.join(source_module_folder, os.path.basename(so_path))
+    shutil.move(so_path, dest_path)
+    return dest_path
+
+
+def _compile_module_with_mypyc(
+    module_path: str, crosscompile: str | None, shadow: bool
+) -> str:
+    from smelt.nuitkaify import nuitkaify_module
+
+    target_platform = SupportedPlatforms(crosscompile) if crosscompile else None
+    warnings.warn(
+        "This entrypoint is under construction and will not produce functional .so"
+    )
+    ext = nuitkaify_module(module_path, stdout="stdout")
+    so_path = compile_extension(
+        ext, use_zig_native_interface=True, crosscompile=target_platform
+    )
+    if not shadow:
+        return so_path
+
+    source_module_folder = os.path.dirname(module_path)
+    dest_path = os.path.join(source_module_folder, os.path.basename(so_path))
+    shutil.move(so_path, dest_path)
+    return dest_path
+
+
 def wrap_smelt_errors(
     should_exist: bool = True, exit_code: int = 1
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
@@ -62,7 +107,7 @@ def parse_config(toml_data: TomlData) -> SmeltConfig:
     """
     Parses a TOML smelt config and returns the dataclass representation.
     TOML data might come from a dedicated smelt config file or from pyproject.toml.
-    For the latter, smelt config should be found under [tool.smelt].
+    For the latter, smelt config should be found under [tool.smelt]
     Use `parse_config_from_pyproject` to get a standalone implementation.
     """
     _c_extensions = toml_data.get("c_extensions", [])
@@ -186,26 +231,45 @@ def nuitkaify(entrypoint_path: str) -> None:
     type=str,
 )
 @click.option(
+    "-b",
+    "--backend",
+    default="nuitka",
+    type=click.Choice(["mypyc", "nuitka"]),
+    help="How to compile the module",
+)
+@click.option(
     "-cp",
     "--crosscompile",
     type=click.Choice([platform.value for platform in SupportedPlatforms]),
     default=None,
 )
+@click.option(
+    "-s",
+    "--shadow",
+    type=bool,
+    help=(
+        "If enabled, places the compiled .so next to the source module; "
+        "The interpreter will then import it over the original module"
+    ),
+    is_flag=True,
+    default=None,
+)
 @wrap_smelt_errors()
-def compile_module(module_path: str, crosscompile: str | None) -> None:
+def compile_module(
+    module_path: str, backend: str, crosscompile: str | None, shadow: bool
+) -> None:
     """
     Standalone command to run the nuitka wrapper in this package.
     This is mainly intended for manual self-testing, if you only need nuitka
     features you should probably just call nuitka directly.
     """
-    from smelt.nuitkaify import nuitkaify_module
-
-    target_platform = SupportedPlatforms(crosscompile) if crosscompile else None
-    warnings.warn(
-        "This entrypoint is under construction and will not produce functional .so"
-    )
-    ext = nuitkaify_module(module_path, stdout="stdout")
-    so_path = compile_extension(
-        ext, use_zig_native_interface=True, crosscompile=target_platform
-    )
-    click.echo(f".so path {so_path}")
+    if backend == "nuitka":
+        so_path = _compile_module_with_nuitka(module_path, crosscompile, shadow)
+    elif backend == "mypyc":
+        raise NotImplementedError(
+            "Mypyc compilation is not yet implemented in the smelt CLI "
+            "Use `smelt build_standalone_binary` command directly instead"
+        )
+    else:
+        assert False, f"Unknown backend: {backend}"
+    click.echo(f"Compiled extension path: {so_path}")
