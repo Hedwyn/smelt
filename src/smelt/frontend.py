@@ -20,6 +20,7 @@ from mypyc.build import mypycify
 
 from smelt.backend import SmeltConfig, run_backend
 from smelt.compiler import SupportedPlatforms, compile_extension
+from smelt.mypycify import mypycify_module
 from smelt.utils import SmeltError
 
 
@@ -229,8 +230,17 @@ def nuitkaify(entrypoint_path: str) -> None:
 
 @smelt.command()
 @click.argument(
-    "module-path",
+    "module-import-path",
     type=str,
+)
+@click.option(
+    "-p",
+    "--package-path",
+    default=".",
+    type=str,
+    help="Path to the package root. "
+    "If your package uses src layout or similar, "
+    "you should give the path to the source code root folder (i.e., src)",
 )
 @click.option(
     "-b",
@@ -258,23 +268,50 @@ def nuitkaify(entrypoint_path: str) -> None:
 )
 @wrap_smelt_errors()
 def compile_module(
-    module_path: str, backend: str, crosscompile: str | None, shadow: bool
+    module_import_path: str,
+    package_path: str,
+    backend: str,
+    crosscompile: str | None,
+    shadow: bool,
 ) -> None:
     """
     Standalone command to run the nuitka wrapper in this package.
     This is mainly intended for manual self-testing, if you only need nuitka
     features you should probably just call nuitka directly.
     """
+    module_full_path = os.path.join(
+        package_path, module_import_path.replace(".", "/") + ".py"
+    )
+    click.echo(f"Compiling module {module_full_path}")
     if backend == "nuitka":
-        so_path = _compile_module_with_nuitka(module_path, crosscompile, shadow)
+        so_path = _compile_module_with_nuitka(module_full_path, crosscompile, shadow)
+        click.echo(f"Compiled nuitka extension path: {so_path}")
+
     elif backend == "mypyc":
         target_platform = SupportedPlatforms(crosscompile) if crosscompile else None
-        for ext in mypycify([module_path], include_runtime_files=True):
-            so_path = compile_extension(
-                ext, use_zig_native_interface=True, crosscompile=target_platform
+        target_triple_name = (
+            None if target_platform is None else target_platform.get_triple_name()
+        )
+        mypyc_ext = mypycify_module(
+            module_import_path,
+            module_full_path,
+        )
+        # for ext in mypycify([module_import_path], include_runtime_files=True):
+        if (runtime := mypyc_ext.runtime) is not None:
+            runtime_so_path = compile_extension(
+                runtime, use_zig_native_interface=True, crosscompile=target_platform
             )
-            click.echo(f"Compiled extension path: {so_path}")
+            dest_path = mypyc_ext.get_runtime_dest_path(target_triple_name)
+            shutil.move(runtime_so_path, dest_path)
+            click.echo(f"Compiled mypyc runtime path: {runtime_so_path}")
 
+        module_so_path = compile_extension(
+            mypyc_ext.extension,
+            use_zig_native_interface=True,
+            crosscompile=target_platform,
+        )
+        dest_path = mypyc_ext.get_dest_path(target_triple_name)
+        shutil.move(module_so_path, dest_path)
+        click.echo(f"Compiled mypyc module path: {dest_path}")
     else:
         assert False, f"Unknown backend: {backend}"
-    click.echo(f"Compiled extension path: {so_path}")

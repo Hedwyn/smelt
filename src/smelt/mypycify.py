@@ -47,7 +47,22 @@ class MypycExtension:
             if target_triple is None
             else get_extension_suffix(target_triple)
         )
-        ext_so_name = f"{self.name}.{suffix}"
+        ext_so_name = f"{self.name}{suffix}"
+        return self.dest_folder / ext_so_name
+
+    def get_runtime_dest_path(self, target_triple: str | None = None) -> Path:
+        """
+        Returns
+        -------
+        Path
+            Full path for the final runtime .so file.
+        """
+        suffix = (
+            sysconfig.get_config_var("EXT_SUFFIX")
+            if target_triple is None
+            else get_extension_suffix(target_triple)
+        )
+        ext_so_name = f"{self.name}__mypyc{suffix}"
         return self.dest_folder / ext_so_name
 
 
