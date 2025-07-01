@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import os
 import shutil
+import sys
 import tempfile
 from contextlib import contextmanager
 from types import ModuleType
@@ -24,6 +25,25 @@ class SmeltError(Exception):
 
 
 class SmeltMissingModule(SmeltError): ...
+
+
+def get_extension_suffix(target_triple: str) -> str:
+    """
+    Generate the C extension module filename.
+
+    Parameters
+    ----------
+    target_triple: str
+        The target triple, e.g., 'aarch64-linux-gnu'.
+
+    Returns
+    -------
+    str
+        The extension filename, e.g., '.cpython-312-aarch64-linux-gnu.so'
+    """
+    major = sys.version_info.major
+    minor = sys.version_info.minor
+    return f".cpython-{major}{minor}-{target_triple}.so"
 
 
 @contextmanager

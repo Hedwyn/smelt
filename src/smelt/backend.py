@@ -14,11 +14,10 @@ import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from mypyc.build import mypycify
-
 from smelt.compiler import compile_extension
+from smelt.mypycify import mypycify_module
 from smelt.nuitkaify import Stdout, compile_with_nuitka
-from smelt.utils import SmeltError, SmeltMissingModule, import_shadowed_module
+from smelt.utils import SmeltMissingModule
 
 # TODO: replace .so references to a variable that's set to .so
 # for Unix-like and .dll for Windows
@@ -78,25 +77,12 @@ def run_backend(
     # as it would be invisible otherwise
     mypy_runtime_extensions: list[str] = []
     for mypyc_extension, ext_path in config.mypyc.items():
-        with import_shadowed_module(mypyc_extension) as mod:
-            # TODO: seems that mypy detects the package and names the module package.mod
-            # automatically ?
-            mypyc_extpath = os.path.join(project_root, ext_path)
-            assert mod.__file__ is not None
-            extensions = mypycify([mypyc_extpath], include_runtime_files=True)
-            mod_folder = Path(mod.__file__).parent
-            for ext in extensions:
-                ext_name = ext.name.split(".")[-1]
-                is_runtime = "__mypyc" in ext_name
-                built_so_path = compile_extension(ext)
-                built_so_path.replace(mod.__name__, ext_name)
-                # TODO: see above
-                so_final_path = mod_folder / os.path.basename(built_so_path).replace(
-                    ext.name, ext_name
-                )
-                shutil.move(built_so_path, so_final_path)
-                if is_runtime:
-                    mypy_runtime_extensions.append(ext.name)
+        full_ext_path = os.path.join(project_root, ext_path)
+        mypyc_ext = mypycify_module(mypyc_extension, full_ext_path)
+        module_so_path = compile_extension(mypyc_ext.extension)
+        shutil.move(module_so_path, str(mypyc_ext.get_dest_path()))
+        if (runtime := mypyc_ext.runtime) is not None:
+            mypy_runtime_extensions.append(runtime.name)
     # nuitka compile
     entrypoint = config.entrypoint
     try:

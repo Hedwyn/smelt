@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, ClassVar, Final
 
 from setuptools import Extension
 
+from smelt.utils import get_extension_suffix
+
 if TYPE_CHECKING:
     from os import PathLike
 
@@ -29,25 +31,6 @@ _SMELT_ROOT: Final[str] = os.path.dirname(__file__)
 PYCONFIG_PATH: Final[str] = os.path.join(_SMELT_ROOT, "pyconfig")
 
 _logger = logging.getLogger(__name__)
-
-
-def get_extension_suffix(target_triple: str) -> str:
-    """
-    Generate the C extension module filename.
-
-    Parameters
-    ----------
-    target_triple: str
-        The target triple, e.g., 'aarch64-linux-gnu'.
-
-    Returns
-    -------
-    str
-        The extension filename, e.g., '.cpython-312-aarch64-linux-gnu.so'
-    """
-    major = sys.version_info.major
-    minor = sys.version_info.minor
-    return f".cpython-{major}{minor}-{target_triple}.so"
 
 
 class SupportedPlatforms(StrEnum):
