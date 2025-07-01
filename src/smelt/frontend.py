@@ -16,9 +16,11 @@ from typing import Callable, Generator, ParamSpec, TypeVar, cast
 
 import click
 import tomllib
+from mypyc.build import mypycify
 
-from smelt.backend import SmeltConfig, SmeltError, run_backend
+from smelt.backend import SmeltConfig, run_backend
 from smelt.compiler import SupportedPlatforms, compile_extension
+from smelt.utils import SmeltError
 
 
 class SmeltConfigError(SmeltError): ...
@@ -266,10 +268,13 @@ def compile_module(
     if backend == "nuitka":
         so_path = _compile_module_with_nuitka(module_path, crosscompile, shadow)
     elif backend == "mypyc":
-        raise NotImplementedError(
-            "Mypyc compilation is not yet implemented in the smelt CLI "
-            "Use `smelt build_standalone_binary` command directly instead"
-        )
+        target_platform = SupportedPlatforms(crosscompile) if crosscompile else None
+        for ext in mypycify([module_path], include_runtime_files=True):
+            so_path = compile_extension(
+                ext, use_zig_native_interface=True, crosscompile=target_platform
+            )
+            click.echo(f"Compiled extension path: {so_path}")
+
     else:
         assert False, f"Unknown backend: {backend}"
     click.echo(f"Compiled extension path: {so_path}")
