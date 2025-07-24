@@ -5,7 +5,7 @@ version = "0.1.0"
 description = "Binary orchestrator for Python packages"
 requires-python = ">=3.12"
 authors = [{ name = "Baptiste Pestourie" }]
-
+readme = "README.md"
 dependencies = ["setuptools", "ziglang"]
 
 [project.scripts]
