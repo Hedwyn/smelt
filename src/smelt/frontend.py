@@ -6,7 +6,7 @@ Command-line interface for Smelt
 """
 
 from __future__ import annotations
-
+import logging
 import os
 import shutil
 import sys
@@ -199,8 +199,16 @@ def show_config(path: str) -> None:
     default=".",
     type=str,
 )
+@click.option(
+    "-l",
+    "--logging-level",
+    type=click.Choice(list(logging._nameToLevel), case_sensitive=False),
+    help="Logging level to apply. Logs are emitted to stdout",
+)
 @wrap_smelt_errors()
-def build_standalone_binary(package_path: str) -> None:
+def build_standalone_binary(package_path: str, logging_level: str) -> None:
+    levelno = logging._nameToLevel[logging_level]
+    logging.basicConfig(level=levelno)
     try:
         with open(os.path.join(package_path, "pyproject.toml"), "rb") as f:
             toml_data = tomllib.load(f)
