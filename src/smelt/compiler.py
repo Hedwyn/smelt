@@ -140,6 +140,56 @@ def zig_build_lib(
     return dest_name
 
 
+def zig_build_exe(
+    name: str,
+    object_files: list[str],
+    crosscompile: SupportedPlatforms | None = None,
+) -> str:
+    """
+    Builds a shared library using Zig's native interface (build-lib)
+    instead of zig cc.
+
+    Parameters
+    ----------
+    name: str
+        The name of the library to build, without extension.
+
+    object_files: list[str]
+        List of object files to include in the shared library.
+
+    crosscompile: SupportedPlatforms | None
+        The target platform for cross-compilation.
+        If None, builds for the current platform.
+
+    Returns
+    -------
+    str
+        The path to the built shared library.
+    """
+    cmd = ["python", "-m", "ziglang", "build-exe"]
+    if crosscompile is not None:
+        cmd.extend(["-target", crosscompile.value])
+    # we need position independant code
+    # Python itself is only linked at runtime,
+    # so we need to allow undefined symbols
+    cmd.extend(["--name", name])
+    cmd.extend(object_files)
+
+    _logger.info("Running zig build-lib: \n%s", " ".join(cmd))
+    subprocess.run(cmd)
+    # Note: zig build-lib will produce a file named lib{name}.so
+
+    if crosscompile is not None:
+        suffix = get_extension_suffix(crosscompile.get_triple_name())
+    else:
+        suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    # copying
+    dest_name = f"{name}{suffix}"
+    # copying the shared library to the expected name
+    # shutil.copy(f"lib{name}.so", dest_name)
+    return dest_name
+
+
 def compile_extension(
     extension: Path | str | Extension,
     compiler: Compiler | None = None,
@@ -180,7 +230,7 @@ def compile_extension(
         if extension.suffix not in compiler.src_extensions:
             raise ValueError(
                 f"Unsupported extension: {extension.suffix} "
-                f"Supported values: {",".join(compiler.src_extensions)}"
+                f"Supported values: {','.join(compiler.src_extensions)}"
             )
         extension_obj = Extension(
             name=extension.name.replace(extension.suffix, ""),
