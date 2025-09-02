@@ -41,6 +41,14 @@ SMELT_ASCCI_ART: str = r"""
 
 """
 
+add_logging_option = click.option(
+    "-l",
+    "--logging-level",
+    type=click.Choice(list(logging._nameToLevel), case_sensitive=False),
+    help="Logging level to apply. Logs are emitted to stdout",
+    default="warning",
+)
+
 
 def _compile_module_with_nuitka(
     module_path: str, crosscompile: str | None, shadow: bool
@@ -178,11 +186,16 @@ def smelt() -> None:
     default=".",
     type=str,
 )
+@add_logging_option
 @wrap_smelt_errors()
-def show_config(path: str) -> None:
+def show_config(path: str, logging_level: str) -> None:
     """
     Shows the smelt config as defined in the passed file
     """
+
+    levelno = logging._nameToLevel[logging_level]
+    logging.basicConfig(level=levelno)
+
     try:
         with open(os.path.join(path, "pyproject.toml"), "rb") as f:
             toml_data = tomllib.load(f)
@@ -199,12 +212,7 @@ def show_config(path: str) -> None:
     default=".",
     type=str,
 )
-@click.option(
-    "-l",
-    "--logging-level",
-    type=click.Choice(list(logging._nameToLevel), case_sensitive=False),
-    help="Logging level to apply. Logs are emitted to stdout",
-)
+@add_logging_option
 @wrap_smelt_errors()
 def build_standalone_binary(package_path: str, logging_level: str) -> None:
     levelno = logging._nameToLevel[logging_level]
@@ -224,8 +232,9 @@ def build_standalone_binary(package_path: str, logging_level: str) -> None:
     "entrypoint-path",
     type=str,
 )
+@add_logging_option
 @wrap_smelt_errors()
-def nuitkaify(entrypoint_path: str) -> None:
+def nuitkaify(entrypoint_path: str, logging_level: str) -> None:
     """
     Standalone command to run the nuitka wrapper in this package.
     This is mainly intended for manual self-testing, if you only need nuitka
@@ -233,6 +242,8 @@ def nuitkaify(entrypoint_path: str) -> None:
     """
     from smelt.nuitkaify import compile_with_nuitka
 
+    levelno = logging._nameToLevel[logging_level]
+    logging.basicConfig(level=levelno)
     compile_with_nuitka(entrypoint_path, stdout="stdout")
 
 
