@@ -6,7 +6,7 @@ Common utilities for this package.
 """
 
 from __future__ import annotations
-
+import logging
 import importlib
 import os
 import shutil
@@ -15,6 +15,8 @@ import tempfile
 from contextlib import contextmanager
 from types import ModuleType
 from typing import Generator
+
+_logger = logging.getLogger(__name__)
 
 
 # --- Errors ---
@@ -74,6 +76,7 @@ def import_shadowed_module(path: str) -> Generator[ModuleType, None, None]:
         else:
             backup_path = os.path.join(tmp, os.path.basename(mod_path))
             shutil.copy(mod_path, backup_path)
+            _logger.debug("Removing %s...", mod_path)
             os.remove(mod_path)
             os.sync()
 
