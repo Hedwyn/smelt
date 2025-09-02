@@ -18,7 +18,7 @@ import click
 import tomllib
 from mypyc.build import mypycify
 
-from smelt.backend import SmeltConfig, run_backend
+from smelt.backend import SmeltConfig, run_backend, compile_mypyc_extensions
 from smelt.compiler import SupportedPlatforms, compile_extension
 from smelt.mypycify import mypycify_module
 from smelt.utils import SmeltError
@@ -225,6 +225,28 @@ def build_standalone_binary(package_path: str, logging_level: str) -> None:
         return
     config = parse_config_from_pyproject(toml_data)
     run_backend(config, stdout="stdout", project_root=package_path)
+
+
+@smelt.command()
+@click.option(
+    "-p",
+    "--package-path",
+    default=".",
+    type=str,
+)
+@add_logging_option
+@wrap_smelt_errors()
+def compile_all_mypyc_extensions(package_path: str, logging_level: str) -> None:
+    levelno = logging._nameToLevel[logging_level]
+    logging.basicConfig(level=levelno)
+    try:
+        with open(os.path.join(package_path, "pyproject.toml"), "rb") as f:
+            toml_data = tomllib.load(f)
+    except FileNotFoundError:
+        click.echo("No pyproject.toml not found.")
+        return
+    config = parse_config_from_pyproject(toml_data)
+    compile_mypyc_extensions(package_path, mypyc_config=config.mypyc)
 
 
 @smelt.command()

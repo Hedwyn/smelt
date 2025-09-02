@@ -8,6 +8,7 @@ Build backend implementation for smelt.
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import shutil
 import warnings
@@ -15,12 +16,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from smelt.compiler import compile_extension
-from smelt.mypycify import mypycify_module
+from smelt.mypycify import MypycExtension, mypycify_module
 from smelt.nuitkaify import Stdout, compile_with_nuitka
 from smelt.utils import SmeltMissingModule
 
 # TODO: replace .so references to a variable that's set to .so
 # for Unix-like and .dll for Windows
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -47,6 +50,29 @@ class SmeltConfig:
                 )
             lines.append(f"{field_name:20}: {value}")
         return "\n".join(lines)
+
+
+def compile_mypyc_extensions(
+    project_root: str | Path, mypyc_config: dict[str, str]
+) -> list[MypycExtension]:
+    """
+    Compiles all mypy extensions defined in `mypyc_config` for the project found at `project_root`
+    """
+
+    built_extensions: list[MypycExtension] = []
+    for mypyc_extension, ext_path in mypyc_config.items():
+        full_ext_path = os.path.join(project_root, ext_path)
+        mypyc_ext = mypycify_module(mypyc_extension, full_ext_path)
+        module_so_path = compile_extension(mypyc_ext.extension)
+        runtime_so_path = compile_extension(mypyc_ext.runtime)
+        so_dest_path = str(mypyc_ext.get_dest_path())
+        runtime_dest_path = str(mypyc_ext.get_runtime_dest_path())
+        shutil.move(runtime_so_path, runtime_dest_path)
+        shutil.move(module_so_path, so_dest_path)
+        _logger.info("Built extensions %s @ %s", mypyc_extension, so_dest_path)
+        if mypyc_ext.runtime:
+            _logger.info("-> %s runtime: %s", mypyc_extension, runtime_dest_path)
+    return built_extensions
 
 
 def run_backend(
@@ -90,9 +116,9 @@ def run_backend(
     except ImportError as exc:
         msg = f"Failed to import entrypoint: {entrypoint}"
         raise SmeltMissingModule(msg) from exc
-    assert (
-        entrypoint_mod.__file__ is not None
-    ), f"Failed to locate entrypoint: {entrypoint}"
+    assert entrypoint_mod.__file__ is not None, (
+        f"Failed to locate entrypoint: {entrypoint}"
+    )
     compile_with_nuitka(
         entrypoint_mod.__file__, stdout=stdout, include_modules=mypy_runtime_extensions
     )
