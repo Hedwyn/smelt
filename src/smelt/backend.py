@@ -79,6 +79,8 @@ def run_backend(
     stdout: Stdout | None = None,
     project_root: Path | str = ".",
     strategy: ModpathType = ModpathType.IMPORT,
+    *,
+    without_entrypoint: bool = False,
 ) -> None:
     """
     Runs the whole backend pipeline:
@@ -106,13 +108,14 @@ def run_backend(
     mypy_runtime_extensions: list[str] = []
     for mypyc_extension, ext_path in config.mypyc.items():
         full_ext_path = os.path.join(project_root, ext_path)
-        mypyc_ext = mypycify_module(mypyc_extension, full_ext_path)
+        mypyc_ext = mypycify_module(mypyc_extension, full_ext_path, strategy=strategy)
         module_so_path = compile_extension(mypyc_ext.extension)
         shutil.move(module_so_path, str(mypyc_ext.get_dest_path()))
         if (runtime := mypyc_ext.runtime) is not None:
             mypy_runtime_extensions.append(runtime.name)
     # nuitka compile
-    entrypoint_file = locate_module(config.entrypoint, strategy=strategy)
-    compile_with_nuitka(
-        entrypoint_file, stdout=stdout, include_modules=mypy_runtime_extensions
-    )
+    if not without_entrypoint:
+        entrypoint_file = locate_module(config.entrypoint, strategy=strategy)
+        compile_with_nuitka(
+            entrypoint_file, stdout=stdout, include_modules=mypy_runtime_extensions
+        )
