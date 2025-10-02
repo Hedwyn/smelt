@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling", "smelt"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smelt-hatchling-demo"
+version = "0.1.0"
+description = "A minimal package setup using smelt + hatchling hook"
+requires-python = ">=3.12"
+authors = [{ name = "Baptiste Pestourie" }]
+dependencies = ["click"]
+
+[project.scripts]
+hatchdemo = "hatchdemo.cli:hatchdemo"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hatchdemo"]
+
+[tool.hatch.build.hooks.smelt]
+entrypoint = "hatchdemo.cli"
+
+[tool.hatch.build.hooks.smelt.c_extensions]
+"hatchdemo.hello" = "src/hatchdemo/hello.c"
+
+[tool.hatch.build.hooks.smelt.mypyc]
+"hatchdemo.fib" = "src/hatchdemo/fib.py"
