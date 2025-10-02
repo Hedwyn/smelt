@@ -133,12 +133,20 @@ def compile_with_nuitka(
         elif stdout == "stdout":
             print(decoded_line)
 
-    if proc.returncode is not None:
-        _logger.info("[Nuitka]: %d", proc.returncode)
+    if proc.returncode is None:
+        proc.wait(timeout=1.0)
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Nuitka failed with exitcode {proc.returncode}: {' '.join(cmd)}"
+        )
     expected_extension = ".exe" if sys.platform == "Windows" else ".bin"
     bin_path = os.path.basename(path).replace(".py", expected_extension)
-    assert os.path.exists(bin_path)
-    return bin_path
+    absolute_bin_path = os.path.join(os.getcwd(), bin_path)
+    assert os.path.exists(absolute_bin_path), (
+        f"Nuitka binary not found at {absolute_bin_path}"
+    )
+    return absolute_bin_path
 
 
 def nuitkaify_module(
