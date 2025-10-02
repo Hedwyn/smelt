@@ -15,6 +15,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from enum import Enum, auto
+from pathlib import Path
 from types import ModuleType
 from typing import Generator, Literal, NewType, assert_never, cast, overload
 
@@ -110,6 +111,16 @@ class ModpathType(Enum):
     FS = auto()
 
 
+def get_modpath_type(path: str) -> ModpathType:
+    """
+    Detects whether the passed type of the given `path`.
+    """
+    # TODO: stricter checks
+    if path.endswith(".py"):
+        return ModpathType.FS
+    return ModpathType.IMPORT
+
+
 @overload
 def toggle_mod_path(path: str, to_type: Literal[ModpathType.IMPORT]) -> ImportPath: ...
 
@@ -123,11 +134,18 @@ def toggle_mod_path(path: str, to_type: ModpathType) -> ImportPath | FsPath:
     Changes the path to a module between 'import' style paths
     (a.b.c) and filesystem type (a/b/b).
     """
+    if get_modpath_type(path) == to_type:
+        return cast(ImportPath | FsPath, path)
+
     match to_type:
         case ModpathType.IMPORT:
-            return cast(ImportPath, path.replace("/", "."))
+            *parents, modfile = path.split("/")
+            modfile = modfile.replace(".py", "")
+            return cast(ImportPath, ".".join([*parents, modfile]))
+
         case ModpathType.FS:
-            return cast(FsPath, path.replace(".", "/"))
+            return cast(FsPath, path.replace(".", "/") + ".py")
+
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -143,7 +161,7 @@ def locate_module(mod_path: str, strategy: ModpathType = ModpathType.IMPORT) -> 
             return locate_module_by_import_path(toggle_mod_path(mod_path, strategy))
 
         case ModpathType.FS:
-            return os.path.join(os.getcwd(), toggle_mod_path(mod_path, strategy))
+            return find_module_in_layout(toggle_mod_path(mod_path, strategy))
 
         case _ as unreachable:
             assert_never(unreachable)
@@ -161,3 +179,22 @@ def locate_module_by_import_path(mod_import_path: ImportPath) -> str:
         raise SmeltMissingModule(msg) from exc
     assert module.__file__ is not None, f"Failed to locate module: {mod_import_path}"
     return module.__file__
+
+
+def find_module_in_layout(mod_path: FsPath, package_root: str | None = None) -> str:
+    """
+    Given a module path on the filesystem,
+    tries resolving that location within the package layout.
+    """
+    root = Path(package_root) if package_root else Path.cwd()
+    src_location = root / "src"
+    if src_location.exists():
+        mod_potential_location = src_location / mod_path
+        if mod_potential_location.exists():
+            return str(mod_potential_location)
+
+    mod_potential_location = root / mod_path
+    if mod_potential_location.exists():
+        return str(mod_potential_location)
+
+    raise FileNotFoundError(f"Failed to locate {mod_path}")
