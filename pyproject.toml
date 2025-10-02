@@ -15,8 +15,8 @@ Homepage = "https://github.com/Hedwyn/smelt"
 
 [project.optional-dependencies]
 tests = ["pytest", "mypy[mypyc]"]
-cli=["click"]
-nuitka= ["nuitka"]
+cli = ["click"]
+nuitka = ["nuitka"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -25,3 +25,6 @@ package-dir = { "" = "src" }
 # There's on pyconfig.h per platform + python combination
 # Path is pyconfig/platform/python/pyconfig.h
 "smelt.pyconfig" = ["*/*/pyconfig.h"]
+
+[project.entry-points.hatch]
+smelt = "smelt.build_backends.hatch"

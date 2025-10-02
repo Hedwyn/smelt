@@ -7,7 +7,6 @@ Build backend implementation for smelt.
 
 from __future__ import annotations
 
-import importlib
 import logging
 import os
 import shutil
@@ -18,7 +17,7 @@ from pathlib import Path
 from smelt.compiler import compile_extension
 from smelt.mypycify import MypycExtension, mypycify_module
 from smelt.nuitkaify import Stdout, compile_with_nuitka
-from smelt.utils import SmeltMissingModule
+from smelt.utils import ModpathType, locate_module
 
 # TODO: replace .so references to a variable that's set to .so
 # for Unix-like and .dll for Windows
@@ -76,7 +75,10 @@ def compile_mypyc_extensions(
 
 
 def run_backend(
-    config: SmeltConfig, stdout: Stdout | None = None, project_root: Path | str = "."
+    config: SmeltConfig,
+    stdout: Stdout | None = None,
+    project_root: Path | str = ".",
+    strategy: ModpathType = ModpathType.IMPORT,
 ) -> None:
     """
     Runs the whole backend pipeline:
@@ -110,15 +112,7 @@ def run_backend(
         if (runtime := mypyc_ext.runtime) is not None:
             mypy_runtime_extensions.append(runtime.name)
     # nuitka compile
-    entrypoint = config.entrypoint
-    try:
-        entrypoint_mod = importlib.import_module(entrypoint)
-    except ImportError as exc:
-        msg = f"Failed to import entrypoint: {entrypoint}"
-        raise SmeltMissingModule(msg) from exc
-    assert entrypoint_mod.__file__ is not None, (
-        f"Failed to locate entrypoint: {entrypoint}"
-    )
+    entrypoint_file = locate_module(config.entrypoint, strategy=strategy)
     compile_with_nuitka(
-        entrypoint_mod.__file__, stdout=stdout, include_modules=mypy_runtime_extensions
+        entrypoint_file, stdout=stdout, include_modules=mypy_runtime_extensions
     )

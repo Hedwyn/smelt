@@ -6,15 +6,17 @@ Common utilities for this package.
 """
 
 from __future__ import annotations
-import logging
+
 import importlib
+import logging
 import os
 import shutil
 import sys
 import tempfile
 from contextlib import contextmanager
+from enum import Enum, auto
 from types import ModuleType
-from typing import Generator
+from typing import Generator, Literal, NewType, assert_never, cast, overload
 
 _logger = logging.getLogger(__name__)
 
@@ -89,3 +91,73 @@ def import_shadowed_module(path: str) -> Generator[ModuleType, None, None]:
             except ImportError as exc:
                 msg = f"Failed to import {path} while trying to mypycify"
                 raise SmeltMissingModule(msg) from exc
+
+
+ImportPath = NewType("ImportPath", str)
+FsPath = NewType("FsPath", str)
+
+
+class ModpathType(Enum):
+    """
+    How locations of modules are passed:
+
+    `IMPORT` means the module path is given as it would be used
+    in a import statement.
+    `FS` means the module is passed as a relative path.
+    """
+
+    IMPORT = auto()
+    FS = auto()
+
+
+@overload
+def toggle_mod_path(path: str, to_type: Literal[ModpathType.IMPORT]) -> ImportPath: ...
+
+
+@overload
+def toggle_mod_path(path: str, to_type: Literal[ModpathType.FS]) -> FsPath: ...
+
+
+def toggle_mod_path(path: str, to_type: ModpathType) -> ImportPath | FsPath:
+    """
+    Changes the path to a module between 'import' style paths
+    (a.b.c) and filesystem type (a/b/b).
+    """
+    match to_type:
+        case ModpathType.IMPORT:
+            return cast(ImportPath, path.replace("/", "."))
+        case ModpathType.FS:
+            return cast(FsPath, path.replace(".", "/"))
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def locate_module(mod_path: str, strategy: ModpathType = ModpathType.IMPORT) -> str:
+    """
+    Returns the full path to module at `mod_path`.
+    If `mod_path` is passed a relative filepath, returns the absolute path.
+    If it is passed as an import path ('.' seperated), tries importing and
+    locates from the import"""
+    match strategy:
+        case ModpathType.IMPORT:
+            return locate_module_by_import_path(toggle_mod_path(mod_path, strategy))
+
+        case ModpathType.FS:
+            return os.path.join(os.getcwd(), toggle_mod_path(mod_path, strategy))
+
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def locate_module_by_import_path(mod_import_path: ImportPath) -> str:
+    """
+    Given a module import path as package.submodule.module,
+    returns the location of on the filesystem of the imported module.
+    """
+    try:
+        module = importlib.import_module(mod_import_path)
+    except ImportError as exc:
+        msg = f"Failed to import module: {mod_import_path}"
+        raise SmeltMissingModule(msg) from exc
+    assert module.__file__ is not None, f"Failed to locate module: {mod_import_path}"
+    return module.__file__
