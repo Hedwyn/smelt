@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "smelt"]
+requires = ["hatchling", "smelt", "mypy[mypyc]"]
 build-backend = "hatchling.build"
 
 [project]
