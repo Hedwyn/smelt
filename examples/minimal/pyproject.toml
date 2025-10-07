@@ -4,19 +4,23 @@ version = "0.1.0"
 description = "A minimalist package setup using smelt"
 requires-python = ">=3.12"
 authors = [{ name = "Baptiste Pestourie" }]
-dependencies=["click"]
+dependencies = ["click"]
 
 [project.scripts]
-minimal-demo="minimal.cli:minimal"
+minimal-demo = "minimal.cli:minimal"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
 
 [tool.smelt]
-entrypoint="minimal.cli"
+entrypoint = "minimal.cli"
 
 [tool.smelt.c_extensions]
-"minimal.hello"="src/minimal/hello.c"
+"minimal.hello" = "src/minimal/hello.c"
 
 [tool.smelt.mypyc]
 "minimal.fib" = "src/minimal/fib.py"
+
+[tool.smelt.cython]
+modules = ["src/minimal/fib_cython.py"]
+remapped_modules = { "src/minimal/fib.py" = "minimal.fib_cython_nopyx" }

@@ -14,6 +14,8 @@ import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from setuptools import Extension
+
 from smelt.compiler import compile_extension
 from smelt.mypycify import MypycExtension, mypycify_module
 from smelt.nuitkaify import Stdout, compile_with_nuitka
@@ -32,6 +34,7 @@ class SmeltConfig:
     """
 
     mypyc: dict[str, str]
+    cython: dict[str, str]
     c_extensions: dict[str, str]
     entrypoint: str
 
@@ -72,6 +75,26 @@ def compile_mypyc_extensions(
         if mypyc_ext.runtime:
             _logger.info("-> %s runtime: %s", mypyc_extension, runtime_dest_path)
     return built_extensions
+
+
+def compile_cython_extensions(cython_config: dict[str, str]) -> list[Extension]:
+    try:
+        from Cython.Build import cythonize
+    except ImportError as exc:
+        raise ImportError(
+            "Cython is not installed. consider installing smelt with [cython] extra"
+        ) from exc
+    extensions: list[Extension] = []
+    modules = cython_config.get("modules", [])
+    remapped_modules = cython_config.get("remapped_modules", [])
+    cython_options = cython_config.get("cython_options", {})
+    assert (isinstance(opt_name, str) for opt_name in cython_options)
+    extensions.extend(cythonize(modules, **cython_options))
+    for source, module_path in remapped_modules:
+        extension = cythonize(source, **cython_options)
+        extension.name = module_path
+        extensions.append(extension)
+    return extensions
 
 
 def run_backend(

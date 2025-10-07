@@ -137,6 +137,8 @@ def parse_config(toml_data: TomlData) -> SmeltConfig:
     ), _mypyc
     mypyc = cast(dict[str, str], _mypyc)
 
+    cython = cast(dict[str, str], toml_data.get("cython", {}))
+
     entrypoint = toml_data.get("entrypoint", None)
     if entrypoint is None:
         # for now, raising
@@ -146,6 +148,7 @@ def parse_config(toml_data: TomlData) -> SmeltConfig:
         c_extensions=c_extensions,
         mypyc=mypyc,
         entrypoint=entrypoint,
+        cython=cython,
     )
 
 
