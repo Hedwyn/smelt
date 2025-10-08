@@ -143,9 +143,9 @@ def compile_with_nuitka(
     expected_extension = ".exe" if sys.platform == "Windows" else ".bin"
     bin_path = os.path.basename(path).replace(".py", expected_extension)
     absolute_bin_path = os.path.join(os.getcwd(), bin_path)
-    assert os.path.exists(absolute_bin_path), (
-        f"Nuitka binary not found at {absolute_bin_path}"
-    )
+    assert os.path.exists(
+        absolute_bin_path
+    ), f"Nuitka binary not found at {absolute_bin_path}"
     return absolute_bin_path
 
 
@@ -203,9 +203,9 @@ def nuitkaify_module(
     build_folder = modname.replace(".py", ".build")
     assert os.path.exists(build_folder)
     c_sources = [str(src) for src in iterate_nuitka_c_sources(build_folder)]
-    assert c_sources, (
-        "Nuitka did not produce any C file or build folder path logic is incorrect"
-    )
+    assert (
+        c_sources
+    ), "Nuitka did not produce any C file or build folder path logic is incorrect"
     header_sources = [str(f) for f in locate_nuitka_headers()]
     header_sources.append(build_folder)
     # patching build_definitions.h, as we don't need extensions

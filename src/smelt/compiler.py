@@ -15,11 +15,11 @@ import sys
 import sysconfig
 import tempfile
 import warnings
-from distutils.compilers.C.unix import Compiler
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Final
 
+from distutils.compilers.C.unix import Compiler
 from setuptools import Extension
 
 from smelt.utils import get_extension_suffix

@@ -17,9 +17,9 @@ from pathlib import Path
 from setuptools import Extension
 
 from smelt.compiler import compile_extension
-from smelt.mypycify import MypycExtension, mypycify_module
+from smelt.mypycify import mypycify_module
 from smelt.nuitkaify import Stdout, compile_with_nuitka
-from smelt.utils import ModpathType, locate_module
+from smelt.utils import GenericExtension, ModpathType, locate_module
 
 # TODO: replace .so references to a variable that's set to .so
 # for Unix-like and .dll for Windows
@@ -56,12 +56,12 @@ class SmeltConfig:
 
 def compile_mypyc_extensions(
     project_root: str | Path, mypyc_config: dict[str, str]
-) -> list[MypycExtension]:
+) -> list[GenericExtension]:
     """
     Compiles all mypy extensions defined in `mypyc_config` for the project found at `project_root`
     """
 
-    built_extensions: list[MypycExtension] = []
+    built_extensions: list[GenericExtension] = []
     for mypyc_extension, ext_path in mypyc_config.items():
         full_ext_path = os.path.join(project_root, ext_path)
         mypyc_ext = mypycify_module(mypyc_extension, full_ext_path)

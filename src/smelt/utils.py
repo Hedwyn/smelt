@@ -12,12 +12,16 @@ import logging
 import os
 import shutil
 import sys
+import sysconfig
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from types import ModuleType
 from typing import Generator, Literal, NewType, assert_never, cast, overload
+
+from setuptools._distutils.extension import Extension
 
 _logger = logging.getLogger(__name__)
 
@@ -198,3 +202,54 @@ def find_module_in_layout(mod_path: FsPath, package_root: str | None = None) -> 
         return str(mod_potential_location)
 
     raise FileNotFoundError(f"Failed to locate {mod_path}")
+
+
+@dataclass
+class GenericExtension:
+    """
+    A wrapper on top of setuptools Extensions used by smelt.
+    Used to provide metadata on how to manage these get_extension_suffixns in the install
+    process, which is agnostic from the utility producing the extension in the first place.
+
+    `import_path` keeps track of where the module should be placed in the final artifact.
+    `src_path` keeps track of the original source files.
+    `runtime` is optional and can be used to contain runtime utility module that's can
+    be shared across modules (mypyc / Probably Nuitka in the future).
+    """
+
+    import_path: str
+    src_path: str
+    name: str
+    dest_folder: Path
+    extension: Extension
+    runtime: Extension | None = None
+
+    def get_dest_path(self, target_triple: str | None = None) -> Path:
+        """
+        Returns
+        -------
+        Path
+            Full path for the final compiled .so file.
+        """
+        suffix = (
+            sysconfig.get_config_var("EXT_SUFFIX")
+            if target_triple is None
+            else get_extension_suffix(target_triple)
+        )
+        ext_so_name = f"{self.name}{suffix}"
+        return self.dest_folder / ext_so_name
+
+    def get_runtime_dest_path(self, target_triple: str | None = None) -> Path:
+        """
+        Returns
+        -------
+        Path
+            Full path for the final runtime .so file.
+        """
+        suffix = (
+            sysconfig.get_config_var("EXT_SUFFIX")
+            if target_triple is None
+            else get_extension_suffix(target_triple)
+        )
+        ext_so_name = f"{self.name}__mypyc{suffix}"
+        return self.dest_folder / ext_so_name

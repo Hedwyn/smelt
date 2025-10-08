@@ -6,19 +6,20 @@ Command-line interface for Smelt
 """
 
 from __future__ import annotations
+
 import logging
 import os
 import shutil
 import sys
+import tomllib
 import warnings
 from contextlib import contextmanager
 from typing import Callable, Generator, ParamSpec, TypeVar, cast
 
 import click
-import tomllib
 from mypyc.build import mypycify
 
-from smelt.backend import SmeltConfig, run_backend, compile_mypyc_extensions
+from smelt.backend import SmeltConfig, compile_mypyc_extensions, run_backend
 from smelt.compiler import SupportedPlatforms, compile_extension
 from smelt.mypycify import mypycify_module
 from smelt.utils import SmeltError
