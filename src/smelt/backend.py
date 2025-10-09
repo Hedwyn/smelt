@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from typing import Generic
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -77,23 +78,45 @@ def compile_mypyc_extensions(
     return built_extensions
 
 
-def compile_cython_extensions(cython_config: dict[str, str]) -> list[Extension]:
+def compile_cython_extensions(
+    project_root: str | Path, cython_config: dict[str, str]
+) -> list[GenericExtension]:
+    """
+    Compiles all the cython extensions as defined in `cython_config`
+    """
     try:
         from Cython.Build import cythonize
     except ImportError as exc:
         raise ImportError(
             "Cython is not installed. consider installing smelt with [cython] extra"
         ) from exc
-    extensions: list[Extension] = []
+    extensions: list[GenericExtension] = []
     modules = cython_config.get("modules", [])
-    remapped_modules = cython_config.get("remapped_modules", [])
+    remapped_modules = cython_config.get("remapped_modules", {})
+    assert isinstance(remapped_modules, dict)
+    remapped_modules = remapped_modules.copy()
+
+    for mod in modules:
+        remapped_modules[mod] = mod.replace("/", ".")
+
     cython_options = cython_config.get("cython_options", {})
-    assert (isinstance(opt_name, str) for opt_name in cython_options)
-    extensions.extend(cythonize(modules, **cython_options))
-    for source, module_path in remapped_modules:
-        extension = cythonize(source, **cython_options)
-        extension.name = module_path
-        extensions.append(extension)
+
+    for source_path, module_path in remapped_modules.items():
+        full_source_path = os.path.join(project_root, source_path)
+        cython_ext = cythonize(full_source_path, **cython_options)
+        assert len(cython_ext) == 1, (
+            "Passed on source file to cython yet it produced more than one extension"
+        )
+        (base_ext,) = cython_ext
+        base_ext.name = module_path
+        generic_ext = GenericExtension(
+            name=os.path.basename(full_source_path),
+            src_path=full_source_path,
+            import_path=module_path,
+            extension=base_ext,
+            dest_folder=Path(full_source_path).parent,
+        )
+        extensions.append(generic_ext)
     return extensions
 
 
@@ -128,17 +151,26 @@ def run_backend(
     # this runtime should be named modname__mypy
     # we need to keep track of it to include to nuitka,
     # as it would be invisible otherwise
-    mypy_runtime_extensions: list[str] = []
+    shared_runtime_extensions: list[str] = []
+    collected_extensions: list[GenericExtension] = []
+
     for mypyc_extension, ext_path in config.mypyc.items():
         full_ext_path = os.path.join(project_root, ext_path)
         mypyc_ext = mypycify_module(mypyc_extension, full_ext_path, strategy=strategy)
-        module_so_path = compile_extension(mypyc_ext.extension)
-        shutil.move(module_so_path, str(mypyc_ext.get_dest_path()))
+        collected_extensions.append(mypyc_ext)
         if (runtime := mypyc_ext.runtime) is not None:
-            mypy_runtime_extensions.append(runtime.name)
+            shared_runtime_extensions.append(runtime.name)
+
+    # cython extensions
+    collected_extensions.extend(compile_cython_extensions(project_root, config.cython))
+
+    for generic_ext in collected_extensions:
+        module_so_path = compile_extension(generic_ext.extension)
+        shutil.move(module_so_path, str(generic_ext.get_dest_path()))
+
     # nuitka compile
     if not without_entrypoint:
         entrypoint_file = locate_module(config.entrypoint, strategy=strategy)
         compile_with_nuitka(
-            entrypoint_file, stdout=stdout, include_modules=mypy_runtime_extensions
+            entrypoint_file, stdout=stdout, include_modules=shared_runtime_extensions
         )

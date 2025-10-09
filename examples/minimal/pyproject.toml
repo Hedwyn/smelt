@@ -22,5 +22,5 @@ entrypoint = "minimal.cli"
 "minimal.fib" = "src/minimal/fib.py"
 
 [tool.smelt.cython]
-modules = ["src/minimal/fib_cython.py"]
+modules = ["src/minimal/fib_cython.pyx"]
 remapped_modules = { "src/minimal/fib.py" = "minimal.fib_cython_nopyx" }
