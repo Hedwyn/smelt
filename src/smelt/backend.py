@@ -20,7 +20,7 @@ from setuptools import Extension
 from smelt.compiler import compile_extension
 from smelt.mypycify import mypycify_module
 from smelt.nuitkaify import Stdout, compile_with_nuitka
-from smelt.utils import GenericExtension, ModpathType, locate_module
+from smelt.utils import GenericExtension, ModpathType, locate_module, toggle_mod_path
 
 # TODO: replace .so references to a variable that's set to .so
 # for Unix-like and .dll for Windows
@@ -97,7 +97,9 @@ def compile_cython_extensions(
     remapped_modules = remapped_modules.copy()
 
     for mod in modules:
-        remapped_modules[mod] = mod.replace("/", ".")
+        mod_import_path = toggle_mod_path(mod, ModpathType.IMPORT)
+
+        remapped_modules[mod] = mod_import_path
 
     cython_options = cython_config.get("cython_options", {})
 
@@ -124,7 +126,7 @@ def run_backend(
     config: SmeltConfig,
     stdout: Stdout | None = None,
     project_root: Path | str = ".",
-    strategy: ModpathType = ModpathType.IMPORT,
+    strategy: ModpathType = ModpathType.FS,
     *,
     without_entrypoint: bool = False,
 ) -> None:
@@ -153,24 +155,28 @@ def run_backend(
     # as it would be invisible otherwise
     shared_runtime_extensions: list[str] = []
     collected_extensions: list[GenericExtension] = []
-
     for mypyc_extension, ext_path in config.mypyc.items():
         full_ext_path = os.path.join(project_root, ext_path)
-        mypyc_ext = mypycify_module(mypyc_extension, full_ext_path, strategy=strategy)
+        mypyc_ext = mypycify_module(
+            mypyc_extension, full_ext_path, strategy=strategy, package_root=project_root
+        )
         collected_extensions.append(mypyc_ext)
         if (runtime := mypyc_ext.runtime) is not None:
             shared_runtime_extensions.append(runtime.name)
 
     # cython extensions
     collected_extensions.extend(compile_cython_extensions(project_root, config.cython))
-
     for generic_ext in collected_extensions:
         module_so_path = compile_extension(generic_ext.extension)
         shutil.move(module_so_path, str(generic_ext.get_dest_path()))
-
+        if generic_ext.runtime:
+            runtime_so_path = compile_extension(generic_ext.extension)
+            shutil.move(runtime_so_path, str(generic_ext.get_runtime_dest_path()))
     # nuitka compile
     if not without_entrypoint:
-        entrypoint_file = locate_module(config.entrypoint, strategy=strategy)
+        entrypoint_file = locate_module(
+            config.entrypoint, strategy=strategy, package_root=project_root
+        )
         compile_with_nuitka(
             entrypoint_file, stdout=stdout, include_modules=shared_runtime_extensions
         )

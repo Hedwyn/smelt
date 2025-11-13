@@ -120,7 +120,7 @@ def get_modpath_type(path: str) -> ModpathType:
     Detects whether the passed type of the given `path`.
     """
     # TODO: stricter checks
-    if path.endswith(".py"):
+    if path.endswith(".py") or path.endswith(".pyx"):
         return ModpathType.FS
     return ModpathType.IMPORT
 
@@ -144,7 +144,7 @@ def toggle_mod_path(path: str, to_type: ModpathType) -> ImportPath | FsPath:
     match to_type:
         case ModpathType.IMPORT:
             *parents, modfile = path.split("/")
-            modfile = modfile.replace(".py", "")
+            modfile = Path(modfile).stem
             return cast(ImportPath, ".".join([*parents, modfile]))
 
         case ModpathType.FS:
@@ -154,7 +154,11 @@ def toggle_mod_path(path: str, to_type: ModpathType) -> ImportPath | FsPath:
             assert_never(unreachable)
 
 
-def locate_module(mod_path: str, strategy: ModpathType = ModpathType.IMPORT) -> str:
+def locate_module(
+    mod_path: str,
+    strategy: ModpathType = ModpathType.IMPORT,
+    package_root: Path = Path("."),
+) -> str:
     """
     Returns the full path to module at `mod_path`.
     If `mod_path` is passed a relative filepath, returns the absolute path.
@@ -165,7 +169,9 @@ def locate_module(mod_path: str, strategy: ModpathType = ModpathType.IMPORT) -> 
             return locate_module_by_import_path(toggle_mod_path(mod_path, strategy))
 
         case ModpathType.FS:
-            return find_module_in_layout(toggle_mod_path(mod_path, strategy))
+            return find_module_in_layout(
+                toggle_mod_path(mod_path, strategy), package_root=package_root
+            )
 
         case _ as unreachable:
             assert_never(unreachable)

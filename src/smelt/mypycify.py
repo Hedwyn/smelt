@@ -26,6 +26,7 @@ def mypycify_module(
     import_path: str,
     extpath: str,
     strategy: ModpathType = ModpathType.IMPORT,
+    package_root: Path = Path("."),
 ) -> GenericExtension:
     match strategy:
         case ModpathType.IMPORT:
@@ -39,8 +40,9 @@ def mypycify_module(
                 ext_name = module_ext.name.split(".")[-1]
 
         case ModpathType.FS:
+            expected_module_path = toggle_mod_path(import_path, ModpathType.FS)
             curated_import_path = find_module_in_layout(
-                toggle_mod_path(import_path, ModpathType.FS)
+                expected_module_path, package_root=package_root
             )
             runtime, module_ext = mypycify(
                 [curated_import_path], include_runtime_files=True
