@@ -10,12 +10,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from typing import Generic
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
-
-from setuptools import Extension
 
 from smelt.compiler import compile_extension
 from smelt.mypycify import mypycify_module
@@ -75,6 +72,7 @@ def compile_mypyc_extensions(
         _logger.info("Built extensions %s @ %s", mypyc_extension, so_dest_path)
         if mypyc_ext.runtime:
             _logger.info("-> %s runtime: %s", mypyc_extension, runtime_dest_path)
+        built_extensions.append(mypyc_ext)
     return built_extensions
 
 
@@ -153,17 +151,12 @@ def run_backend(
     # this runtime should be named modname__mypy
     # we need to keep track of it to include to nuitka,
     # as it would be invisible otherwise
-    shared_runtime_extensions: list[str] = []
+    shared_runtime_extensions: set[str] = set()
     collected_extensions: list[GenericExtension] = []
-    for mypyc_extension, ext_path in config.mypyc.items():
-        full_ext_path = os.path.join(project_root, ext_path)
-        mypyc_ext = mypycify_module(
-            mypyc_extension, full_ext_path, strategy=strategy, package_root=project_root
-        )
-        collected_extensions.append(mypyc_ext)
-        if (runtime := mypyc_ext.runtime) is not None:
-            shared_runtime_extensions.append(runtime.name)
-
+    built_mypyc_extensions = compile_mypyc_extensions(project_root, config.mypyc)
+    for ext in built_mypyc_extensions:
+        if ext.runtime:
+            shared_runtime_extensions.add(ext.runtime.name)
     # cython extensions
     collected_extensions.extend(compile_cython_extensions(project_root, config.cython))
     for generic_ext in collected_extensions:
