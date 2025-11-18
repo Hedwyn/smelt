@@ -110,7 +110,8 @@ def compile_cython_extensions(
         (base_ext,) = cython_ext
         base_ext.name = module_path
         generic_ext = GenericExtension(
-            name=os.path.basename(full_source_path),
+            # name=os.path.basename(full_source_path),
+            name=module_path,
             src_path=full_source_path,
             import_path=module_path,
             extension=base_ext,
