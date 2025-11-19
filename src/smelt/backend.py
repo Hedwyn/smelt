@@ -11,7 +11,7 @@ import logging
 import os
 import shutil
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from smelt.compiler import compile_extension
@@ -31,10 +31,10 @@ class SmeltConfig:
     Defines how the smelt backend should run
     """
 
-    mypyc: dict[str, str]
-    cython: dict[str, str]
-    c_extensions: dict[str, str]
-    entrypoint: str
+    mypyc: dict[str, str] = field(default_factory=dict)
+    cython: dict[str, str] = field(default_factory=dict)
+    c_extensions: dict[str, str] = field(default_factory=dict)
+    entrypoint: str | None = None
 
     def __str__(self) -> str:
         """
@@ -167,6 +167,7 @@ def run_backend(
             runtime_so_path = compile_extension(generic_ext.extension)
             shutil.move(runtime_so_path, str(generic_ext.get_runtime_dest_path()))
     # nuitka compile
+    without_entrypoint = without_entrypoint and config.entrypoint is not None
     if not without_entrypoint:
         entrypoint_file = locate_module(
             config.entrypoint, strategy=strategy, package_root=project_root
