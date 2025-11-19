@@ -9,7 +9,7 @@ def fib_pure_python(n: int) -> int:
     if n <= 1:
         return n
     else:
-        return fib_mypyc(n - 2) + fib_mypyc(n - 1)
+        return fib_pure_python(n - 2) + fib_pure_python(n - 1)
 
 
 @click.group()
