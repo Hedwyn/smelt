@@ -24,6 +24,8 @@ from typing import Final, Iterable, Iterator, Literal
 
 from setuptools import Extension
 
+from .process import call_command
+
 _logger = logging.getLogger(__name__)
 
 NUITKA_ENTRYPOINT: Final[tuple[str, ...]] = (sys.executable, "-m", "nuitka")
@@ -121,31 +123,17 @@ def compile_with_nuitka(
 
     _logger.debug("Running %s", " ".join(cmd))
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    while True:
-        assert proc.stdout is not None, "Process not created with stdout in PIPE mode"
-        line = proc.stdout.readline()
-        if not line:
-            break
-        decoded_line = line.decode().rstrip()
-        if stdout == "logger":
-            _logger.info(decoded_line)
-        elif stdout == "stdout":
-            print(decoded_line)
-
-    if proc.returncode is None:
-        proc.wait(timeout=1.0)
-
-    if proc.returncode != 0:
+    ctx = call_command(*cmd, printer=print)
+    if ctx.exit_code != 0:
         raise RuntimeError(
             f"Nuitka failed with exitcode {proc.returncode}: {' '.join(cmd)}"
         )
     expected_extension = ".exe" if sys.platform == "Windows" else ".bin"
     bin_path = os.path.basename(path).replace(".py", expected_extension)
     absolute_bin_path = os.path.join(os.getcwd(), bin_path)
-    assert os.path.exists(
-        absolute_bin_path
-    ), f"Nuitka binary not found at {absolute_bin_path}"
+    assert os.path.exists(absolute_bin_path), (
+        f"Nuitka binary not found at {absolute_bin_path}"
+    )
     return absolute_bin_path
 
 
@@ -203,9 +191,9 @@ def nuitkaify_module(
     build_folder = modname.replace(".py", ".build")
     assert os.path.exists(build_folder)
     c_sources = [str(src) for src in iterate_nuitka_c_sources(build_folder)]
-    assert (
-        c_sources
-    ), "Nuitka did not produce any C file or build folder path logic is incorrect"
+    assert c_sources, (
+        "Nuitka did not produce any C file or build folder path logic is incorrect"
+    )
     header_sources = [str(f) for f in locate_nuitka_headers()]
     header_sources.append(build_folder)
     # patching build_definitions.h, as we don't need extensions

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from smelt.process import ProcessGarbageCollector, call_command_non_blocking
+from smelt.process import ProcessGarbageCollector, call_command
 
 # The command echoes 3 numbers with a 100ms delay between each.
 # Total execution time is ~300ms.
@@ -27,12 +27,12 @@ while True:
 """
 
 
-def test_call_command_non_blocking_success() -> None:
+def test_call_command_success() -> None:
     """
     Tests the successful execution of a command, checking exit code and stdout.
     The command should run to completion.
     """
-    result = call_command_non_blocking(CMD)
+    result = call_command(CMD)
 
     assert result.success is True
     assert result.exit_code == 0
@@ -43,7 +43,7 @@ def test_call_command_non_blocking_success() -> None:
     assert result.execution_time >= 0.3
 
 
-def test_call_command_non_blocking_printer_timing() -> None:
+def test_call_command_printer_timing() -> None:
     """
     Tests that the printer function is called progressively as output is generated,
     not all at once at the end.
@@ -53,7 +53,7 @@ def test_call_command_non_blocking_printer_timing() -> None:
     def printer_with_timestamp(line: str) -> None:
         received_lines_with_ts.append((line, time.time()))
 
-    result = call_command_non_blocking(CMD, printer=printer_with_timestamp)
+    result = call_command(CMD, printer=printer_with_timestamp)
 
     assert result.exit_code == 0
 
@@ -73,7 +73,7 @@ def test_call_command_non_blocking_printer_timing() -> None:
     assert delta2 == pytest.approx(0.165, abs=0.085)
 
 
-def test_call_command_non_blocking_timeout() -> None:
+def test_call_command_timeout() -> None:
     """
     Tests that a timeout interrupts the command, resulting in a non-zero exit code
     and partial output.
@@ -81,7 +81,7 @@ def test_call_command_non_blocking_timeout() -> None:
     # Total command time is > 0.3s. A timeout of 0.15s should cut it off after the first echo.
     timeout = 0.15
 
-    result = call_command_non_blocking(CMD, timeout=timeout)
+    result = call_command(CMD, timeout=timeout)
     assert result.success is False
     # On Unix, a process terminated by SIGINT (like Ctrl+C) often returns 130.
     assert result.exit_code == 130
@@ -115,14 +115,14 @@ def test_gc_sigkill_fallback(tmp_path: Path) -> None:
 
     # 3. Run the command that will time out
     command_to_run = f"{sys.executable} {script_path}"
-    result = call_command_non_blocking(
+    result = call_command(
         command_to_run,
         timeout=timeout,
         process_gc=custom_gc,
         on_popen=procs.append,
     )
 
-    # 4. Verify the immediate result from call_command_non_blocking
+    # 4. Verify the immediate result from call_command
     assert result.success is False
     assert result.exit_code == 130  # Assumed SIGINT exit code
     assert result.stdout == ["started"]
@@ -157,14 +157,14 @@ def test_gc_atexit_handler(tmp_path: Path) -> None:
 
     # 3. Run the command that will time out
     command_to_run = f"{sys.executable} {script_path}"
-    result = call_command_non_blocking(
+    result = call_command(
         command_to_run,
         timeout=0.1,
         process_gc=custom_gc,
         on_popen=procs.append,
     )
 
-    # 4. Verify the immediate result from call_command_non_blocking
+    # 4. Verify the immediate result from call_command
     assert result.success is False
     assert result.exit_code == 130  # Assumed SIGINT exit code
     assert result.stdout == ["started"]

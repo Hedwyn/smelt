@@ -244,7 +244,7 @@ class ProcessGarbageCollector(Thread):
                     proc.kill()
 
 
-def call_command_non_blocking(
+def call_command(
     *args: str,
     timeout: float | None = None,
     printer: Callable[[str], None] | None = None,
@@ -281,9 +281,9 @@ def call_command_non_blocking(
     """
     start_time = time.time()
     current_cwd = Path(cwd) if cwd else Path.cwd()
-
+    cmd = " ".join(args)
     proc = Popen(
-        args,
+        cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=current_cwd,
