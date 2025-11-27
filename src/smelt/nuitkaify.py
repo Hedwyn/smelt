@@ -126,7 +126,7 @@ def compile_with_nuitka(
     ctx = call_command(*cmd, printer=print)
     if ctx.exit_code != 0:
         raise RuntimeError(
-            f"Nuitka failed with exitcode {proc.returncode}: {' '.join(cmd)}"
+            f"Nuitka failed with exitcode {ctx.exit_code}: {' '.join(cmd)}"
         )
     expected_extension = ".exe" if sys.platform == "Windows" else ".bin"
     bin_path = os.path.basename(path).replace(".py", expected_extension)
