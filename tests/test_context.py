@@ -12,7 +12,6 @@ from typing import Generator
 import pytest
 
 from smelt.context import (
-    PathResolutionTrace,
     clear_contexts,
     create_context_if_enabled,
     enable_global_context,
@@ -20,7 +19,7 @@ from smelt.context import (
     is_global_context_enabled,
     reset_contexts,
 )
-from smelt.utils import ModpathType
+from smelt.utils import ModpathType, PathResolutionTrace
 
 
 @pytest.fixture(autouse=True)

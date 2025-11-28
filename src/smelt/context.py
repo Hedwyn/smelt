@@ -26,8 +26,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, overload
 
-from smelt.utils import ModpathType
-
 
 class Context(Protocol):
     """
@@ -126,31 +124,6 @@ class TaskTrace:
             for element in self.elements
         ]
         return "\n".join(rendered_elements)
-
-
-@dataclass
-class PathResolutionTrace:
-    """
-    Stores information about converting an import path to a filesystem path
-    or vice-versa.
-    """
-
-    module_path: str
-    import_path: str
-    resolution_type: ModpathType
-
-    def render(self) -> str:
-        match self.resolution_type:
-            case ModpathType.FS:
-                return (
-                    f"Resolving filesystem location of `{self.module_path}`:"
-                    f"found `{self.import_path}`"
-                )
-            case ModpathType.IMPORT:
-                return (
-                    f"Resolving import path of file `{self.import_path}`:"
-                    f"found `{self.module_path}`"
-                )
 
 
 _GLOBAL_CONTEXT: None | GlobalContext = None

@@ -23,6 +23,7 @@ from types import ModuleType
 from typing import Generator, Literal, NewType, assert_never, cast, overload
 
 from setuptools._distutils.extension import Extension
+from smelt.context import get_context
 
 _logger = logging.getLogger(__name__)
 
@@ -114,6 +115,31 @@ class ModpathType(Enum):
 
     IMPORT = auto()
     FS = auto()
+
+
+@dataclass
+class PathResolutionTrace:
+    """
+    Stores information about converting an import path to a filesystem path
+    or vice-versa.
+    """
+
+    module_path: str
+    import_path: str
+    resolution_type: ModpathType
+
+    def render(self) -> str:
+        match self.resolution_type:
+            case ModpathType.FS:
+                return (
+                    f"Resolving filesystem location of `{self.module_path}`:"
+                    f"found `{self.import_path}`"
+                )
+            case ModpathType.IMPORT:
+                return (
+                    f"Resolving import path of file `{self.import_path}`:"
+                    f"found `{self.module_path}`"
+                )
 
 
 def get_modpath_type(path: str) -> ModpathType:
@@ -233,12 +259,22 @@ def locate_module(
     locates from the import"""
     match strategy:
         case ModpathType.IMPORT:
-            return locate_module_by_import_path(toggle_mod_path(mod_path, strategy))
+            import_path = locate_module_by_import_path(
+                toggle_mod_path(mod_path, strategy)
+            )
+            if ctx := get_context():
+                ctx.add_trace(
+                    PathResolutionTrace(mod_path, module_path, ModpathType.IMPORT)
+                )
+            return import_path
 
         case ModpathType.FS:
-            return find_module_in_layout(
+            fs_path = find_module_in_layout(
                 toggle_mod_path(mod_path, strategy), package_root=package_root
             )
+            if ctx := get_context():
+                ctx.add_trace(PathResolutionTrace(fs_path, mod_path, ModpathType.FS))
+            return fs_path
 
         case _ as unreachable:
             assert_never(unreachable)

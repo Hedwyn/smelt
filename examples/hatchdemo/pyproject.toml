@@ -22,5 +22,5 @@ entrypoint = "hatchdemo.cli"
 [tool.hatch.build.hooks.smelt.c_extensions]
 "hatchdemo.hello" = "src/hatchdemo/hello.c"
 
-[tool.hatch.build.hooks.smelt.mypyc]
-"hatchdemo.fib" = "src/hatchdemo/fib.py"
+[tool.hatch.build.hooks.smelt.cython.remapped_modules]
+"src/hatchdemo/fib_cython.pyx" = "fib_cython"

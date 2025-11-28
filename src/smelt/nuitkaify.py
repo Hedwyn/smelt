@@ -26,6 +26,8 @@ from setuptools import Extension
 
 from .process import call_command
 
+from smelt.context import get_context
+
 _logger = logging.getLogger(__name__)
 
 NUITKA_ENTRYPOINT: Final[tuple[str, ...]] = (sys.executable, "-m", "nuitka")
@@ -96,6 +98,7 @@ def compile_with_nuitka(
     Compiles the module given by `path`.
     Follows imports by default, but can be disabled with `no_follow_imports`.
     """
+    context = get_context()
     try:
         import nuitka
 
@@ -123,11 +126,14 @@ def compile_with_nuitka(
 
     _logger.debug("Running %s", " ".join(cmd))
 
-    ctx = call_command(*cmd, printer=print)
-    if ctx.exit_code != 0:
+    cmd_trace = call_command(*cmd, printer=print)
+    if context:
+        context.add_trace(cmd_trace)
+    if cmd_trace.exit_code != 0:
         raise RuntimeError(
-            f"Nuitka failed with exitcode {ctx.exit_code}: {' '.join(cmd)}"
+            f"Nuitka failed with exitcode {cmd_trace.exit_code}: {' '.join(cmd)}"
         )
+
     expected_extension = ".exe" if sys.platform == "Windows" else ".bin"
     bin_path = os.path.basename(path).replace(".py", expected_extension)
     absolute_bin_path = os.path.join(os.getcwd(), bin_path)
