@@ -276,6 +276,7 @@ def build_standalone_binary(
         click.echo("No pyproject.toml not found.")
         return
     config = parse_config_from_pyproject(toml_data)
+    config.load_env()
     try:
         run_backend(config, stdout="stdout", project_root=package_path)
     except Exception as e:

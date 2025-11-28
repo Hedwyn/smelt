@@ -35,6 +35,7 @@ class SmeltConfig:
     cython: dict[str, str] = field(default_factory=dict)
     c_extensions: dict[str, str] = field(default_factory=dict)
     entrypoint: str | None = None
+    debug: bool = False
 
     def __str__(self) -> str:
         """
@@ -50,6 +51,13 @@ class SmeltConfig:
                 )
             lines.append(f"{field_name:20}: {value}")
         return "\n".join(lines)
+
+    def load_env(self) -> None:
+        """
+        Updates internal values based on set environement variables.
+        """
+        if os.environ.get("SMELT_DEBUG"):
+            self.debug = True
 
 
 def compile_mypyc_extensions(

@@ -23,20 +23,13 @@ class HatchlingBuildHook(BuildHookInterface):
 
     @cached_property
     def is_debug(self) -> bool:
-        if not os.environ.get("SMELT_DEBUG"):
+        if not self.smelt_config.debug:
             return False
         print("Smelt: SMELT_DEBUG is set, enabling debug mode")
         return True
 
-    def debug_log(self, message: str) -> None:
-        """
-        Prints `messageè if debug mode is set.
-        """
-        if not self.is_debug:
-            return
-        print(message)
-
-    def initialize(self, version: str, build_data: dict[str, object]) -> None:
+    @cached_property
+    def smelt_config(self) -> SmeltConfig:
         try:
             config = SmeltConfig(**self.config)
         except Exception as exc:
@@ -46,9 +39,23 @@ class HatchlingBuildHook(BuildHookInterface):
                 "Valid parameters are:\n"
                 f"{[f.name for f in fields(SmeltConfig)]}"
             ) from exc
-        self.debug_log(f"Smelt: Calling build hook with config:\n{config}")
+        config.load_env()
+        return config
+
+    def debug_log(self, message: str) -> None:
+        """
+        Prints `message` if debug mode is set.
+        """
+        if not self.is_debug:
+            return
+        print(message)
+
+    def initialize(self, version: str, build_data: dict[str, object]) -> None:
+        self.debug_log(f"Smelt: Calling build hook with config:\n{self.config}")
         try:
-            run_backend(config, strategy=ModpathType.FS, without_entrypoint=True)
+            run_backend(
+                self.smelt_config, strategy=ModpathType.FS, without_entrypoint=True
+            )
         except Exception as exc:
             raise RuntimeError(f"Smelt build failed: {exc}")
 
