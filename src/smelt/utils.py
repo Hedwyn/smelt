@@ -14,6 +14,7 @@ import shutil
 import sys
 import sysconfig
 import tempfile
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -125,6 +126,44 @@ def get_modpath_type(path: str) -> ModpathType:
     return ModpathType.IMPORT
 
 
+class PackageLayout(Enum):
+    """
+    Which standard folder layout a given package is using.
+    """
+
+    SRC = auto()
+    EPONYM = auto()
+
+
+def detect_package_layout(package_name: str, package_root: str = ".") -> PackageLayout:
+    """
+    Tries detecting the package layout based on the file tree.
+    """
+    root = Path(package_root)
+    has_src = (root / "src").exists()
+    has_eponym_folder = (root / package_name).exists()
+
+    if not has_src and not has_eponym_folder:
+        raise RuntimeError(
+            f"No `src` or `{package_name}` found cannot detect package layout"
+        )
+    if has_eponym_folder:
+        if has_src:
+            warnings.warn(
+                "Package has both a `src` and a {package_name} folder at the root. "
+                f"Assuming {package_name} contains source code, but that migth be wrong"
+            )
+            return PackageLayout.EPONYM
+
+    if not (root / "src" / package_name).exists():
+        raise RuntimeError(
+            f"No `{package_name}` found inside `src` folder. "
+            "If `src` is used as a substitute for your package name",
+            "you need to configure that explicitly.",
+        )
+    return PackageLayout.SRC
+
+
 @overload
 def toggle_mod_path(path: str, to_type: Literal[ModpathType.IMPORT]) -> ImportPath: ...
 
@@ -133,22 +172,50 @@ def toggle_mod_path(path: str, to_type: Literal[ModpathType.IMPORT]) -> ImportPa
 def toggle_mod_path(path: str, to_type: Literal[ModpathType.FS]) -> FsPath: ...
 
 
-def toggle_mod_path(path: str, to_type: ModpathType) -> ImportPath | FsPath:
+def toggle_mod_path(
+    path: str,
+    to_type: ModpathType,
+    src_folder: Path | None = None,
+    exclude_root: bool = False,
+) -> ImportPath | FsPath:
     """
     Changes the path to a module between 'import' style paths
     (a.b.c) and filesystem type (a/b/b).
     """
+    src_folder = src_folder or Path(".")
     if get_modpath_type(path) == to_type:
         return cast(ImportPath | FsPath, path)
 
     match to_type:
         case ModpathType.IMPORT:
-            *parents, modfile = path.split("/")
-            modfile = Path(modfile).stem
-            return cast(ImportPath, ".".join([*parents, modfile]))
+            path_obj = Path(path)
+            resolved_path_obj = path_obj.resolve()
+            resolved_src = src_folder.resolve()
+            if not resolved_path_obj.is_relative_to(resolved_src):
+                raise RuntimeError(f"`{src_folder}` is not a subpath of `path`")
+            if exclude_root:
+                resolved_path_obj = resolved_path_obj.parent
+            rel_path = resolved_path_obj.relative_to(src_folder)
+            modfile = rel_path.stem
+            rel_path = rel_path.parent
+            return cast(ImportPath, ".".join([*rel_path.parts, modfile]))
 
         case ModpathType.FS:
-            return cast(FsPath, path.replace(".", "/") + ".py")
+            path_chunks: list[str] = []
+            package_or_namespace, *modules = path.split(".")
+            if not modules:
+                raise ValueError(
+                    f"Modules import path only specifies the stem: {path}."
+                    "You need to specify the whole import path"
+                )
+            if not exclude_root:
+                path_chunks.append(package_or_namespace)
+            *submodules, module = modules
+            path_chunks.extend(submodules)
+            module += ".py"
+            path_chunks.append(module)
+            final_path = src_folder.joinpath(*path_chunks)
+            return cast(FsPath, str(final_path))
 
         case _ as unreachable:
             assert_never(unreachable)
