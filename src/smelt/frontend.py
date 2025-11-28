@@ -12,9 +12,10 @@ import os
 import shutil
 import sys
 import tomllib
+from typing_extensions import Type
 import warnings
 from contextlib import contextmanager
-from typing import Callable, Generator, ParamSpec, TypeVar, cast
+from typing import Any, Callable, Generator, ParamSpec, TypeVar, cast
 
 import click
 from mypyc.build import mypycify
@@ -153,18 +154,55 @@ def parse_config(toml_data: TomlData) -> SmeltConfig:
     )
 
 
-def parse_config_from_pyproject(toml_data: TomlData) -> SmeltConfig:
+def toml_get_nested_section(
+    toml_data: TomlData, *path: str
+) -> dict[str, Any] | list[Any]:
+    section = toml_data
+    for subsection in path:
+        section = section.get(subsection, {})
+    return section
+
+
+def auto_detect_is_build_hook(toml_data: TomlData) -> bool:
+    has_tool_config = "smelt" in toml_data.get("tool", {})
+    has_build_hook_conf = "smelt" in toml_get_nested_section(
+        toml_data, "tool", "hatch", "build", "hooks"
+    )
+    if has_tool_config and has_build_hook_conf:
+        # TODO: for now, not allowing this.
+        # We cna however consider using the hatch one only for build time
+        # and the tool one for CLI use.
+        # that can get confusing though.
+        raise SmeltConfigError(
+            "Smelt configuration found both in [tool.smelt] and "
+            "[tool.hatch.build.hooks.smelt]. Please keep only one."
+        )
+    if has_build_hook_conf:
+        return True
+    if has_tool_config:
+        return False
+    raise ValueError("No smelt config detected")
+
+
+def parse_config_from_pyproject(
+    toml_data: TomlData, is_configured_as_build_hook: bool = False
+) -> SmeltConfig:
     """
     Extracts Smelt config from TOML data coming out of a pyproject.toml
     If parsing a smelt config file directly, use `parse_config` instead.
     """
     tool_config = toml_data.get("tool", {})
+    config_path = (
+        ("tool", "hatch", "build", "hooks", "smelt")
+        if auto_detect_is_build_hook(toml_data)
+        else ("tool", "smelt")
+    )
     if not isinstance(tool_config, dict):
         raise SmeltConfigError(
             f"`tool` section in toml data is not a dictionary, got {tool_config}. "
             "Does the TOML data come from a valid pyproject ?"
         )
-    smelt_config = tool_config.get("smelt", None)
+    smelt_config = toml_get_nested_section(toml_data, *config_path)
     if smelt_config is None:
         raise SmeltConfigError("No smelt config defined in pyproject")
 
