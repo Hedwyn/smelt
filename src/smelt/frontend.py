@@ -12,16 +12,20 @@ import os
 import shutil
 import sys
 import tomllib
-from typing_extensions import Type
 import warnings
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Generator, ParamSpec, TypeVar, cast
 
 import click
-from mypyc.build import mypycify
 
-from smelt.backend import SmeltConfig, compile_mypyc_extensions, run_backend
+from smelt.backend import (
+    SmeltConfig,
+    compile_mypyc_extensions,
+    run_backend,
+)
 from smelt.compiler import SupportedPlatforms, compile_extension
+from smelt.context import enable_global_context, get_context
 from smelt.mypycify import mypycify_module
 from smelt.utils import SmeltError
 
@@ -218,6 +222,7 @@ def smelt() -> None:
     """
     Entrypoint for Smelt frontend
     """
+    enable_global_context()
     click.echo(SMELT_ASCCI_ART)
 
 
@@ -255,8 +260,13 @@ def show_config(path: str, logging_level: str) -> None:
     type=str,
 )
 @add_logging_option
+@click.option(
+    "-r", "--report", type=str, default=None, help="Produces a report at the given path"
+)
 @wrap_smelt_errors()
-def build_standalone_binary(package_path: str, logging_level: str) -> None:
+def build_standalone_binary(
+    package_path: str, logging_level: str, report: str | None
+) -> None:
     levelno = logging._nameToLevel[logging_level]
     logging.basicConfig(level=levelno)
     try:
@@ -266,7 +276,14 @@ def build_standalone_binary(package_path: str, logging_level: str) -> None:
         click.echo("No pyproject.toml not found.")
         return
     config = parse_config_from_pyproject(toml_data)
-    run_backend(config, stdout="stdout", project_root=package_path)
+    try:
+        run_backend(config, stdout="stdout", project_root=package_path)
+    except Exception as e:
+        click.echo(f"Error during build: {e}")
+    if report is not None:
+        global_context = get_context()
+        assert global_context is not None
+        Path(report).write_text(global_context.render())
 
 
 @smelt.command()
