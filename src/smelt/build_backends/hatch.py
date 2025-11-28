@@ -7,6 +7,8 @@ Build hook hatchling backend.
 
 from __future__ import annotations
 
+import os
+from functools import cached_property
 from dataclasses import fields
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
@@ -19,6 +21,21 @@ from smelt.utils import ModpathType
 class HatchlingBuildHook(BuildHookInterface):
     PLUGIN_NAME = "smelt"
 
+    @cached_property
+    def is_debug(self) -> bool:
+        if not os.environ.get("SMELT_DEBUG"):
+            return False
+        print("Smelt: SMELT_DEBUG is set, enabling debug mode")
+        return True
+
+    def debug_log(self, message: str) -> None:
+        """
+        Prints `messageè if debug mode is set.
+        """
+        if not self.is_debug:
+            return
+        print(message)
+
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
         try:
             config = SmeltConfig(**self.config)
@@ -29,6 +46,7 @@ class HatchlingBuildHook(BuildHookInterface):
                 "Valid parameters are:\n"
                 f"{[f.name for f in fields(SmeltConfig)]}"
             ) from exc
+        self.debug_log(f"Smelt: Calling build hook with config:\n{config}")
         try:
             run_backend(config, strategy=ModpathType.FS, without_entrypoint=True)
         except Exception as exc:
