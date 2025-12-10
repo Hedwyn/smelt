@@ -78,7 +78,7 @@ version = "0.1.0"
 dependencies = ["click"]
 
 [project.scripts]
-{project_name} = "{project_name}.cli:{project_name}"
+compute-fib = "{project_name}.cli:compute_fib"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/{project_name}"]
@@ -103,9 +103,9 @@ SMELT_MYPYC_SECTION = """\
 CLI_ENTRYPOINT = """\
 import click
 from {project_name}.fib_pure_python import fib_pure_python
-@{project_name}.command()
+@click.command()
 @click.argument("n", type=int)
-def compute_fib(n: int):
+def compute_fib(n: int) -> None:
     click.echo(fib_pure_python(n))
 """
 
@@ -151,7 +151,7 @@ def spawn_package(
                 FIB_CYTHON.format(fib_name="fib_cython_pyx")
             )
         if config.has_nuitka:
-            (src_dir / "fib_cython.pyx").write_text(
+            (src_dir / "cli.py").write_text(
                 CLI_ENTRYPOINT.format(project_name=project_name)
             )
         yield root
@@ -172,7 +172,12 @@ def spawn_package_sanity_check(session: Session) -> None:
     """
     Checks that a basic package can be generated and installed.
     """
+    project_name = "testproject"
     with spawn_package(
-        project_name="testproject", config=NUITKA_ONLY_CONFIG
+        project_name=project_name, config=NUITKA_ONLY_CONFIG
     ) as proj_dir:
         session.install(str(proj_dir))
+        # sanity check: importing the package we jsut installed
+        session.run("python", "-c", f'"import {project_name}"')
+        session.install("pytest")
+        session.run("python", "-m", "pytest", "--package", project_name, "--pdb")
