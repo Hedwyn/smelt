@@ -21,6 +21,7 @@ cli = ["click"]
 nuitka = ["nuitka"]
 cython = ["Cython"]
 build = ["Cython", "nuitka", "mypy[mypyc]", "hatchling"]
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 

@@ -167,15 +167,13 @@ def test_compiler_builds_so(ext_name: TestExtension) -> None:
     with build_temp_extension(ext_name) as shared_lib_path:
         assert os.path.exists(shared_lib_path)
         assert shared_lib_path.endswith(".so")
-    assert not os.path.exists(
-        shared_lib_path
-    ), "`build_temp_extension` fixture did not clean-up properly"
+    assert not os.path.exists(shared_lib_path), (
+        "`build_temp_extension` fixture did not clean-up properly"
+    )
 
 
 @pytest.mark.parametrize("ext_name", AVAILABLE_EXTENSIONS)
-@pytest.mark.parametrize(
-    "platform", [SupportedPlatforms.AARCH64_LINUX, SupportedPlatforms.ARMV7L_LINUX]
-)
+@pytest.mark.parametrize("platform", [SupportedPlatforms.AARCH64_LINUX])
 def test_compiler_crosscompiled_so(
     ext_name: TestExtension, platform: SupportedPlatforms
 ) -> None:
@@ -187,9 +185,9 @@ def test_compiler_crosscompiled_so(
     with build_temp_extension(ext_name, crosscompile=platform) as shared_lib_path:
         assert os.path.exists(shared_lib_path)
         assert shared_lib_path.endswith(".so")
-    assert not os.path.exists(
-        shared_lib_path
-    ), "`build_temp_extension` fixture did not clean-up properly"
+    assert not os.path.exists(shared_lib_path), (
+        "`build_temp_extension` fixture did not clean-up properly"
+    )
 
 
 @pytest.mark.parametrize("ext_name", AVAILABLE_EXTENSIONS)

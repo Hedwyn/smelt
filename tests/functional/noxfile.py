@@ -64,7 +64,7 @@ def {fib_name}(n: int) -> int:
     if n <= 1:
         return n
     else:
-        return {fib_name}(n - 2) + fib(n - 1)\
+        return {fib_name}(n - 2) + {fib_name}(n - 1)\
 """
 
 PYPROJECT_TEMPLATE = """\
@@ -180,4 +180,8 @@ def spawn_package_sanity_check(session: Session) -> None:
         # sanity check: importing the package we jsut installed
         session.run("python", "-c", f'"import {project_name}"')
         session.install("pytest")
-        session.run("python", "-m", "pytest", "--package", project_name, "--pdb")
+        # installing smelt itself
+        # NOTE: relative location is hard-coded, if this tests folder gets moved around
+        # this should be updated accordingly
+        session.install("../..")
+        session.run("python", "-m", "pytest", "--package", project_name)
