@@ -13,7 +13,7 @@ def hatchdemo(): ...
 def say_hello():
     from hatchdemo.hello import hello
 
-    hello()
+    print(hello())
 
 
 @hatchdemo.command()
