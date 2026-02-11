@@ -20,7 +20,7 @@ mypyc = ["mypy[mypyc]"]
 cli = ["click"]
 nuitka = ["nuitka"]
 cython = ["Cython"]
-build = ["Cython", "nuitka", "mypy[mypyc]", "hatchling"]
+build = ["Cython", "nuitka", "mypy[mypyc]", "hatchling", "editables"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
