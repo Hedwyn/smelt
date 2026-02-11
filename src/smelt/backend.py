@@ -13,6 +13,7 @@ import shutil
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any, Self
 
 from smelt.compiler import compile_extension
 from smelt.mypycify import mypycify_module
@@ -26,6 +27,12 @@ _logger = logging.getLogger(__name__)
 
 
 @dataclass
+class NativeExtension:
+    import_path: str
+    sources: list[str]
+
+
+@dataclass
 class SmeltConfig:
     """
     Defines how the smelt backend should run
@@ -33,9 +40,18 @@ class SmeltConfig:
 
     mypyc: dict[str, str] = field(default_factory=dict)
     cython: dict[str, str] = field(default_factory=dict)
-    c_extensions: dict[str, str] = field(default_factory=dict)
+    c_extensions: list[NativeExtension] = field(default_factory=list)
     entrypoint: str | None = None
     debug: bool = False
+
+    @classmethod
+    def from_toml_data(cls, toml_data: dict[str, Any]) -> Self:
+        native_extensions_decl = toml_data.pop("c_extensions", [])
+        native_extensions = [NativeExtension(**decl) for decl in native_extensions_decl]
+        return cls(
+            c_extensions=native_extensions,
+            **toml_data,
+        )
 
     def __str__(self) -> str:
         """
@@ -148,7 +164,11 @@ def run_backend(
         "`run_backend` implementation is not fully implemented yet and will only "
         "compile C extensions"
     )
-    for c_extension, relative_path in config.c_extensions.items():
+    for native_extension in config.c_extensions:
+        sources = native_extension.sources
+        if len(sources) > 1:
+            raise NotImplementedError("Not supported yet")
+        relative_path = sources[0]
         c_extension_path = os.path.join(project_root, relative_path)
         parent_folder_path = Path(c_extension_path).parent
         # TODO: we should probably run that logic in temp folder

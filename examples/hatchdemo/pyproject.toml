@@ -19,5 +19,6 @@ packages = ["src/hatchdemo"]
 [tool.hatch.build.hooks.smelt]
 entrypoint = "hatchdemo.cli"
 
-[tool.hatch.build.hooks.smelt.c_extensions]
-"hatchdemo.hello" = "src/hatchdemo/hello.c"
+[[tool.hatch.build.hooks.smelt.c_extensions]]
+import_path = "hatchdemo.hello"
+sources = ["src/hatchdemo/hello.c"]
