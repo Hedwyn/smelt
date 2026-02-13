@@ -31,7 +31,6 @@ class HatchlingBuildHook(BuildHookInterface):
     @cached_property
     def smelt_config(self) -> SmeltConfig:
         try:
-            # config = SmeltConfig(**self.config)
             config = SmeltConfig.from_toml_data(self.config)
         except Exception as exc:
             raise ValueError(
