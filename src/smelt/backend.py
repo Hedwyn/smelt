@@ -7,6 +7,7 @@ Build backend implementation for smelt.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
@@ -15,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
-from smelt.compiler import compile_extension
+from smelt.compiler import compile_extension, compile_zig_module
 from smelt.mypycify import mypycify_module
 from smelt.nuitkaify import Stdout, compile_with_nuitka
 from smelt.utils import GenericExtension, ModpathType, locate_module, toggle_mod_path
@@ -33,6 +34,13 @@ class NativeExtension:
 
 
 @dataclass
+class ZigModule:
+    name: str
+    import_path: str
+    folder: str = "."
+
+
+@dataclass
 class SmeltConfig:
     """
     Defines how the smelt backend should run
@@ -41,6 +49,7 @@ class SmeltConfig:
     mypyc: dict[str, str] = field(default_factory=dict)
     cython: dict[str, str] = field(default_factory=dict)
     c_extensions: list[NativeExtension] = field(default_factory=list)
+    zig_modules: list[ZigModule] = field(default_factory=list)
     entrypoint: str | None = None
     debug: bool = False
 
@@ -48,8 +57,11 @@ class SmeltConfig:
     def from_toml_data(cls, toml_data: dict[str, Any]) -> Self:
         native_extensions_decl = toml_data.pop("c_extensions", [])
         native_extensions = [NativeExtension(**decl) for decl in native_extensions_decl]
+        zig_modules_decl = toml_data.pop("zig_modules", [])
+        zig_modules = [ZigModule(**decl) for decl in zig_modules_decl]
         return cls(
             c_extensions=native_extensions,
+            zig_modules=zig_modules,
             **toml_data,
         )
 
@@ -164,6 +176,9 @@ def run_backend(
         "`run_backend` implementation is not fully implemented yet and will only "
         "compile C extensions"
     )
+    for zig_mod in config.zig_modules:
+        compile_zig_module(zig_mod.name, zig_mod.folder, zig_mod.import_path)
+
     for native_extension in config.c_extensions:
         sources = native_extension.sources
         if len(sources) > 1:
