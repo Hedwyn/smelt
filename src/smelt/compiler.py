@@ -7,6 +7,7 @@ Defines a distutils compiler based on Zig.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
@@ -20,9 +21,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Final
 
 from distutils.compilers.C.unix import Compiler
-from setuptools import Extension
+from setuptools import Extension, extension
 
 from smelt.utils import get_extension_suffix
+from smelt.process import call_command
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -188,6 +190,21 @@ def zig_build_exe(
     # copying the shared library to the expected name
     # shutil.copy(f"lib{name}.so", dest_name)
     return dest_name
+
+
+def compile_zig_module(name: str, folder: str, import_path: str) -> None:
+    with contextlib.chdir(folder):
+        call_command("zig", "build")
+        # TODO windows
+        lib_path = Path.cwd() / "zig-out" / "lib" / (name + ".so")
+
+    # TODO crosscompile
+    suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    target_path = import_path.replace(".", "/") + suffix
+    shutil.move(
+        lib_path,
+        target_path,
+    )
 
 
 def compile_extension(

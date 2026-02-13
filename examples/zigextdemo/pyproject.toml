@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling", "smelt", "mypy[mypyc]"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smelt-hatchling-demo"
+version = "0.1.0"
+description = "A minimal package setup using smelt + hatchling hook"
+requires-python = ">=3.12"
+authors = [{ name = "Baptiste Pestourie" }]
+dependencies = ["click"]
+
+[project.scripts]
+zigextdemo = "hatchdemo.cli:hatchdemo"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zigextdemo"]
+
+[tool.hatch.build.hooks.smelt]
+entrypoint = "zigextdemo.cli"
+
+[[tool.hatch.build.hooks.smelt.zig_modules]]
+import_path = "zigextdemo.zigextdemo"
+name = "zigextdemo"
+folder = "."
