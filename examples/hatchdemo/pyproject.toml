@@ -20,7 +20,7 @@ packages = ["src/hatchdemo"]
 entrypoint = "hatchdemo.cli"
 
 [[tool.hatch.build.hooks.smelt.mypyc_modules]]
-import_path="hatchdemo.fib"
+import_path = "hatchdemo.fib"
 source = "src/hatchdemo/fib.py"
 
 [[tool.hatch.build.hooks.smelt.c_extensions]]
@@ -30,3 +30,7 @@ sources = ["src/hatchdemo/hello.c"]
 [[tool.hatch.build.hooks.smelt.c_extensions]]
 import_path = "hatchdemo.zighello"
 sources = ["src/hatchdemo/zighello.zig"]
+
+[[tool.hatch.build.hooks.smelt.cython_modules]]
+import_path = "hatchdemo.fib_cython"
+source = "src/hatchdemo/fib_cython.pyx"
