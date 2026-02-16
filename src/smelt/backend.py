@@ -14,7 +14,7 @@ import shutil
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Iterable, Self
 
 from smelt.compiler import compile_extension, compile_zig_module
 from smelt.mypycify import mypycify_module
@@ -34,6 +34,12 @@ class NativeExtension:
 
 
 @dataclass
+class MypycModule:
+    import_path: str
+    source: str | None = None
+
+
+@dataclass
 class ZigModule:
     name: str
     import_path: str
@@ -46,7 +52,7 @@ class SmeltConfig:
     Defines how the smelt backend should run
     """
 
-    mypyc: dict[str, str] = field(default_factory=dict)
+    mypyc_modules: list[MypycModule] = field(default_factory=list)
     cython: dict[str, str] = field(default_factory=dict)
     c_extensions: list[NativeExtension] = field(default_factory=list)
     zig_modules: list[ZigModule] = field(default_factory=list)
@@ -55,11 +61,17 @@ class SmeltConfig:
 
     @classmethod
     def from_toml_data(cls, toml_data: dict[str, Any]) -> Self:
+        # native code
         native_extensions_decl = toml_data.pop("c_extensions", [])
         native_extensions = [NativeExtension(**decl) for decl in native_extensions_decl]
+        # zig modules
         zig_modules_decl = toml_data.pop("zig_modules", [])
         zig_modules = [ZigModule(**decl) for decl in zig_modules_decl]
+        # mypyc modules
+        mypyc_modules_decl = toml_data.pop("mypyc_modules", [])
+        mypyc_modules = [MypycModule(**decl) for decl in mypyc_modules_decl]
         return cls(
+            mypyc_modules=mypyc_modules,
             c_extensions=native_extensions,
             zig_modules=zig_modules,
             **toml_data,
@@ -89,25 +101,29 @@ class SmeltConfig:
 
 
 def compile_mypyc_extensions(
-    project_root: str | Path, mypyc_config: dict[str, str]
+    project_root: str | Path, modules: Iterable[MypycModule]
 ) -> list[GenericExtension]:
     """
     Compiles all mypy extensions defined in `mypyc_config` for the project found at `project_root`
     """
 
     built_extensions: list[GenericExtension] = []
-    for mypyc_extension, ext_path in mypyc_config.items():
+    # for mypyc_extension, ext_path in mypyc_config.items():
+    for module in modules:
+        module_import_path = module.import_path
+        ext_path = module.source
+        assert ext_path is not None, "auto-resolution of module path not supported yet"
         full_ext_path = os.path.join(project_root, ext_path)
-        mypyc_ext = mypycify_module(mypyc_extension, full_ext_path)
+        mypyc_ext = mypycify_module(module_import_path, full_ext_path)
         module_so_path = compile_extension(mypyc_ext.extension)
         runtime_so_path = compile_extension(mypyc_ext.runtime)
         so_dest_path = str(mypyc_ext.get_dest_path())
         runtime_dest_path = str(mypyc_ext.get_runtime_dest_path())
         shutil.move(runtime_so_path, runtime_dest_path)
         shutil.move(module_so_path, so_dest_path)
-        _logger.info("Built extensions %s @ %s", mypyc_extension, so_dest_path)
+        _logger.info("Built extensions %s @ %s", module_import_path, so_dest_path)
         if mypyc_ext.runtime:
-            _logger.info("-> %s runtime: %s", mypyc_extension, runtime_dest_path)
+            _logger.info("-> %s runtime: %s", module_import_path, runtime_dest_path)
         built_extensions.append(mypyc_ext)
     return built_extensions
 
@@ -197,7 +213,9 @@ def run_backend(
     # as it would be invisible otherwise
     shared_runtime_extensions: set[str] = set()
     collected_extensions: list[GenericExtension] = []
-    built_mypyc_extensions = compile_mypyc_extensions(project_root, config.mypyc)
+    built_mypyc_extensions = compile_mypyc_extensions(
+        project_root, config.mypyc_modules
+    )
     for ext in built_mypyc_extensions:
         if ext.runtime:
             shared_runtime_extensions.add(ext.runtime.name)
