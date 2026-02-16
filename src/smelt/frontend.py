@@ -120,44 +120,6 @@ def wrap_smelt_errors(
     return wrapper()
 
 
-def parse_config(toml_data: TomlData) -> SmeltConfig:
-    """
-    Parses a TOML smelt config and returns the dataclass representation.
-    TOML data might come from a dedicated smelt config file or from pyproject.toml.
-    For the latter, smelt config should be found under [tool.smelt]
-    Use `parse_config_from_pyproject` to get a standalone implementation.
-    """
-    _c_extensions = toml_data.get("c_extensions", [])
-    assert isinstance(_c_extensions, dict)
-    assert all(
-        (
-            isinstance(key, str) and isinstance(val, str)
-            for key, val in _c_extensions.items()
-        )
-    ), _c_extensions
-    c_extensions = cast(dict[str, str], _c_extensions)
-    _mypyc = toml_data.get("mypyc", {})
-    assert isinstance(_mypyc, dict)
-    assert all(
-        (isinstance(key, str) and isinstance(val, str) for key, val in _mypyc.items())
-    ), _mypyc
-    mypyc = cast(dict[str, str], _mypyc)
-
-    cython = cast(dict[str, str], toml_data.get("cython", {}))
-
-    entrypoint = toml_data.get("entrypoint", None)
-    if entrypoint is None:
-        # for now, raising
-        raise SmeltConfigError("Defining an entrypoint for smelt is mandatory")
-    assert isinstance(entrypoint, str), entrypoint
-    return SmeltConfig(
-        c_extensions=c_extensions,
-        mypyc=mypyc,
-        entrypoint=entrypoint,
-        cython=cython,
-    )
-
-
 def toml_get_nested_section(
     toml_data: TomlData, *path: str
 ) -> dict[str, Any] | list[Any]:
@@ -193,7 +155,6 @@ def parse_config_from_pyproject(
 ) -> SmeltConfig:
     """
     Extracts Smelt config from TOML data coming out of a pyproject.toml
-    If parsing a smelt config file directly, use `parse_config` instead.
     """
     tool_config = toml_data.get("tool", {})
     config_path = (
@@ -214,7 +175,7 @@ def parse_config_from_pyproject(
         raise SmeltConfigError(
             f"`smelt` section should be a dictionary, got {smelt_config}. "
         )
-    return parse_config(smelt_config)
+    return SmeltConfig.from_toml_data(smelt_config)
 
 
 @click.group()
