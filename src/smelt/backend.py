@@ -34,6 +34,12 @@ class NativeExtension:
 
 
 @dataclass
+class CythonExtension:
+    import_path: str
+    source: str
+
+
+@dataclass
 class MypycModule:
     import_path: str
     source: str | None = None
@@ -52,8 +58,10 @@ class SmeltConfig:
     Defines how the smelt backend should run
     """
 
+    mypyc_options: dict[str, Any] = field(default_factory=dict)
     mypyc_modules: list[MypycModule] = field(default_factory=list)
-    cython: dict[str, str] = field(default_factory=dict)
+    cython_options: dict[str, Any] = field(default_factory=dict)
+    cython_modules: list[CythonExtension] = field(default_factory=list)
     c_extensions: list[NativeExtension] = field(default_factory=list)
     zig_modules: list[ZigModule] = field(default_factory=list)
     entrypoint: str | None = None
@@ -70,10 +78,14 @@ class SmeltConfig:
         # mypyc modules
         mypyc_modules_decl = toml_data.pop("mypyc_modules", [])
         mypyc_modules = [MypycModule(**decl) for decl in mypyc_modules_decl]
+        # cython
+        cython_modules_decl = toml_data.pop("cython_modules", [])
+        cython_modules = [CythonExtension(**decl) for decl in cython_modules_decl]
         return cls(
             mypyc_modules=mypyc_modules,
             c_extensions=native_extensions,
             zig_modules=zig_modules,
+            cython_modules=cython_modules,
             **toml_data,
         )
 
@@ -129,11 +141,14 @@ def compile_mypyc_extensions(
 
 
 def compile_cython_extensions(
-    project_root: str | Path, cython_config: dict[str, str]
+    project_root: str | Path,
+    modules: list[CythonExtension],
+    options: dict[str, Any] | None = None,
 ) -> list[GenericExtension]:
     """
     Compiles all the cython extensions as defined in `cython_config`
     """
+    options = options or {}
     try:
         from Cython.Build import cythonize
     except ImportError as exc:
@@ -141,31 +156,22 @@ def compile_cython_extensions(
             "Cython is not installed. consider installing smelt with [cython] extra"
         ) from exc
     extensions: list[GenericExtension] = []
-    modules = cython_config.get("modules", [])
-    remapped_modules = cython_config.get("remapped_modules", {})
-    assert isinstance(remapped_modules, dict)
-    remapped_modules = remapped_modules.copy()
 
-    for mod in modules:
-        mod_import_path = toggle_mod_path(mod, ModpathType.IMPORT)
-
-        remapped_modules[mod] = mod_import_path
-
-    cython_options = cython_config.get("cython_options", {})
-
-    for source_path, module_path in remapped_modules.items():
+    for module in modules:
+        source_path = module.source
+        import_path = module.import_path
         full_source_path = os.path.join(project_root, source_path)
-        cython_ext = cythonize(full_source_path, **cython_options)
+        cython_ext = cythonize(full_source_path, **options)
         assert len(cython_ext) == 1, (
             "Passed on source file to cython yet it produced more than one extension"
         )
         (base_ext,) = cython_ext
-        base_ext.name = module_path
+        ext_name = import_path.split(".")[-1]
+        base_ext.name = ext_name
         generic_ext = GenericExtension(
-            # name=os.path.basename(full_source_path),
-            name=module_path,
+            name=ext_name,
             src_path=full_source_path,
-            import_path=module_path,
+            import_path=import_path,
             extension=base_ext,
             dest_folder=Path(full_source_path).parent,
         )
@@ -220,7 +226,9 @@ def run_backend(
         if ext.runtime:
             shared_runtime_extensions.add(ext.runtime.name)
     # cython extensions
-    collected_extensions.extend(compile_cython_extensions(project_root, config.cython))
+    collected_extensions.extend(
+        compile_cython_extensions(project_root, config.cython_modules)
+    )
     for generic_ext in collected_extensions:
         module_so_path = compile_extension(generic_ext.extension)
         shutil.move(module_so_path, str(generic_ext.get_dest_path()))
