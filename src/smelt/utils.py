@@ -387,7 +387,9 @@ class PackageRootPath(NamedTuple):
 class PathSolver:
     known_roots: list[PackageRootPath] = field(default_factory=list)
 
-    def resolve_import_path(self, import_path: ImportPath) -> Path:
+    def resolve_import_path(
+        self, import_path: ImportPath, file_extension: str = "py"
+    ) -> Path:
         package, *modules = import_path.split(".")
         for package_name, path in self.known_roots:
             if package == package_name:
@@ -396,4 +398,6 @@ class PathSolver:
         else:  # no break
             root = Path(package)
 
-        return root / Path(*modules)
+        subpath = "/".join(modules) + "." + file_extension
+
+        return root / subpath
