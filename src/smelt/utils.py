@@ -16,11 +16,20 @@ import sysconfig
 import tempfile
 import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from types import ModuleType
-from typing import Generator, Literal, NewType, assert_never, cast, overload
+from typing import (
+    Generator,
+    Literal,
+    NamedTuple,
+    NewType,
+    assert_never,
+    cast,
+    overload,
+    Self,
+)
 
 from setuptools._distutils.extension import Extension
 from smelt.context import get_context
@@ -362,3 +371,29 @@ class GenericExtension:
         )
         ext_so_name = f"{self.name}__mypyc{suffix}"
         return self.dest_folder / ext_so_name
+
+
+class PackageRootPath(NamedTuple):
+    package_name: str
+    path: Path
+
+    @classmethod
+    def from_path(cls, path: Path) -> Self:
+        package_name = path.parts[0]
+        return cls(package_name, path)
+
+
+@dataclass
+class PathSolver:
+    known_roots: list[PackageRootPath] = field(default_factory=list)
+
+    def resolve_import_path(self, import_path: ImportPath) -> Path:
+        package, *modules = import_path.split(".")
+        for package_name, path in self.known_roots:
+            if package == package_name:
+                root = Path(path)
+                break
+        else:  # no break
+            root = Path(package)
+
+        return root / Path(*modules)

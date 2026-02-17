@@ -19,7 +19,14 @@ from typing import Any, Iterable, Self
 from smelt.compiler import compile_extension, compile_zig_module
 from smelt.mypycify import mypycify_module
 from smelt.nuitkaify import Stdout, compile_with_nuitka
-from smelt.utils import GenericExtension, ModpathType, locate_module, toggle_mod_path
+from smelt.utils import (
+    GenericExtension,
+    ModpathType,
+    locate_module,
+    toggle_mod_path,
+    PathSolver,
+    PackageRootPath,
+)
 
 # TODO: replace .so references to a variable that's set to .so
 # for Unix-like and .dll for Windows
@@ -58,6 +65,7 @@ class SmeltConfig:
     Defines how the smelt backend should run
     """
 
+    packages_location: dict[str, str] = field(default_factory=dict)
     mypyc_options: dict[str, Any] = field(default_factory=dict)
     mypyc_modules: list[MypycModule] = field(default_factory=list)
     cython_options: dict[str, Any] = field(default_factory=dict)
@@ -89,6 +97,17 @@ class SmeltConfig:
             **toml_data,
         )
 
+    def get_path_solver(self) -> PathSolver:
+        """
+        Builds a PathSolver based on the package configuration.
+        """
+        return PathSolver(
+            known_roots=[
+                PackageRootPath(alias, Path(path))
+                for alias, path in self.packages_location.items()
+            ]
+        )
+
     def __str__(self) -> str:
         """
         A human-friendly stringified version of this config.
@@ -113,20 +132,20 @@ class SmeltConfig:
 
 
 def compile_mypyc_extensions(
-    project_root: str | Path, modules: Iterable[MypycModule]
+    modules: Iterable[MypycModule],
+    path_solver: PathSolver | None = None,
 ) -> list[GenericExtension]:
     """
     Compiles all mypy extensions defined in `mypyc_config` for the project found at `project_root`
     """
-
+    path_solver = path_solver or PathSolver()
     built_extensions: list[GenericExtension] = []
     # for mypyc_extension, ext_path in mypyc_config.items():
     for module in modules:
         module_import_path = module.import_path
         ext_path = module.source
         assert ext_path is not None, "auto-resolution of module path not supported yet"
-        full_ext_path = os.path.join(project_root, ext_path)
-        mypyc_ext = mypycify_module(module_import_path, full_ext_path)
+        mypyc_ext = mypycify_module(module_import_path, ext_path)
         module_so_path = compile_extension(mypyc_ext.extension)
         runtime_so_path = compile_extension(mypyc_ext.runtime)
         so_dest_path = str(mypyc_ext.get_dest_path())
@@ -141,13 +160,14 @@ def compile_mypyc_extensions(
 
 
 def compile_cython_extensions(
-    project_root: str | Path,
     modules: list[CythonExtension],
     options: dict[str, Any] | None = None,
+    path_solver: PathSolver | None = None,
 ) -> list[GenericExtension]:
     """
     Compiles all the cython extensions as defined in `cython_config`
     """
+    path_solver = path_solver or PathSolver()
     options = options or {}
     try:
         from Cython.Build import cythonize
@@ -160,8 +180,7 @@ def compile_cython_extensions(
     for module in modules:
         source_path = module.source
         import_path = module.import_path
-        full_source_path = os.path.join(project_root, source_path)
-        cython_ext = cythonize(full_source_path, **options)
+        cython_ext = cythonize(source_path, **options)
         assert len(cython_ext) == 1, (
             "Passed on source file to cython yet it produced more than one extension"
         )
@@ -170,10 +189,10 @@ def compile_cython_extensions(
         base_ext.name = ext_name
         generic_ext = GenericExtension(
             name=ext_name,
-            src_path=full_source_path,
+            src_path=source_path,
             import_path=import_path,
             extension=base_ext,
-            dest_folder=Path(full_source_path).parent,
+            dest_folder=Path(source_path).parent,
         )
         extensions.append(generic_ext)
     return extensions
@@ -182,7 +201,7 @@ def compile_cython_extensions(
 def run_backend(
     config: SmeltConfig,
     stdout: Stdout | None = None,
-    project_root: Path | str = ".",
+    path_solver: PathSolver | None = None,
     strategy: ModpathType = ModpathType.FS,
     *,
     without_entrypoint: bool = False,
@@ -193,6 +212,7 @@ def run_backend(
     * mypyc extensions
     * Nuitka compilation
     """
+    path_solver = path_solver or config.get_path_solver()
     # Starting with C extensions
     warnings.warn(
         "`run_backend` implementation is not fully implemented yet and will only "
@@ -205,8 +225,7 @@ def run_backend(
         sources = native_extension.sources
         if len(sources) > 1:
             raise NotImplementedError("Not supported yet")
-        relative_path = sources[0]
-        c_extension_path = os.path.join(project_root, relative_path)
+        c_extension_path = sources[0]
         parent_folder_path = Path(c_extension_path).parent
         # TODO: we should probably run that logic in temp folder
         built_so_path = compile_extension(c_extension_path)
@@ -219,15 +238,13 @@ def run_backend(
     # as it would be invisible otherwise
     shared_runtime_extensions: set[str] = set()
     collected_extensions: list[GenericExtension] = []
-    built_mypyc_extensions = compile_mypyc_extensions(
-        project_root, config.mypyc_modules
-    )
+    built_mypyc_extensions = compile_mypyc_extensions(config.mypyc_modules, path_solver)
     for ext in built_mypyc_extensions:
         if ext.runtime:
             shared_runtime_extensions.add(ext.runtime.name)
     # cython extensions
     collected_extensions.extend(
-        compile_cython_extensions(project_root, config.cython_modules)
+        compile_cython_extensions(config.cython_modules, path_solver=path_solver)
     )
     for generic_ext in collected_extensions:
         module_so_path = compile_extension(generic_ext.extension)
@@ -239,7 +256,7 @@ def run_backend(
     without_entrypoint = without_entrypoint and config.entrypoint is not None
     if not without_entrypoint:
         entrypoint_file = locate_module(
-            config.entrypoint, strategy=strategy, package_root=project_root
+            config.entrypoint, strategy=strategy, package_root=path_solver
         )
         compile_with_nuitka(
             entrypoint_file, stdout=stdout, include_modules=shared_runtime_extensions
