@@ -143,8 +143,9 @@ def compile_mypyc_extensions(
     # for mypyc_extension, ext_path in mypyc_config.items():
     for module in modules:
         module_import_path = module.import_path
-        ext_path = module.source
-        assert ext_path is not None, "auto-resolution of module path not supported yet"
+        ext_path = module.source or str(
+            path_solver.resolve_import_path(module_import_path)
+        )
         mypyc_ext = mypycify_module(module_import_path, ext_path)
         module_so_path = compile_extension(mypyc_ext.extension)
         runtime_so_path = compile_extension(mypyc_ext.runtime)
