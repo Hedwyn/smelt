@@ -8,6 +8,7 @@ Common utilities for this package.
 from __future__ import annotations
 
 import importlib
+import keyword
 import logging
 import os
 import shutil
@@ -23,18 +24,64 @@ from types import ModuleType
 from typing import (
     Generator,
     Literal,
+    TypeGuard,
     NamedTuple,
     NewType,
+    Self,
     assert_never,
     cast,
     overload,
-    Self,
 )
 
 from setuptools._distutils.extension import Extension
+
 from smelt.context import get_context
 
 _logger = logging.getLogger(__name__)
+
+PathExists = NewType("PathExists", str)
+ModuleName = NewType("ModuleName", str)
+
+
+def get_module_name(import_path: ImportPath) -> str:
+    """
+    Extracts the module name at the stem from `import_path`.
+    """
+    return import_path.split(".")[-1]
+
+
+def path_exists(path: Path) -> TypeGuard[Path]:
+    """
+    Type magic.
+    Allows representing existence of a given path in the type system.
+    """
+    return path.exists()
+
+
+def is_valid_import_path(import_path: str) -> TypeGuard[ImportPath]:
+    """
+    Checks if `import_path` is a valid import path in Python.
+    """
+    if not isinstance(import_path, str) or not import_path:
+        return False
+
+    parts = import_path.split(".")
+
+    for part in parts:
+        if not part.isidentifier():
+            return False
+        if keyword.iskeyword(part):
+            return False
+    return True
+
+
+def is_valid_module_name(name: str) -> TypeGuard[ModuleName]:
+    """
+    Checks that `name` is a valid module name in Python.
+    """
+    if not is_valid_import_path(name):
+        return False
+    return "." not in name
 
 
 # --- Errors ---

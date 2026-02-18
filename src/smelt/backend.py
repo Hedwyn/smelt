@@ -7,24 +7,22 @@ Build backend implementation for smelt.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import shutil
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Self, cast
+from typing import Any, Iterable, Self
+
 
 from smelt.compiler import compile_extension, compile_zig_module
 from smelt.mypycify import mypycify_module
-from smelt.nuitkaify import Stdout, compile_with_nuitka, nuitkaify_module
+from smelt.nuitkaify import Stdout, compile_with_nuitka, nuitkaify_module, NuitkaModule
 from smelt.utils import (
     GenericExtension,
-    ImportPath,
     ModpathType,
     locate_module,
-    toggle_mod_path,
     PathSolver,
     PackageRootPath,
 )
@@ -49,12 +47,6 @@ class CythonExtension:
 
 @dataclass
 class MypycModule:
-    import_path: str
-    source: str | None = None
-
-
-@dataclass
-class NuitkaModule:
     import_path: str
     source: str | None = None
 
@@ -261,19 +253,10 @@ def run_backend(
         compile_cython_extensions(config.cython_modules, path_solver=path_solver)
     )
     for nuitka_mod in config.nuitka_modules:
-        # TODO add typeguard
-        import_path = cast(ImportPath, nuitka_mod.import_path)
-        path = nuitka_mod.source or str(path_solver.resolve_import_path(import_path))
-        extension = nuitkaify_module(path, stdout="stdout")
         collected_extensions.append(
-            GenericExtension(
-                name=import_path.split(".")[-1],
-                import_path=import_path,
-                src_path=path,
-                extension=extension,
-                dest_folder=Path(path).parent,
-            )
+            nuitkaify_module(nuitka_mod, path_solver=path_solver)
         )
+
     for generic_ext in collected_extensions:
         module_so_path = compile_extension(generic_ext.extension)
         shutil.move(module_so_path, str(generic_ext.get_dest_path()))
