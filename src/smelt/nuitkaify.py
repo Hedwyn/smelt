@@ -145,7 +145,6 @@ def compile_with_nuitka(
 
 def nuitkaify_module(
     path: str,
-    no_follow_imports: bool = False,
     stdout: Stdout | None = None,
     include_modules: Iterable[str] | None = None,
     include_packages: Iterable[str] | None = None,
@@ -154,6 +153,7 @@ def nuitkaify_module(
     Compiles the module given by `path`.
     Follows imports by default, but can be disabled with `no_follow_imports`.
     """
+    context = get_context()
     cmd = list(NUITKA_ENTRYPOINT)
     cmd.append("--module")
     cmd.append(path)
@@ -179,20 +179,15 @@ def nuitkaify_module(
             cmd.append(f"--include-package={package}")
 
     _logger.debug("Running %s", " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    while True:
-        assert proc.stdout is not None, "Process not created with stdout in PIPE mode"
-        line = proc.stdout.readline()
-        if not line:
-            break
-        decoded_line = line.decode().rstrip()
-        if stdout == "logger":
-            _logger.info(decoded_line)
-        elif stdout == "stdout":
-            print(decoded_line)
 
-    if proc.returncode is not None:
-        _logger.info("[Nuitka]: %d", proc.returncode)
+    cmd_trace = call_command(*cmd, printer=print if stdout == "stdout" else None)
+    if context:
+        context.add_trace(cmd_trace)
+    if cmd_trace.exit_code != 0:
+        raise RuntimeError(
+            f"Nuitka failed with exitcode {cmd_trace.exit_code}: {' '.join(cmd)}"
+        )
+
     modname = os.path.basename(path)
     build_folder = modname.replace(".py", ".build")
     assert os.path.exists(build_folder)
