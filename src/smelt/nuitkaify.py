@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
+from dataclasses import dataclass
 import sys
 from pathlib import Path
 from typing import Final, Iterable, Iterator, Literal
@@ -27,8 +27,16 @@ from setuptools import Extension
 from .process import call_command
 
 from smelt.context import get_context
+from smelt.utils import GenericExtension, ImportPath, PathSolver
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass
+class NuitkaModule:
+    import_path: ImportPath
+    source: str | None = None
+
 
 NUITKA_ENTRYPOINT: Final[tuple[str, ...]] = (sys.executable, "-m", "nuitka")
 
@@ -144,19 +152,23 @@ def compile_with_nuitka(
 
 
 def nuitkaify_module(
-    path: str,
+    module: NuitkaModule,
+    path_solver: PathSolver | None = None,
     stdout: Stdout | None = None,
     include_modules: Iterable[str] | None = None,
     include_packages: Iterable[str] | None = None,
-) -> Extension:
+) -> GenericExtension:
     """
     Compiles the module given by `path`.
     Follows imports by default, but can be disabled with `no_follow_imports`.
     """
+    path_solver = path_solver or PathSolver()
     context = get_context()
+    src_path = module.source or path_solver.resolve_import_path(module.import_path)
+    mod_filename = os.path.basename(src_path)
     cmd = list(NUITKA_ENTRYPOINT)
     cmd.append("--module")
-    cmd.append(path)
+    cmd.append(str(src_path))
     # TODO: the clean approach will to use the `--generate-c-only` since we want to
     # compile ourselves, however, when enabled nuitka generates the C code
     # but does not copy the static source files from its own package
@@ -188,8 +200,7 @@ def nuitkaify_module(
             f"Nuitka failed with exitcode {cmd_trace.exit_code}: {' '.join(cmd)}"
         )
 
-    modname = os.path.basename(path)
-    build_folder = modname.replace(".py", ".build")
+    build_folder = mod_filename.replace(".py", ".build")
     assert os.path.exists(build_folder)
     c_sources = [str(src) for src in iterate_nuitka_c_sources(build_folder)]
     assert c_sources, (
@@ -199,11 +210,18 @@ def nuitkaify_module(
     header_sources.append(build_folder)
     # patching build_definitions.h, as we don't need extensions
     open(os.path.join(build_folder, "build_definitions.h"), "w+").close()
-    return Extension(
-        name=modname.replace(".py", ""),
+    setup_tools_ext = Extension(
+        name=mod_filename.replace(".py", ""),
         sources=c_sources,
         include_dirs=header_sources,
         define_macros=NUITKA_MACROS,
         libraries=["m", "dl", "z"],
         extra_compile_args=list(NUITKA_MINIMAL_FLAGS),
+    )
+    return GenericExtension(
+        name=module.import_path.split(".")[-1],
+        import_path=module.import_path,
+        src_path=str(src_path),
+        extension=setup_tools_ext,
+        dest_folder=Path(src_path).parent,
     )
