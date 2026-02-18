@@ -14,13 +14,14 @@ import shutil
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Self
+from typing import Any, Iterable, Self, cast
 
 from smelt.compiler import compile_extension, compile_zig_module
 from smelt.mypycify import mypycify_module
-from smelt.nuitkaify import Stdout, compile_with_nuitka
+from smelt.nuitkaify import Stdout, compile_with_nuitka, nuitkaify_module
 from smelt.utils import (
     GenericExtension,
+    ImportPath,
     ModpathType,
     locate_module,
     toggle_mod_path,
@@ -53,6 +54,12 @@ class MypycModule:
 
 
 @dataclass
+class NuitkaModule:
+    import_path: str
+    source: str | None = None
+
+
+@dataclass
 class ZigModule:
     name: str
     import_path: str
@@ -70,6 +77,7 @@ class SmeltConfig:
     mypyc_modules: list[MypycModule] = field(default_factory=list)
     cython_options: dict[str, Any] = field(default_factory=dict)
     cython_modules: list[CythonExtension] = field(default_factory=list)
+    nuitka_modules: list[NuitkaModule] = field(default_factory=list)
     c_extensions: list[NativeExtension] = field(default_factory=list)
     zig_modules: list[ZigModule] = field(default_factory=list)
     entrypoint: str | None = None
@@ -89,11 +97,16 @@ class SmeltConfig:
         # cython
         cython_modules_decl = toml_data.pop("cython_modules", [])
         cython_modules = [CythonExtension(**decl) for decl in cython_modules_decl]
+        # nuitka
+        nuitka_modules_decl = toml_data.pop("nuitka_modules", [])
+        nuitka_modules = [NuitkaModule(**decl) for decl in nuitka_modules_decl]
+
         return cls(
             mypyc_modules=mypyc_modules,
             c_extensions=native_extensions,
             zig_modules=zig_modules,
             cython_modules=cython_modules,
+            nuitka_modules=nuitka_modules,
             **toml_data,
         )
 
@@ -247,13 +260,27 @@ def run_backend(
     collected_extensions.extend(
         compile_cython_extensions(config.cython_modules, path_solver=path_solver)
     )
+    for nuitka_mod in config.nuitka_modules:
+        # TODO add typeguard
+        import_path = cast(ImportPath, nuitka_mod.import_path)
+        path = nuitka_mod.source or str(path_solver.resolve_import_path(import_path))
+        extension = nuitkaify_module(path, stdout="stdout")
+        collected_extensions.append(
+            GenericExtension(
+                name=import_path.split(".")[-1],
+                import_path=import_path,
+                src_path=path,
+                extension=extension,
+                dest_folder=Path(path).parent,
+            )
+        )
     for generic_ext in collected_extensions:
         module_so_path = compile_extension(generic_ext.extension)
         shutil.move(module_so_path, str(generic_ext.get_dest_path()))
         if generic_ext.runtime:
             runtime_so_path = compile_extension(generic_ext.extension)
             shutil.move(runtime_so_path, str(generic_ext.get_runtime_dest_path()))
-    # nuitka compile
+    # nuitka entrypoint compilation
     without_entrypoint = without_entrypoint and config.entrypoint is not None
     if not without_entrypoint:
         entrypoint_file = locate_module(
