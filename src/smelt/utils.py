@@ -17,7 +17,7 @@ import sysconfig
 import tempfile
 import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum, auto
 from pathlib import Path
 from types import ModuleType
@@ -41,14 +41,36 @@ _logger = logging.getLogger(__name__)
 
 PathExists = NewType("PathExists", Path)
 ModuleName = NewType("ModuleName", str)
+type _TomlData = str | list[_TomlData] | dict[str, _TomlData]
+type TomlData = dict[str, _TomlData]
 
 
-def path_exists(path: Path) -> TypeGuard[Path]:
+# --- Errors ---
+class SmeltError(Exception):
+    """
+    Base exception class for Smelt errors
+    """
+
+
+class SmeltConfigError(SmeltError):
+    """
+    Raised when running conversions for config loading.
+    """
+
+
+def path_exists(path: Path) -> TypeGuard[PathExists]:
     """
     Type magic.
     Allows representing existence of a given path in the type system.
     """
     return path.exists()
+
+
+def assert_path_exists(path: str) -> PathExists:
+    path_obj = Path(path)
+    if not path_exists(path_obj):
+        raise SmeltConfigError(f"Following file/folder does not exist: {path}")
+    return path_obj
 
 
 def is_valid_import_path(import_path: str) -> TypeGuard[ImportPath]:
@@ -68,6 +90,12 @@ def is_valid_import_path(import_path: str) -> TypeGuard[ImportPath]:
     return True
 
 
+def assert_is_valid_import_path(import_path: str) -> ImportPath:
+    if not is_valid_import_path(import_path):
+        raise SmeltConfigError(f"Invalid python import path: {import_path}")
+    return import_path
+
+
 def is_valid_module_name(name: str) -> TypeGuard[ModuleName]:
     """
     Checks that `name` is a valid module name in Python.
@@ -84,13 +112,6 @@ def get_module_name(import_path: ImportPath) -> ModuleName:
     modname = import_path.split(".")[-1]
     assert is_valid_module_name(modname)
     return modname
-
-
-# --- Errors ---
-class SmeltError(Exception):
-    """
-    Base exception class for Smelt errors
-    """
 
 
 class SmeltMissingModule(SmeltError): ...

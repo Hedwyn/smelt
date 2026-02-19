@@ -11,136 +11,25 @@ import logging
 import os
 import shutil
 import warnings
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Self
+from typing import Any, Iterable
 
 
 from smelt.compiler import compile_extension, compile_zig_module
 from smelt.mypycify import mypycify_module
-from smelt.nuitkaify import Stdout, compile_with_nuitka, nuitkaify_module, NuitkaModule
+from smelt.nuitkaify import Stdout, compile_with_nuitka, nuitkaify_module
 from smelt.utils import (
     GenericExtension,
     ModpathType,
     locate_module,
     PathSolver,
-    PackageRootPath,
-    PathExists,
 )
+from smelt.config import SmeltConfig, MypycModule, CythonExtension
 
 # TODO: replace .so references to a variable that's set to .so
 # for Unix-like and .dll for Windows
 
 _logger = logging.getLogger(__name__)
-
-
-@dataclass
-class NativeExtension:
-    import_path: str
-    sources: list[str]
-
-
-@dataclass
-class PythonModule:
-    import_path: str
-    source: str | None = None
-
-
-@dataclass
-class CythonExtension:
-    import_path: PathExists
-    source: str
-
-
-@dataclass
-class MypycModule:
-    import_path: str
-    source: str | None = None
-
-
-@dataclass
-class ZigModule:
-    name: str
-    import_path: str
-    folder: str = "."
-
-
-@dataclass
-class SmeltConfig:
-    """
-    Defines how the smelt backend should run
-    """
-
-    packages_location: dict[str, str] = field(default_factory=dict)
-    mypyc_options: dict[str, Any] = field(default_factory=dict)
-    mypyc_modules: list[MypycModule] = field(default_factory=list)
-    cython_options: dict[str, Any] = field(default_factory=dict)
-    cython_modules: list[CythonExtension] = field(default_factory=list)
-    nuitka_modules: list[NuitkaModule] = field(default_factory=list)
-    c_extensions: list[NativeExtension] = field(default_factory=list)
-    zig_modules: list[ZigModule] = field(default_factory=list)
-    entrypoint: str | None = None
-    debug: bool = False
-
-    @classmethod
-    def from_toml_data(cls, toml_data: dict[str, Any]) -> Self:
-        # native code
-        native_extensions_decl = toml_data.pop("c_extensions", [])
-        native_extensions = [NativeExtension(**decl) for decl in native_extensions_decl]
-        # zig modules
-        zig_modules_decl = toml_data.pop("zig_modules", [])
-        zig_modules = [ZigModule(**decl) for decl in zig_modules_decl]
-        # mypyc modules
-        mypyc_modules_decl = toml_data.pop("mypyc_modules", [])
-        mypyc_modules = [MypycModule(**decl) for decl in mypyc_modules_decl]
-        # cython
-        cython_modules_decl = toml_data.pop("cython_modules", [])
-        cython_modules = [CythonExtension(**decl) for decl in cython_modules_decl]
-        # nuitka
-        nuitka_modules_decl = toml_data.pop("nuitka_modules", [])
-        nuitka_modules = [NuitkaModule(**decl) for decl in nuitka_modules_decl]
-
-        return cls(
-            mypyc_modules=mypyc_modules,
-            c_extensions=native_extensions,
-            zig_modules=zig_modules,
-            cython_modules=cython_modules,
-            nuitka_modules=nuitka_modules,
-            **toml_data,
-        )
-
-    def get_path_solver(self) -> PathSolver:
-        """
-        Builds a PathSolver based on the package configuration.
-        """
-        return PathSolver(
-            known_roots=[
-                PackageRootPath(alias, Path(path))
-                for alias, path in self.packages_location.items()
-            ]
-        )
-
-    def __str__(self) -> str:
-        """
-        A human-friendly stringified version of this config.
-        """
-        lines: list[str] = []
-        for field_name, value in asdict(self).items():
-            if isinstance(value, list):
-                value = ",".join(value)
-            if isinstance(value, dict):
-                value = "".join(
-                    ("\n * " + f"{key} -> {val}" for key, val in value.items())
-                )
-            lines.append(f"{field_name:20}: {value}")
-        return "\n".join(lines)
-
-    def load_env(self) -> None:
-        """
-        Updates internal values based on set environement variables.
-        """
-        if os.environ.get("SMELT_DEBUG"):
-            self.debug = True
 
 
 def compile_mypyc_extensions(

@@ -27,15 +27,10 @@ from setuptools import Extension
 from .process import call_command
 
 from smelt.context import get_context
-from smelt.utils import GenericExtension, ImportPath, PathSolver
+from smelt.utils import GenericExtension, PathSolver
+from smelt.config import NuitkaModule
 
 _logger = logging.getLogger(__name__)
-
-
-@dataclass
-class NuitkaModule:
-    import_path: ImportPath
-    source: str | None = None
 
 
 NUITKA_ENTRYPOINT: Final[tuple[str, ...]] = (sys.executable, "-m", "nuitka")
