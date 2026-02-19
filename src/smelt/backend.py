@@ -79,7 +79,7 @@ def compile_cython_extensions(
     extensions: list[GenericExtension] = []
 
     for module in modules:
-        source_path = module.source
+        source_path = str(module.source)
         import_path = module.import_path
         cython_ext = cythonize(source_path, **options)
         assert len(cython_ext) == 1, (

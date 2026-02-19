@@ -147,16 +147,26 @@ class SmeltConfig:
         ]
         # zig modules
         zig_modules_decl = toml_data.pop("zig_modules", [])
-        zig_modules = [ZigModule(**decl) for decl in zig_modules_decl]
+        zig_modules = [
+            build_datacls_from_toml(ZigModule, decl) for decl in zig_modules_decl
+        ]
         # mypyc modules
         mypyc_modules_decl = toml_data.pop("mypyc_modules", [])
-        mypyc_modules = [MypycModule(**decl) for decl in mypyc_modules_decl]
+        mypyc_modules = [
+            build_datacls_from_toml(MypycModule, decl) for decl in mypyc_modules_decl
+        ]
+
         # cython
         cython_modules_decl = toml_data.pop("cython_modules", [])
-        cython_modules = [CythonExtension(**decl) for decl in cython_modules_decl]
+        cython_modules = [
+            build_datacls_from_toml(CythonExtension, decl)
+            for decl in cython_modules_decl
+        ]
         # nuitka
         nuitka_modules_decl = toml_data.pop("nuitka_modules", [])
-        nuitka_modules = [NuitkaModule(**decl) for decl in nuitka_modules_decl]
+        nuitka_modules = [
+            build_datacls_from_toml(NuitkaModule, decl) for decl in nuitka_modules_decl
+        ]
 
         return cls(
             mypyc_modules=mypyc_modules,
