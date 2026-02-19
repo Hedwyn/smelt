@@ -25,6 +25,7 @@ from smelt.utils import (
     locate_module,
     PathSolver,
     PackageRootPath,
+    PathExists,
 )
 
 # TODO: replace .so references to a variable that's set to .so
@@ -40,8 +41,14 @@ class NativeExtension:
 
 
 @dataclass
-class CythonExtension:
+class PythonModule:
     import_path: str
+    source: str | None = None
+
+
+@dataclass
+class CythonExtension:
+    import_path: PathExists
     source: str
 
 
@@ -145,7 +152,6 @@ def compile_mypyc_extensions(
     """
     path_solver = path_solver or PathSolver()
     built_extensions: list[GenericExtension] = []
-    # for mypyc_extension, ext_path in mypyc_config.items():
     for module in modules:
         module_import_path = module.import_path
         ext_path = module.source or str(
@@ -193,8 +199,7 @@ def compile_cython_extensions(
         (base_ext,) = cython_ext
         ext_name = import_path.split(".")[-1]
         base_ext.name = ext_name
-        generic_ext = GenericExtension(
-            name=ext_name,
+        generic_ext = GenericExtension.factory(
             src_path=source_path,
             import_path=import_path,
             extension=base_ext,

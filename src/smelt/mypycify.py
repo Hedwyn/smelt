@@ -37,7 +37,6 @@ def mypycify_module(
                 assert mod.__file__ is not None
                 runtime, module_ext = mypycify([extpath], include_runtime_files=True)
                 mod_folder = Path(mod.__file__).parent
-                ext_name = module_ext.name.split(".")[-1]
 
         case ModpathType.FS:
             expected_module_path = toggle_mod_path(import_path, ModpathType.FS)
@@ -52,13 +51,10 @@ def mypycify_module(
         case _ as unreachable:
             assert_never(unreachable)
 
-    ext_name = module_ext.name.split(".")[-1]
-
     return GenericExtension(
         import_path=import_path,
         src_path=extpath,
         extension=module_ext,
         runtime=runtime,
-        name=ext_name,
         dest_folder=mod_folder,
     )

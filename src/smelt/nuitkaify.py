@@ -219,7 +219,6 @@ def nuitkaify_module(
         extra_compile_args=list(NUITKA_MINIMAL_FLAGS),
     )
     return GenericExtension(
-        name=module.import_path.split(".")[-1],
         import_path=module.import_path,
         src_path=str(src_path),
         extension=setup_tools_ext,
