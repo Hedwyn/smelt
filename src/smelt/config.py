@@ -89,6 +89,19 @@ type _TomlData = str | list[_TomlData] | dict[str, _TomlData]
 type TomlData = dict[str, _TomlData]
 
 
+def toml_get_nested_section(toml_data: TomlData, *path: str) -> _TomlData:
+    ctx: list[str] = []
+    section: _TomlData = toml_data
+    for subsection_name in path:
+        ctx.append(subsection_name)
+        if not isinstance(section, dict):
+            raise SmeltConfigError(
+                f"{_format_context(ctx)}Expected section, found {section}"
+            )
+        section = section.get(subsection_name, {})
+    return section
+
+
 @dataclass
 class NuitkaModule:
     import_path: ImportPath

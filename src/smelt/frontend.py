@@ -23,7 +23,7 @@ from smelt.backend import (
     compile_mypyc_extensions,
     run_backend,
 )
-from smelt.config import SmeltConfig
+from smelt.config import SmeltConfig, TomlData, toml_get_nested_section
 from smelt.compiler import SupportedPlatforms, compile_extension
 from smelt.context import enable_global_context, get_context
 from smelt.mypycify import mypycify_module
@@ -32,8 +32,6 @@ from smelt.utils import SmeltError
 
 class SmeltConfigError(SmeltError): ...
 
-
-type TomlData = dict[str, str | list[str] | TomlData]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -118,15 +116,6 @@ def wrap_smelt_errors(
                 sys.exit(exit_code)
 
     return wrapper()
-
-
-def toml_get_nested_section(
-    toml_data: TomlData, *path: str
-) -> dict[str, Any] | list[Any]:
-    section = toml_data
-    for subsection in path:
-        section = section.get(subsection, {})
-    return section
 
 
 def auto_detect_is_build_hook(toml_data: TomlData) -> bool:
