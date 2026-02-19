@@ -20,10 +20,10 @@ from typing import Any, Callable, Generator, ParamSpec, TypeVar, cast
 import click
 
 from smelt.backend import (
-    SmeltConfig,
     compile_mypyc_extensions,
     run_backend,
 )
+from smelt.config import SmeltConfig
 from smelt.compiler import SupportedPlatforms, compile_extension
 from smelt.context import enable_global_context, get_context
 from smelt.mypycify import mypycify_module

@@ -18,6 +18,7 @@ from smelt.utils import (
     find_module_in_layout,
     get_extension_suffix,
     import_shadowed_module,
+    is_valid_import_path,
     toggle_mod_path,
 )
 
