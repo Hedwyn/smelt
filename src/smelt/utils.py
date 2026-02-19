@@ -39,15 +39,8 @@ from smelt.context import get_context
 
 _logger = logging.getLogger(__name__)
 
-PathExists = NewType("PathExists", str)
+PathExists = NewType("PathExists", Path)
 ModuleName = NewType("ModuleName", str)
-
-
-def get_module_name(import_path: ImportPath) -> str:
-    """
-    Extracts the module name at the stem from `import_path`.
-    """
-    return import_path.split(".")[-1]
 
 
 def path_exists(path: Path) -> TypeGuard[Path]:
@@ -82,6 +75,15 @@ def is_valid_module_name(name: str) -> TypeGuard[ModuleName]:
     if not is_valid_import_path(name):
         return False
     return "." not in name
+
+
+def get_module_name(import_path: ImportPath) -> ModuleName:
+    """
+    Extracts the module name at the stem from `import_path`.
+    """
+    modname = import_path.split(".")[-1]
+    assert is_valid_module_name(modname)
+    return modname
 
 
 # --- Errors ---
@@ -382,12 +384,35 @@ class GenericExtension:
     be shared across modules (mypyc / Probably Nuitka in the future).
     """
 
-    import_path: str
-    src_path: str
-    name: str
+    import_path: ImportPath
+    src_path: PathExists
     dest_folder: Path
     extension: Extension
     runtime: Extension | None = None
+
+    @classmethod
+    def factory(
+        cls,
+        src_path: PathExists,
+        import_path: ImportPath,
+        extension: Extension | None = None,
+        dest_folder: Path | None = None,
+        runtime: Extension | None = None,
+    ) -> Self:
+        """
+        Provides sound defaults for omitted fields.
+        """
+        extension = extension or Extension(
+            name=get_module_name(import_path),
+            sources=[src_path],
+        )
+        return cls(
+            import_path=import_path,
+            src_path=src_path,
+            extension=extension,
+            dest_folder=dest_folder or src_path.parent,
+            runtime=runtime,
+        )
 
     def get_dest_path(self, target_triple: str | None = None) -> Path:
         """
@@ -403,6 +428,13 @@ class GenericExtension:
         )
         ext_so_name = f"{self.name}{suffix}"
         return self.dest_folder / ext_so_name
+
+    @property
+    def name(self) -> ModuleName:
+        """
+        Returns the module name that given to the extension.
+        """
+        return get_module_name(self.import_path)
 
     def get_runtime_dest_path(self, target_triple: str | None = None) -> Path:
         """
@@ -433,6 +465,7 @@ class PackageRootPath(NamedTuple):
 @dataclass
 class PathSolver:
     known_roots: list[PackageRootPath] = field(default_factory=list)
+    cwd: Path = Path(".")
 
     def resolve_import_path(
         self, import_path: ImportPath, file_extension: str = "py"
