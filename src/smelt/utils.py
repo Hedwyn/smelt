@@ -304,6 +304,30 @@ def detect_package_layout(package_name: str, package_root: str = ".") -> Package
     return PackageLayout.SRC
 
 
+def convert_to_path(import_path: ImportPath, file_extension: str = ".py") -> Path:
+    *packages, module = import_path.split(".")
+    module += file_extension
+    return Path(*packages, module)
+
+
+def find_mod_from_import_path_locally(
+    import_path: ImportPath, file_extension: str = ".py", cwd: Path | None = None
+) -> PathExists:
+    """
+    Given a module which import path is given by `import_path`,
+    returns the module location as expected when iterating from the local working dir.
+    """
+    cwd = cwd or Path(".")
+    path = cwd / convert_to_path(import_path, file_extension=file_extension)
+    if not path_exists(path):
+        raise SmeltConfigError(
+            f"Module {import_path} is not visible from current working dir"
+            f" {path} does not exists"
+        )
+
+    return path
+
+
 @overload
 def toggle_mod_path(path: str, to_type: Literal[ModpathType.IMPORT]) -> ImportPath: ...
 
@@ -378,7 +402,7 @@ def locate_module(
             )
             if ctx := get_context():
                 ctx.add_trace(
-                    PathResolutionTrace(mod_path, module_path, ModpathType.IMPORT)
+                    PathResolutionTrace(mod_path, mod_path, ModpathType.IMPORT)
                 )
             return import_path
 
@@ -495,12 +519,16 @@ class GenericExtension:
 
 
 class PackageRootPath(NamedTuple):
-    package_name: str
-    path: Path
+    module_import_path: ImportPath
+    path: PathExists
 
     @classmethod
-    def from_path(cls, path: Path) -> Self:
-        package_name = path.parts[0]
+    def from_path(cls, path: PathExists) -> Self:
+        package_name = path.parts[-1]
+        if not is_valid_import_path(package_name):
+            raise SmeltConfigError(
+                f"Module path uses invalid characters: {package_name}"
+            )
         return cls(package_name, path)
 
 
@@ -509,17 +537,40 @@ class PathSolver:
     known_roots: list[PackageRootPath] = field(default_factory=list)
     cwd: Path = Path(".")
 
+    @classmethod
+    def from_installed_import_paths(cls, *import_path: ImportPath):
+        """
+        Creates a PathSolver for the given import_paths, given that the reference modules
+        are installed in the local environement.
+        This relies on side-effects (modules location relies on specs given by importlib)
+            and not suitable for build-time usage,
+            but can be used as a shortcut for usage within an already installed environement
+            (i.e. frontend usage).
+        """
+        roots = [
+            PackageRootPath(p, locate_module_by_import_path(p)) for p in import_path
+        ]
+        return cls(roots)
+
     def resolve_import_path(
         self, import_path: ImportPath, file_extension: str = "py"
     ) -> Path:
-        package, *modules = import_path.split(".")
-        for package_name, path in self.known_roots:
-            if package == package_name:
-                root = Path(path)
-                break
-        else:  # no break
-            root = Path(package)
+        for root_path, path in self.known_roots:
+            if not import_path.startswith(root_path):
+                continue
+            root = Path(path)
+            sub_import_path = import_path.replace(root_path + ".", "")
+            assert is_valid_import_path(sub_import_path), (
+                f"internal path substitution logic error {sub_import_path}"
+            )
 
-        subpath = "/".join(modules) + "." + file_extension
+            subpath = convert_to_path(sub_import_path)
+            module_path = root / subpath
+            if not path_exists(module_path):
+                raise SmeltConfigError(
+                    f"Module {import_path} should resolve to this location "
+                    f"but we did not find it: {module_path}"
+                )
+            return module_path
 
-        return root / subpath
+        return find_mod_from_import_path_locally(import_path, cwd=self.cwd)
