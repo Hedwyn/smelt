@@ -7,6 +7,7 @@ Common utilities for this package.
 
 from __future__ import annotations
 
+import importlib.util
 import importlib
 import keyword
 import logging
@@ -55,6 +56,12 @@ class SmeltError(Exception):
 class SmeltConfigError(SmeltError):
     """
     Raised when running conversions for config loading.
+    """
+
+
+class SmeltFileNotFoundError(SmeltError):
+    """
+    Raised when a file referenced by config is not found.
     """
 
 
@@ -134,6 +141,34 @@ def get_extension_suffix(target_triple: str) -> str:
     major = sys.version_info.major
     minor = sys.version_info.minor
     return f".cpython-{major}{minor}-{target_triple}.so"
+
+
+def locate_module_by_import_path(import_path: ImportPath) -> PathExists:
+    try:
+        spec = importlib.util.find_spec(import_path)
+    except ModuleNotFoundError as exc:
+        # package not found
+        raise SmeltMissingModule(
+            f"{import_path} refers to some unknown packages in your environment. Is it installed ?"
+        ) from exc
+
+    if spec is None:  # module not found
+        raise SmeltMissingModule(f"Module {import_path} not found. Is it installed ?")
+
+    origin = spec.origin
+    if origin is None:
+        # PEP 420: path can be valid import without having an origin
+        # if it refers to a namespace package,
+        # as it might be found in multiple places.
+        raise SmeltConfigError(
+            f"Could not locate {import_path}. "
+            "You might be referring to a namespace package, which is not a valid module to import"
+        )
+    module_path = Path(origin)
+    assert path_exists(module_path), (
+        "importlib.util.find_spec returned an invalid system path"
+    )
+    return module_path
 
 
 @contextmanager
@@ -357,20 +392,6 @@ def locate_module(
 
         case _ as unreachable:
             assert_never(unreachable)
-
-
-def locate_module_by_import_path(mod_import_path: ImportPath) -> str:
-    """
-    Given a module import path as package.submodule.module,
-    returns the location of on the filesystem of the imported module.
-    """
-    try:
-        module = importlib.import_module(mod_import_path)
-    except ImportError as exc:
-        msg = f"Failed to import module: {mod_import_path}"
-        raise SmeltMissingModule(msg) from exc
-    assert module.__file__ is not None, f"Failed to locate module: {mod_import_path}"
-    return module.__file__
 
 
 def find_module_in_layout(mod_path: FsPath, package_root: str | None = None) -> str:
