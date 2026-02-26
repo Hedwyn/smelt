@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Final
 
 from distutils.compilers.C.unix import Compiler
-from setuptools import Extension, extension
+from setuptools import Extension
 
-from smelt.utils import get_extension_suffix
+from smelt.utils import assert_path_exists, get_extension_suffix, PathExists
 from smelt.process import call_command
 
 if TYPE_CHECKING:
@@ -213,7 +213,7 @@ def compile_extension(
     dest_folder: PathLike[str] | None = None,
     crosscompile: SupportedPlatforms | None = None,
     use_zig_native_interface: bool = False,
-) -> str:
+) -> PathExists:
     """
     Standalone function compiling a low-level extension (C, C++ or Zig)
     into a shared library.
@@ -304,5 +304,4 @@ def compile_extension(
         else:
             zig_build_lib(extension.name, objects, crosscompile=crosscompile)
     so_path = os.path.join(output_dir, ext_name)
-    assert os.path.exists(so_path), so_path
-    return so_path
+    return assert_path_exists(so_path)

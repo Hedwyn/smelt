@@ -16,7 +16,9 @@ from typing import Any, Iterable
 
 
 from smelt.compiler import compile_extension, compile_zig_module
-from smelt.mypycify import mypycify_module
+
+# from smelt.mypycify import mypycify_module
+from mypyc.build import mypycify
 from smelt.nuitkaify import Stdout, compile_with_nuitka, nuitkaify_module
 from smelt.utils import (
     GenericExtension,
@@ -43,10 +45,17 @@ def compile_mypyc_extensions(
     built_extensions: list[GenericExtension] = []
     for module in modules:
         module_import_path = module.import_path
-        ext_path = module.source or str(
-            path_solver.resolve_import_path(module_import_path)
+        ext_path = module.source or path_solver.resolve_import_path(module_import_path)
+        # mypyc_ext = mypycify_module(ext_path, strategy=ModpathType.FS)
+        runtime, module_ext = mypycify([str(ext_path)], include_runtime_files=True)
+        mypyc_ext = GenericExtension.factory(
+            src_path=ext_path,
+            import_path=module_import_path,
+            extension=module_ext,
+            runtime=runtime,
+            dest_folder=ext_path.parent,
         )
-        mypyc_ext = mypycify_module(module_import_path, ext_path)
+
         module_so_path = compile_extension(mypyc_ext.extension)
         runtime_so_path = compile_extension(mypyc_ext.runtime)
         so_dest_path = str(mypyc_ext.get_dest_path())
@@ -79,8 +88,8 @@ def compile_cython_extensions(
     extensions: list[GenericExtension] = []
 
     for module in modules:
-        source_path = str(module.source)
         import_path = module.import_path
+        source_path = str(module.source or path_solver.resolve_import_path(import_path))
         cython_ext = cythonize(source_path, **options)
         assert len(cython_ext) == 1, (
             "Passed on source file to cython yet it produced more than one extension"
