@@ -34,7 +34,7 @@ from typing import (
     overload,
 )
 
-from setuptools._distutils.extension import Extension
+from setuptools import Extension
 
 from smelt.context import get_context
 
@@ -62,6 +62,12 @@ class SmeltConfigError(SmeltError):
 class SmeltFileNotFoundError(SmeltError):
     """
     Raised when a file referenced by config is not found.
+    """
+
+
+class SmeltAlreadyNativeModule(SmeltError):
+    """
+    Raised when trying to convert to native an already native module.
     """
 
 
@@ -554,8 +560,11 @@ class PathSolver:
 
     def resolve_import_path(
         self, import_path: ImportPath, file_extension: str = "py"
-    ) -> Path:
+    ) -> PathExists:
+        # TODO: detect when target module is already native
         for root_path, path in self.known_roots:
+            if import_path == root_path:
+                return path
             if not import_path.startswith(root_path):
                 continue
             root = Path(path)
@@ -573,4 +582,6 @@ class PathSolver:
                 )
             return module_path
 
-        return find_mod_from_import_path_locally(import_path, cwd=self.cwd)
+        return find_mod_from_import_path_locally(
+            import_path, file_extension=file_extension, cwd=self.cwd
+        )

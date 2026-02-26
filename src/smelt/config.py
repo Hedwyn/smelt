@@ -89,16 +89,52 @@ type _TomlData = str | list[_TomlData] | dict[str, _TomlData]
 type TomlData = dict[str, _TomlData]
 
 
+def auto_detect_is_build_hook(toml_data: TomlData) -> bool:
+    """
+    Given the extracted TOML config `toml_data`,
+    detects whether Smelt Config was passed as a build hook
+    (in which case it would be nested under whatever subsection_name
+    the build backend uses for hooks), or a tool config.
+    """
+    has_tool_config = "smelt" in toml_data.get("tool", {})
+    has_build_hook_conf = "smelt" in toml_get_nested_section(
+        toml_data, "tool", "hatch", "build", "hooks"
+    )
+    if has_tool_config and has_build_hook_conf:
+        # TODO: for now, not allowing this.
+        # We can however consider using the hatch one only for build time
+        # and the tool one for CLI use.
+        # that can get confusing though.
+        raise SmeltConfigError(
+            "Smelt configuration found both in [tool.smelt] and "
+            "[tool.hatch.build.hooks.smelt]. Please keep only one."
+        )
+    if has_build_hook_conf:
+        return True
+    if has_tool_config:
+        return False
+    raise ValueError("No smelt config detected")
+
+
 def toml_get_nested_section(toml_data: TomlData, *path: str) -> _TomlData:
+    """
+    Extracts the sub section given by `path` from `toml_data`.
+    Verifies that the extracted TOML object is a dictionary.
+
+    Raises
+    ------
+    SmeltConfigError
+        If the section is not found or if the found object is not a section.
+    """
     ctx: list[str] = []
     section: _TomlData = toml_data
     for subsection_name in path:
         ctx.append(subsection_name)
+        section = section.get(subsection_name, {})
         if not isinstance(section, dict):
             raise SmeltConfigError(
                 f"{_format_context(ctx)}Expected section, found {section}"
             )
-        section = section.get(subsection_name, {})
     return section
 
 
@@ -117,7 +153,7 @@ class NativeExtension:
 @dataclass
 class CythonExtension:
     import_path: ImportPath
-    source: PathExists
+    source: PathExists | None = None
 
 
 @dataclass

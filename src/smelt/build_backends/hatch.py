@@ -14,7 +14,8 @@ from dataclasses import fields
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from hatchling.plugin import hookimpl
 
-from smelt.backend import SmeltConfig, run_backend
+from smelt.config import SmeltConfig
+from smelt.backend import run_backend
 from smelt.utils import ModpathType
 
 
