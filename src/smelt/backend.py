@@ -17,7 +17,6 @@ from typing import Any, Iterable
 
 from smelt.compiler import compile_extension, compile_zig_module
 
-# from smelt.mypycify import mypycify_module
 from mypyc.build import mypycify
 from smelt.nuitkaify import Stdout, compile_with_nuitka, nuitkaify_module
 from smelt.utils import (
@@ -46,7 +45,6 @@ def compile_mypyc_extensions(
     for module in modules:
         module_import_path = module.import_path
         ext_path = module.source or path_solver.resolve_import_path(module_import_path)
-        # mypyc_ext = mypycify_module(ext_path, strategy=ModpathType.FS)
         runtime, module_ext = mypycify([str(ext_path)], include_runtime_files=True)
         mypyc_ext = GenericExtension.factory(
             src_path=ext_path,
