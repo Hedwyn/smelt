@@ -165,7 +165,7 @@ def run_backend(
             runtime_so_path = compile_extension(generic_ext.extension)
             shutil.move(runtime_so_path, str(generic_ext.get_runtime_dest_path()))
     # nuitka entrypoint compilation
-    without_entrypoint = without_entrypoint and config.entrypoint is not None
+    without_entrypoint = without_entrypoint or config.entrypoint is None
     if not without_entrypoint:
         entrypoint_file = locate_module(
             config.entrypoint, strategy=strategy, package_root=path_solver
