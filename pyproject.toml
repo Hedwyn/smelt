@@ -1,7 +1,10 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "smelt"
-version = "0.4.0"
+dynamic = ["version"]
 description = "Binary orchestrator for Python packages"
 requires-python = ">=3.12"
 authors = [{ name = "Baptiste Pestourie" }]
@@ -24,6 +27,8 @@ build = ["Cython", "nuitka", "mypy[mypyc]", "hatchling", "editables"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+
+[tool.setuptools_scm]
 
 [tool.setuptools.package-data]
 # There's on pyconfig.h per platform + python combination
