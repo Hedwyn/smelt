@@ -164,7 +164,7 @@ class MypycModule:
 
 @dataclass
 class ZigModule:
-    name: PathExists
+    name: str
     import_path: ImportPath
     folder: PathExists = assert_path_exists(".")
 
