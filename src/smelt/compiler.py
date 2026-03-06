@@ -23,7 +23,15 @@ from typing import TYPE_CHECKING, ClassVar, Final
 from distutils.compilers.C.unix import Compiler
 from setuptools import Extension
 
-from smelt.utils import assert_path_exists, get_extension_suffix, PathExists
+from smelt.utils import (
+    ImportPath,
+    PathSolver,
+    SmeltError,
+    assert_path_exists,
+    get_extension_suffix,
+    PathExists,
+    path_exists,
+)
 from smelt.process import call_command
 
 if TYPE_CHECKING:
@@ -192,19 +200,33 @@ def zig_build_exe(
     return dest_name
 
 
-def compile_zig_module(name: str, folder: str, import_path: str) -> None:
+def compile_zig_module(
+    name: str,
+    folder: PathExists,
+    import_path: ImportPath,
+    path_solver: PathSolver | None = None,
+) -> PathExists:
+    path_solver = path_solver or PathSolver()
     with contextlib.chdir(folder):
         call_command("zig", "build")
         # TODO windows
         lib_path = Path.cwd() / "zig-out" / "lib" / (name + ".so")
-
+    if not path_exists(lib_path):
+        raise SmeltError(
+            f"Ran `zig build` successfully, but no library `{lib_path}` was found afterwards"
+            "Check that the name of the project is properly configured, as well as your build.zig"
+        )
     # TODO crosscompile
     suffix = sysconfig.get_config_var("EXT_SUFFIX")
-    target_path = import_path.replace(".", "/") + suffix
+    target_path = path_solver.resolve_import_path(
+        import_path, file_extension=suffix, should_exist=False
+    )
     shutil.move(
         lib_path,
         target_path,
     )
+    assert path_exists(target_path)
+    return target_path
 
 
 def compile_extension(

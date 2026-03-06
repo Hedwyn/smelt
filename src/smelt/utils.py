@@ -316,18 +316,42 @@ def convert_to_path(import_path: ImportPath, file_extension: str = ".py") -> Pat
     return Path(*packages, module)
 
 
+@overload
 def find_mod_from_import_path_locally(
-    import_path: ImportPath, file_extension: str = ".py", cwd: Path | None = None
-) -> PathExists:
+    import_path: ImportPath,
+    file_extension: str,
+    cwd: Path | None,
+    *,
+    should_exist: Literal[True],
+) -> PathExists: ...
+@overload
+def find_mod_from_import_path_locally(
+    import_path: ImportPath,
+    file_extension: str,
+    cwd: Path | None,
+    *,
+    should_exist: Literal[False],
+) -> Path: ...
+
+
+def find_mod_from_import_path_locally(
+    import_path: ImportPath,
+    file_extension: str = ".py",
+    cwd: Path | None = None,
+    *,
+    should_exist: bool = True,
+) -> PathExists | Path:
     """
     Given a module which import path is given by `import_path`,
     returns the module location as expected when iterating from the local working dir.
     """
     cwd = cwd or Path(".")
     path = cwd / convert_to_path(import_path, file_extension=file_extension)
+    if not should_exist:
+        return path
     if not path_exists(path):
         raise SmeltConfigError(
-            f"Module {import_path} is not visible from current working dir"
+            f"Module {import_path} is not visible from current working dir:"
             f" {path} does not exists"
         )
 
@@ -558,9 +582,30 @@ class PathSolver:
         ]
         return cls(roots)
 
+    @overload
     def resolve_import_path(
-        self, import_path: ImportPath, file_extension: str = "py"
-    ) -> PathExists:
+        self,
+        import_path: ImportPath,
+        file_extension: str,
+        *,
+        should_exist: Literal[True],
+    ) -> PathExists: ...
+    @overload
+    def resolve_import_path(
+        self,
+        import_path: ImportPath,
+        file_extension: str,
+        *,
+        should_exist: Literal[False],
+    ) -> Path: ...
+
+    def resolve_import_path(
+        self,
+        import_path: ImportPath,
+        file_extension: str = "py",
+        *,
+        should_exist: bool = True,
+    ) -> Path | PathExists:
         # TODO: detect when target module is already native
         for root_path, path in self.known_roots:
             if import_path == root_path:
@@ -575,7 +620,7 @@ class PathSolver:
 
             subpath = convert_to_path(sub_import_path)
             module_path = root / subpath
-            if not path_exists(module_path):
+            if should_exist and not path_exists(module_path):
                 raise SmeltConfigError(
                     f"Module {import_path} should resolve to this location "
                     f"but we did not find it: {module_path}"
@@ -583,5 +628,8 @@ class PathSolver:
             return module_path
 
         return find_mod_from_import_path_locally(
-            import_path, file_extension=file_extension, cwd=self.cwd
+            import_path,
+            file_extension=file_extension,
+            cwd=self.cwd,
+            should_exist=should_exist,
         )

@@ -126,7 +126,12 @@ def run_backend(
         "compile C extensions"
     )
     for zig_mod in config.zig_modules:
-        compile_zig_module(zig_mod.name, zig_mod.folder, zig_mod.import_path)
+        compile_zig_module(
+            zig_mod.name,
+            zig_mod.folder,
+            zig_mod.import_path,
+            path_solver=path_solver,
+        )
 
     for native_extension in config.c_extensions:
         sources = native_extension.sources
