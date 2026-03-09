@@ -21,6 +21,7 @@ from smelt.utils import (
     SmeltError,
     assert_is_valid_import_path,
     assert_path_exists,
+    is_valid_import_path,
 )
 
 if TYPE_CHECKING:
@@ -31,6 +32,40 @@ _CONVERSIONS = {
     "PathExists": assert_path_exists,
     "list[PathExists]": lambda values: [assert_path_exists(p) for p in values],
 }
+
+
+def assert_type_is(obj: object, typ: type) -> None:
+    if not isinstance(obj, typ):
+        raise SmeltConfigError(f"Expected type {typ}, got {type(obj)}")
+
+
+def convert_path(
+    path_decl: str | list[str], type_hint: str, project_root: Path | None
+) -> ImportPath | PathExists | Path | list[PathExists]:
+    if type_hint == "ImportPath":
+        assert_type_is(path_decl, str)
+        return assert_is_valid_import_path(path_decl)
+
+    match type_hint:
+        case "PathExists" | "PathExists | None":
+            assert_type_is(path_decl, str)
+            path = (
+                project_root / path_decl
+                if project_root is not None
+                else Path(path_decl)
+            )
+
+            assert_path_exists(path)
+            return path
+        case "list[PathExists]":
+            assert_type_is(path_decl, list)
+            return [
+                assert_path_exists(project_root / p if project_root else Path(p))
+                for p in path_decl
+            ]
+
+        case _:
+            raise NotImplementedError(f"Unsupported type hint: {type_hint}")
 
 
 type ConfigContext = Iterable[str]
@@ -55,6 +90,7 @@ def build_datacls_from_toml[T: DataclassInstance](
     datacls: type[T],
     toml_data: TomlData,
     context: ConfigContext | None = None,
+    project_root: Path | None = None,
 ) -> T:
     context = context if context is not None else []
     sentinel = object()
@@ -74,11 +110,7 @@ def build_datacls_from_toml[T: DataclassInstance](
             "Expected annotations from __future__ to be used"
         )
         try:
-            value = (
-                conversion(value_decl)  # type: ignore[arg-type]
-                if (conversion := _CONVERSIONS.get(f.type)) is not None
-                else value_decl
-            )
+            value = convert_path(value_decl, f.type, project_root)
         except SmeltError as exc:
             raise SmeltConfigError(f"{_format_context(local_ctx)}{exc}") from exc
         kwargs[field_name] = value
@@ -187,34 +219,39 @@ class SmeltConfig:
     debug: bool = False
 
     @classmethod
-    def from_toml_data(cls, toml_data: dict[str, Any]) -> Self:
+    def from_toml_data(
+        cls, toml_data: dict[str, Any], project_root: Path | None = None
+    ) -> Self:
         # native code
         native_extensions_decl = toml_data.pop("c_extensions", [])
         native_extensions = [
-            build_datacls_from_toml(NativeExtension, decl)
+            build_datacls_from_toml(NativeExtension, decl, project_root=project_root)
             for decl in native_extensions_decl
         ]
         # zig modules
         zig_modules_decl = toml_data.pop("zig_modules", [])
         zig_modules = [
-            build_datacls_from_toml(ZigModule, decl) for decl in zig_modules_decl
+            build_datacls_from_toml(ZigModule, decl, project_root=project_root)
+            for decl in zig_modules_decl
         ]
         # mypyc modules
         mypyc_modules_decl = toml_data.pop("mypyc_modules", [])
         mypyc_modules = [
-            build_datacls_from_toml(MypycModule, decl) for decl in mypyc_modules_decl
+            build_datacls_from_toml(MypycModule, decl, project_root=project_root)
+            for decl in mypyc_modules_decl
         ]
 
         # cython
         cython_modules_decl = toml_data.pop("cython_modules", [])
         cython_modules = [
-            build_datacls_from_toml(CythonExtension, decl)
+            build_datacls_from_toml(CythonExtension, decl, project_root=project_root)
             for decl in cython_modules_decl
         ]
         # nuitka
         nuitka_modules_decl = toml_data.pop("nuitka_modules", [])
         nuitka_modules = [
-            build_datacls_from_toml(NuitkaModule, decl) for decl in nuitka_modules_decl
+            build_datacls_from_toml(NuitkaModule, decl, project_root=project_root)
+            for decl in nuitka_modules_decl
         ]
 
         return cls(
@@ -226,15 +263,17 @@ class SmeltConfig:
             **toml_data,
         )
 
-    def get_path_solver(self) -> PathSolver:
+    def get_path_solver(self, project_root: Path | None = None) -> PathSolver:
         """
         Builds a PathSolver based on the package configuration.
         """
+        root = project_root or Path.cwd()
         return PathSolver(
             known_roots=[
-                PackageRootPath(alias, Path(path))
+                PackageRootPath(alias, assert_path_exists(root / path))
                 for alias, path in self.packages_location.items()
-            ]
+            ],
+            project_root=root,
         )
 
     def __str__(self) -> str:

@@ -39,9 +39,12 @@ from smelt.config import (
 from smelt.context import enable_global_context, get_context
 from smelt.utils import (
     ImportPath,
+    PathExists,
     PathSolver,
     SmeltError,
     is_valid_import_path,
+    path_exists,
+    toggle_mod_path,
 )
 
 
@@ -77,13 +80,31 @@ class CliImportPath(ParamType):
     name = "import_path"
 
     def convert(
-        self, value, param: Parameter | None, ctx: Context | None
+        self, value: str, param: Parameter | None, ctx: Context | None
     ) -> ImportPath:
         _ = param
         _ = ctx
         if not is_valid_import_path(value):
             self.fail(f"{value} is not a valid Python import path")
         return value
+
+
+class CliExistingPath(ParamType):
+    """
+    A tiny wrapper for click to verify import paths validity automatically.
+    """
+
+    name = "existing_path"
+
+    def convert(
+        self, value: str, param: Parameter | None, ctx: Context | None
+    ) -> PathExists:
+        _ = param
+        _ = ctx
+        path = Path(value)
+        if not path_exists(path):
+            self.fail(f"{value} not found")
+        return path
 
 
 def wrap_smelt_errors(
@@ -107,7 +128,9 @@ def wrap_smelt_errors(
 
 
 def parse_config_from_pyproject(
-    toml_data: TomlData, is_configured_as_build_hook: bool | None = None
+    toml_data: TomlData,
+    is_configured_as_build_hook: bool | None = None,
+    project_root: Path | None = None,
 ) -> SmeltConfig:
     """
     Extracts Smelt config from TOML data coming out of a pyproject.toml
@@ -136,7 +159,7 @@ def parse_config_from_pyproject(
         raise SmeltConfigError(
             f"`smelt` section should be a dictionary, got {smelt_config}. "
         )
-    return SmeltConfig.from_toml_data(smelt_config)
+    return SmeltConfig.from_toml_data(smelt_config, project_root=project_root)
 
 
 def error_exit(msg: str, code: int = 1) -> NoReturn:
@@ -319,3 +342,31 @@ def compile_module(
         runtime_compiled_so = compile_extension(runtime)
         shutil.move(runtime_compiled_so, generic_ext.dest_folder / runtime_compiled_so)
     click.echo(f"Compiled so path: {dest_path}")
+
+
+@smelt.command
+@click.option(
+    "-p",
+    "--package",
+    type=CliExistingPath(),
+    help="Path the the package to build extensions for, expects to find a pyproject.toml",
+    default=Path.cwd(),
+)
+def build_extensions(*, package: PathExists) -> None:
+    """
+    Runs the smelt backend on the passed project and builds all extensions
+    defined by smelt.
+    """
+    pyproject_path = package / "pyproject.toml"
+    if not path_exists(pyproject_path):
+        error_exit("No pyproject.toml found in passed folder")
+    with pyproject_path.open("rb") as f:
+        try:
+            toml_data = tomllib.load(f)
+        except tomllib.TOMLDecodeError as exc:
+            error_exit(f"Invalid TOML file [{pyproject_path}]: {exc}")
+        config = parse_config_from_pyproject(toml_data, project_root=package)
+        path_solver = config.get_path_solver(project_root=package)
+        run_backend(
+            config, stdout="stdout", path_solver=path_solver, without_entrypoint=True
+        )

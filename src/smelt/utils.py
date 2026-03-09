@@ -79,7 +79,7 @@ def path_exists(path: Path) -> TypeGuard[PathExists]:
     return path.exists()
 
 
-def assert_path_exists(path: str) -> PathExists:
+def assert_path_exists(path: str | Path) -> PathExists:
     path_obj = Path(path)
     if not path_exists(path_obj):
         raise SmeltConfigError(f"Following file/folder does not exist: {path}")
@@ -320,7 +320,7 @@ def convert_to_path(import_path: ImportPath, file_extension: str = ".py") -> Pat
 def find_mod_from_import_path_locally(
     import_path: ImportPath,
     file_extension: str,
-    cwd: Path | None,
+    project_root: Path | None,
     *,
     should_exist: Literal[True],
 ) -> PathExists: ...
@@ -328,7 +328,7 @@ def find_mod_from_import_path_locally(
 def find_mod_from_import_path_locally(
     import_path: ImportPath,
     file_extension: str,
-    cwd: Path | None,
+    project_root: Path | None,
     *,
     should_exist: Literal[False],
 ) -> Path: ...
@@ -337,7 +337,7 @@ def find_mod_from_import_path_locally(
 def find_mod_from_import_path_locally(
     import_path: ImportPath,
     file_extension: str = ".py",
-    cwd: Path | None = None,
+    project_root: Path | None = None,
     *,
     should_exist: bool = True,
 ) -> PathExists | Path:
@@ -345,8 +345,8 @@ def find_mod_from_import_path_locally(
     Given a module which import path is given by `import_path`,
     returns the module location as expected when iterating from the local working dir.
     """
-    cwd = cwd or Path(".")
-    path = cwd / convert_to_path(import_path, file_extension=file_extension)
+    project_root = project_root or Path(".")
+    path = project_root / convert_to_path(import_path, file_extension=file_extension)
     if not should_exist:
         return path
     if not path_exists(path):
@@ -565,7 +565,7 @@ class PackageRootPath(NamedTuple):
 @dataclass
 class PathSolver:
     known_roots: list[PackageRootPath] = field(default_factory=list)
-    cwd: Path = Path(".")
+    project_root: Path = Path(".")
 
     @classmethod
     def from_installed_import_paths(cls, *import_path: ImportPath):
@@ -630,6 +630,6 @@ class PathSolver:
         return find_mod_from_import_path_locally(
             import_path,
             file_extension=file_extension,
-            cwd=self.cwd,
+            project_root=self.project_root,
             should_exist=should_exist,
         )
