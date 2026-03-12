@@ -87,17 +87,17 @@ packages = ["src/{project_name}"]
 SMELT_NUITKA_SECTION = """\
 [tool.hatch.build.hooks.smelt]
 entrypoint = "{project_name}.cli"
-
 """
 
 SMELT_CYTHON_SECTION = """\
-[tool.hatch.build.hooks.smelt.cython.remapped_modules]
-"src/{project_name}/fib_cython.pyx" = "fib_cython"\
+[[tool.hatch.build.hooks.smelt.cython_modules]]
+import_path = "{project_name}.fib_cython"
+source = "src/{project_name}/fib_cython.pyx"
 """
 
 SMELT_MYPYC_SECTION = """\
-[tool.hatch.build.hooks.smelt.mypyc]
-"{project_name}.fib" = "src/{project_name}/fib.py"
+[[tool.hatch.build.hooks.smelt.mypyc_modules]]
+import_path="{project_name}.fib"
 """
 
 CLI_ENTRYPOINT = """\
