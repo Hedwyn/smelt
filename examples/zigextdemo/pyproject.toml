@@ -16,9 +16,6 @@ zigextdemo = "hatchdemo.cli:hatchdemo"
 [tool.hatch.build.targets.wheel]
 packages = ["src/zigextdemo"]
 
-[tool.hatch.build.hooks.smelt]
-entrypoint = "zigextdemo.cli"
-
 [[tool.hatch.build.hooks.smelt.zig_modules]]
 import_path = "zigextdemo.zigextdemo"
 name = "zigextdemo"

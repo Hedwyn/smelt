@@ -23,7 +23,7 @@ packages_location = { "hatchdemo" = "src/hatchdemo" }
 [[tool.hatch.build.hooks.smelt.mypyc_modules]]
 import_path = "hatchdemo.fib"
 
-[[tool.hatch.build.hooks.smelt.nuitka_modules]]
+[[tool.hatch.build.hooks.smelt.mypyc_modules]]
 import_path = "hatchdemo.cli"
 
 [[tool.hatch.build.hooks.smelt.c_extensions]]

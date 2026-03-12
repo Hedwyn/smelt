@@ -205,10 +205,12 @@ def compile_zig_module(
     folder: PathExists,
     import_path: ImportPath,
     path_solver: PathSolver | None = None,
+    flags: list[str] | None = None,
 ) -> PathExists:
     path_solver = path_solver or PathSolver()
+    flags = flags or []
     with contextlib.chdir(folder):
-        call_command("zig", "build")
+        call_command("zig", "build", *flags)
         # TODO windows
         lib_path = Path.cwd() / "zig-out" / "lib" / (name + ".so")
     if not path_exists(lib_path):

@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 from dataclasses import MISSING, dataclass, field, fields, asdict
+from re import M
 from typing import TYPE_CHECKING, Any, Iterable, Self
 
 from smelt.utils import (
@@ -64,7 +65,12 @@ def convert_path(
                 for p in path_decl
             ]
 
+        case "str":
+            assert_type_is(path_decl, str)
+            return path_decl
+
         case _:
+            assert_type_is(path_decl, str)
             raise NotImplementedError(f"Unsupported type hint: {type_hint}")
 
 
@@ -100,7 +106,7 @@ def build_datacls_from_toml[T: DataclassInstance](
         field_name = f.name
         value_decl = toml_data.get(field_name, sentinel)
         if value_decl is sentinel:
-            if f.default is MISSING:
+            if f.default is MISSING and f.default_factory is None:
                 raise SmeltConfigError(
                     f"{_format_context(local_ctx)}Missing mandatory argument: {f.name}"
                 )
@@ -199,6 +205,7 @@ class ZigModule:
     name: str
     import_path: ImportPath
     folder: PathExists = assert_path_exists(".")
+    flags: list[str] = field(default_factory=list)
 
 
 @dataclass
