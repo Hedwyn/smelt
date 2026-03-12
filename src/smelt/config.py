@@ -151,7 +151,7 @@ def auto_detect_is_build_hook(toml_data: TomlData) -> bool:
         return True
     if has_tool_config:
         return False
-    raise ValueError("No smelt config detected")
+    raise SmeltConfigError("No smelt config detected")
 
 
 def toml_get_nested_section(toml_data: TomlData, *path: str) -> _TomlData:

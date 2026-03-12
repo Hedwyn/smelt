@@ -44,7 +44,6 @@ from smelt.utils import (
     SmeltError,
     is_valid_import_path,
     path_exists,
-    toggle_mod_path,
 )
 
 
@@ -184,25 +183,22 @@ def smelt() -> None:
     "-p",
     "--path",
     default=".",
-    type=str,
+    type=CliExistingPath(),
 )
-@add_logging_option
 @wrap_smelt_errors()
-def show_config(path: str, logging_level: str) -> None:
+def show_config(*, path: PathExists) -> None:
     """
     Shows the smelt config as defined in the passed file
     """
-
-    levelno = logging._nameToLevel[logging_level]
-    logging.basicConfig(level=levelno)
+    from pprint import pprint
 
     try:
-        with open(os.path.join(path, "pyproject.toml"), "rb") as f:
+        with (path / "pyproject.toml").open("rb") as f:
             toml_data = tomllib.load(f)
     except FileNotFoundError:
         click.echo("No pyproject.toml not found.")
         return
-    print(parse_config_from_pyproject(toml_data))
+    pprint(parse_config_from_pyproject(toml_data, project_root=path))
 
 
 @smelt.command()
@@ -240,28 +236,6 @@ def build_standalone_binary(
             global_context = get_context()
             assert global_context is not None
             Path(report).write_text(global_context.render())
-
-
-@smelt.command()
-@click.option(
-    "-p",
-    "--package-path",
-    default=".",
-    type=CliImportPath(),
-)
-@add_logging_option
-@wrap_smelt_errors()
-def compile_all_mypyc_extensions(package_path: ImportPath, logging_level: str) -> None:
-    levelno = logging._nameToLevel[logging_level]
-    logging.basicConfig(level=levelno)
-    try:
-        with open(os.path.join(package_path, "pyproject.toml"), "rb") as f:
-            toml_data = tomllib.load(f)
-    except FileNotFoundError:
-        click.echo("No pyproject.toml not found.")
-        return
-    config = parse_config_from_pyproject(toml_data)
-    compile_mypyc_extensions(package_path, mypyc_config=config.mypyc_modules)
 
 
 @smelt.command()
@@ -316,7 +290,9 @@ def compile_module(
     path_solver = PathSolver.from_installed_import_paths(module_import_path)
     click.echo(f"Compiling module {module_import_path}")
     try:
-        module_source = path_solver.resolve_import_path(module_import_path)
+        module_source = path_solver.resolve_import_path(
+            module_import_path, should_exist=True
+        )
     except SmeltConfigError as exc:
         error_exit(str(exc))
 
