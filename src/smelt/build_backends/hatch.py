@@ -7,7 +7,6 @@ Build hook hatchling backend.
 
 from __future__ import annotations
 
-import os
 from functools import cached_property
 from dataclasses import fields
 
@@ -52,6 +51,12 @@ class HatchlingBuildHook(BuildHookInterface):
         print(message)
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
+        if self.target_name == "sdist":
+            # disabling ourselves - we only want to include source code.
+            # TODO: consider adding an environment variable to force building
+            # extensions even in sdist mode, if there's ever a use for that
+            return
+
         self.debug_log(f"Smelt: Calling build hook with config:\n{self.config}")
         try:
             run_backend(

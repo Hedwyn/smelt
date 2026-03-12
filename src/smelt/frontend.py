@@ -206,7 +206,7 @@ def show_config(*, path: PathExists) -> None:
     "-p",
     "--package-path",
     default=".",
-    type=str,
+    type=CliExistingPath(),
 )
 @add_logging_option
 @click.option(
@@ -214,28 +214,27 @@ def show_config(*, path: PathExists) -> None:
 )
 @wrap_smelt_errors()
 def build_standalone_binary(
-    package_path: str, logging_level: str, report: str | None
+    package_path: PathExists, logging_level: str, report: str | None
 ) -> None:
-    with chdir(package_path):
-        path_solver = PathSolver()
-        levelno = logging._nameToLevel[logging_level]
-        logging.basicConfig(level=levelno)
-        try:
-            with open("pyproject.toml", "rb") as f:
-                toml_data = tomllib.load(f)
-        except FileNotFoundError:
-            click.echo("No pyproject.toml not found.")
-            return
-        config = parse_config_from_pyproject(toml_data)
-        config.load_env()
-        try:
-            run_backend(config, stdout="stdout", path_solver=path_solver)
-        except Exception as e:
-            click.echo(f"Error during build: {e}")
-        if report is not None:
-            global_context = get_context()
-            assert global_context is not None
-            Path(report).write_text(global_context.render())
+    levelno = logging._nameToLevel[logging_level]
+    logging.basicConfig(level=levelno)
+    try:
+        with (package_path / "pyproject.toml").open("rb") as f:
+            toml_data = tomllib.load(f)
+    except FileNotFoundError:
+        click.echo("No pyproject.toml not found.")
+        return
+    config = parse_config_from_pyproject(toml_data, project_root=package_path)
+    config.load_env()
+    path_solver = config.get_path_solver(project_root=package_path)
+    try:
+        run_backend(config, stdout="stdout", path_solver=path_solver)
+    except Exception as e:
+        click.echo(f"Error during build: {e}")
+    if report is not None:
+        global_context = get_context()
+        assert global_context is not None
+        Path(report).write_text(global_context.render())
 
 
 @smelt.command()

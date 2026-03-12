@@ -602,7 +602,7 @@ class PathSolver:
     def resolve_import_path(
         self,
         import_path: ImportPath,
-        file_extension: str = "py",
+        file_extension: str = ".py",
         *,
         should_exist: bool = True,
     ) -> Path | PathExists:
