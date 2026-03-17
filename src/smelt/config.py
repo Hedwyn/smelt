@@ -65,6 +65,10 @@ def convert_path(
                 for p in path_decl
             ]
 
+        case "list[str]":
+            assert_type_is(path_decl, list)
+            return path_decl
+
         case "str":
             assert_type_is(path_decl, str)
             return path_decl

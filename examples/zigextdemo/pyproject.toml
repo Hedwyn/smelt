@@ -20,3 +20,4 @@ packages = ["src/zigextdemo"]
 import_path = "zigextdemo.zigextdemo"
 name = "zigextdemo"
 folder = "."
+flags = ["--release=fast"]
