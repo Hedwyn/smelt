@@ -130,6 +130,7 @@ def run_backend(
             zig_mod.name,
             zig_mod.folder,
             zig_mod.import_path,
+            flags=zig_mod.flags,
             path_solver=path_solver,
         )
 
