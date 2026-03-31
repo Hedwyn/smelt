@@ -10,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 import os
 from dataclasses import MISSING, dataclass, field, fields, asdict
-from re import M
 from typing import TYPE_CHECKING, Any, Iterable, Self
 
 from smelt.utils import (
@@ -22,17 +21,10 @@ from smelt.utils import (
     SmeltError,
     assert_is_valid_import_path,
     assert_path_exists,
-    is_valid_import_path,
 )
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
-
-_CONVERSIONS = {
-    "ImportPath": assert_is_valid_import_path,
-    "PathExists": assert_path_exists,
-    "list[PathExists]": lambda values: [assert_path_exists(p) for p in values],
-}
 
 
 def assert_type_is(obj: object, typ: type) -> None:
@@ -226,6 +218,7 @@ class SmeltConfig:
     nuitka_modules: list[NuitkaModule] = field(default_factory=list)
     c_extensions: list[NativeExtension] = field(default_factory=list)
     zig_modules: list[ZigModule] = field(default_factory=list)
+    platforms: Iterable[str] | None = None
     entrypoint: str | None = None
     debug: bool = False
 

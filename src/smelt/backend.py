@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import shutil
 import warnings
 from pathlib import Path
@@ -119,6 +120,16 @@ def run_backend(
     * mypyc extensions
     * Nuitka compilation
     """
+    local_platform = platform.system().lower()
+    if (platforms := config.platforms) is not None and local_platform not in platforms:
+        if stdout is None:
+            return
+        printer = _logger.info if stdout == "logger" else print
+        printer(
+            f"Running on {local_platform}, build hook is restricted to {platforms}, skipping extension building"
+        )
+        return
+
     path_solver = path_solver or config.get_path_solver()
     # Starting with C extensions
     warnings.warn(

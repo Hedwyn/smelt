@@ -60,7 +60,9 @@ class HatchlingBuildHook(BuildHookInterface):
         self.debug_log(f"Smelt: Calling build hook with config:\n{self.config}")
         try:
             run_backend(
-                self.smelt_config, strategy=ModpathType.FS, without_entrypoint=True
+                self.smelt_config,
+                strategy=ModpathType.FS,
+                without_entrypoint=True,
             )
         except Exception as exc:
             raise RuntimeError(f"Smelt build failed: {exc}")
