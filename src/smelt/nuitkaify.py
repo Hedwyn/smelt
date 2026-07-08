@@ -18,8 +18,10 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sysconfig
+import tempfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import sys
 from pathlib import Path
 from typing import Final, Iterable, Iterator, Literal
@@ -28,7 +30,8 @@ from setuptools import Extension
 
 from .process import call_command
 
-from smelt.context import get_context
+from smelt.compiler import ZigCompiler
+from smelt.context import create_context_if_enabled, get_context
 from smelt.utils import GenericExtension, PathSolver
 from smelt.config import NuitkaModule
 
@@ -71,6 +74,37 @@ NUITKA_MINIMAL_FLAGS: Final[tuple[str, ...]] = (
 )
 
 
+# Base name of the shared Nuitka runtime library, i.e. `lib{RUNTIME_LIB_NAME}.so`.
+# Modules link against it via `-l{RUNTIME_LIB_NAME}`.
+RUNTIME_LIB_NAME: Final[str] = "__nuitka_runtime"
+
+
+@dataclass
+class NuitkaBuildContext:
+    """
+    State shared across the multiple `nuitkaify_module` calls of a single build.
+
+    Compiling several modules independently would otherwise re-embed the identical
+    Nuitka static runtime into each `.so`. To share it, we must defer the runtime
+    compilation and do it once for all modules; this object is the persistence that
+    lets `nuitkaify_module` accumulate what that single runtime build needs.
+
+    `runtime_sources` is a set (so contributions from different modules deduplicate
+    safely) of the canonical Nuitka static runtime C sources required so far.
+
+    Registered under the name "nuitka" in the generic `GlobalContext`, but kept
+    distinct from it: the `GlobalContext` tracks run-command traces globally, whereas
+    this only accumulates the state the shared runtime build needs.
+    """
+
+    runtime_sources: set[str] = field(default_factory=set)
+
+    def render(self) -> str:
+        lines = [f"Nuitka runtime sources ({len(self.runtime_sources)}):"]
+        lines.extend(f"  {src}" for src in sorted(self.runtime_sources))
+        return "\n".join(lines)
+
+
 def locate_nuitka_headers() -> list[Path]:
     header_folders: list[Path] = []
     import nuitka
@@ -84,19 +118,76 @@ def locate_nuitka_headers() -> list[Path]:
     return header_folders
 
 
-def iterate_nuitka_c_sources(build_folder: str) -> Iterator[Path]:
+def iterate_nuitka_module_sources(build_folder: str) -> Iterator[Path]:
     """
-    Iterates over all C sources that should be compiled from the passed build fodler
+    Iterates over the per-module generated C sources in `build_folder`.
+
+    These are specific to the compiled module (module code, constants blob wrapper,
+    loader, helpers) and must be compiled into the module's own `.so`.
     """
     root = Path(build_folder)
     for f in os.listdir(build_folder):
         if f.endswith(".c"):
             yield root / f
 
-    static_src = root / "static_src"
+
+def iterate_nuitka_runtime_sources(build_folder: str) -> Iterator[Path]:
+    """
+    Iterates over the shared Nuitka static runtime C sources of `build_folder`.
+
+    Yields the *canonical* Nuitka source (symlinks resolved): the static runtime is
+    identical for every module compiled by the same Nuitka, so resolving lets the
+    contributions of different module build folders deduplicate when accumulated in a
+    `NuitkaBuildContext`.
+    """
+    static_src = Path(build_folder) / "static_src"
+    if not static_src.exists():
+        return
     for f in os.listdir(static_src):
         if f.endswith(".c"):
-            yield static_src / f
+            yield (static_src / f).resolve()
+
+
+def build_nuitka_runtime(
+    sources: Iterable[str],
+    include_dirs: Iterable[str],
+    dest_folder: Path,
+) -> Path:
+    """
+    Compiles the shared Nuitka static runtime `sources` into a single
+    `lib{RUNTIME_LIB_NAME}.so` placed in `dest_folder`.
+
+    The static runtime is identical for every module compiled by the same Nuitka, so
+    factoring it into one shared library lets each module `.so` link against it rather
+    than embed its own copy. Built with default symbol visibility (see
+    NUITKA_MINIMAL_FLAGS) so its helpers stay resolvable from the module `.so`s, and
+    with an explicit SONAME so those modules record a clean `NEEDED` entry resolvable
+    via their `$ORIGIN` rpath.
+    """
+    compiler = ZigCompiler()
+    python_includes = [
+        sysconfig.get_path("include"),
+        sysconfig.get_path("platinclude"),
+    ]
+    soname = f"lib{RUNTIME_LIB_NAME}.so"
+    with tempfile.TemporaryDirectory() as build_folder:
+        objects = compiler.compile(
+            sources=list(sources),
+            output_dir=build_folder,
+            include_dirs=python_includes + list(include_dirs),
+            extra_postargs=list(NUITKA_MINIMAL_FLAGS),
+            macros=list(NUITKA_MACROS),
+        )
+        compiler.link_shared_object(
+            objects,
+            soname,
+            output_dir=str(dest_folder),
+            libraries=["m", "dl", "z"],
+            extra_preargs=[f"-Wl,-soname,{soname}"],
+        )
+    runtime_path = dest_folder / soname
+    assert runtime_path.exists(), f"Runtime library not produced at {runtime_path}"
+    return runtime_path
 
 
 # Static runtime C sources that a full Nuitka module build copies into the build
@@ -161,7 +252,9 @@ def _bundled_patchelf_on_path() -> Iterator[None]:
         yield
         return
     path = os.environ.get("PATH", "")
-    with _environ_overridden(PATH=f"{bindir}{os.pathsep}{path}" if path else str(bindir)):
+    with _environ_overridden(
+        PATH=f"{bindir}{os.pathsep}{path}" if path else str(bindir)
+    ):
         yield
 
 
@@ -318,11 +411,34 @@ def nuitkaify_module(
     stdout: Stdout | None = None,
     include_modules: Iterable[str] | None = None,
     include_packages: Iterable[str] | None = None,
+    build_runtime: bool = True,
+    nuitka_context: NuitkaBuildContext | None = None,
 ) -> GenericExtension:
     """
-    Compiles the module given by `path`.
-    Follows imports by default, but can be disabled with `no_follow_imports`.
+    Compiles the module given by `path` into a `.so` linked against a shared Nuitka
+    runtime library (see `build_nuitka_runtime`).
+
+    `build_runtime` controls whether this call also compiles that runtime library:
+    - True (default): the runtime is built here, right before the module, reproducing
+      the current self-contained behaviour.
+    - False: the runtime build is deferred (to be done once for all modules); the
+      required runtime sources are only accumulated into `nuitka_context`.
+
+    `nuitka_context` is the persistence the deferred runtime build reads from. When not
+    provided it is resolved from the "nuitka" persistent context, and created if that
+    is absent too, so the accumulated sources are never lost. It is distinct from the
+    generic `GlobalContext` (which tracks run-command traces).
     """
+    if nuitka_context is None:
+        existing = get_context("nuitka")
+        if existing is not None:
+            assert isinstance(existing, NuitkaBuildContext)
+            nuitka_context = existing
+    if nuitka_context is None:
+        nuitka_context = (
+            create_context_if_enabled("nuitka", NuitkaBuildContext)
+            or NuitkaBuildContext()
+        )
     path_solver = path_solver or PathSolver()
     context = get_context()
     src_path = module.source or path_solver.resolve_import_path(module.import_path)
@@ -364,25 +480,39 @@ def nuitkaify_module(
     write_constants_incbin(build_folder, blob_path)
     provide_nuitka_static_sources(build_folder)
 
-    c_sources = [str(src) for src in iterate_nuitka_c_sources(build_folder)]
-    assert c_sources, (
+    # The generated sources split into the per-module code (compiled into the module's
+    # own `.so`) and the shared static runtime (factored into `lib{RUNTIME_LIB_NAME}.so`).
+    module_sources = [str(src) for src in iterate_nuitka_module_sources(build_folder)]
+    assert module_sources, (
         "Nuitka did not produce any C file or build folder path logic is incorrect"
     )
+    runtime_sources = [str(src) for src in iterate_nuitka_runtime_sources(build_folder)]
     header_sources = [str(f) for f in locate_nuitka_headers()]
     header_sources.append(build_folder)
     # patching build_definitions.h, as we don't need extensions
     open(os.path.join(build_folder, "build_definitions.h"), "w+").close()
+
+    nuitka_context.runtime_sources.update(runtime_sources)
+
+    dest_folder = Path(src_path).parent
+    if build_runtime:
+        build_nuitka_runtime(runtime_sources, header_sources, dest_folder)
+
+    # The module links against the shared runtime; `$ORIGIN` lets its `.so` locate the
+    # runtime library sitting next to it in the final package.
     setup_tools_ext = Extension(
         name=mod_filename.replace(".py", ""),
-        sources=c_sources,
+        sources=module_sources,
         include_dirs=header_sources,
         define_macros=NUITKA_MACROS,
-        libraries=["m", "dl", "z"],
+        libraries=[RUNTIME_LIB_NAME, "m", "dl", "z"],
+        library_dirs=[str(dest_folder)],
+        runtime_library_dirs=["$ORIGIN"],
         extra_compile_args=list(NUITKA_MINIMAL_FLAGS),
     )
     return GenericExtension(
         import_path=module.import_path,
         src_path=str(src_path),
         extension=setup_tools_ext,
-        dest_folder=Path(src_path).parent,
+        dest_folder=dest_folder,
     )

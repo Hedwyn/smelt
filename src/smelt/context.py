@@ -72,7 +72,7 @@ class GlobalContext:
         Retrieves the persistent context stored under the given name.
         Returns None if no such context exists.
         """
-        return self.persistent_contexts[name]
+        return self.persistent_contexts.get(name)
 
     def render(self) -> str:
         """
