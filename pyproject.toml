@@ -21,9 +21,20 @@ Homepage = "https://github.com/Hedwyn/smelt"
 tests = ["pytest", "mypy[mypyc]"]
 mypyc = ["mypy[mypyc]"]
 cli = ["click"]
-nuitka = ["nuitka"]
+# patchelf: Nuitka needs it for RPATH rewrites in standalone/onefile mode on Linux;
+# bundling a known-good build keeps smelt self-contained rather than relying on the
+# host distro's version. Capped below 0.18 because Nuitka blacklists patchelf 0.18.0
+# (a buggy upstream release); the 0.17.2.x line is the current good stable series.
+nuitka = ["nuitka", "patchelf>=0.17.2,<0.18; sys_platform == 'linux'"]
 cython = ["Cython"]
-build = ["Cython", "nuitka", "mypy[mypyc]", "hatchling", "editables"]
+build = [
+    "Cython",
+    "nuitka",
+    "patchelf>=0.17.2,<0.18; sys_platform == 'linux'",
+    "mypy[mypyc]",
+    "hatchling",
+    "editables",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

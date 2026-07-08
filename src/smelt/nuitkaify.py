@@ -125,6 +125,42 @@ def _environ_overridden(**overrides: str) -> Iterator[None]:
                 os.environ[key] = value
 
 
+def _bundled_patchelf_dir() -> Path | None:
+    """
+    Returns the directory holding the PyPI-provided `patchelf` binary, or None.
+
+    Nuitka needs `patchelf` to rewrite RPATHs in standalone/onefile mode on Linux,
+    and locates it by bare name via PATH. Distributions ship varied (sometimes
+    Nuitka-blacklisted, e.g. 0.18.0) versions, so smelt bundles a known-good one via
+    the `patchelf` PyPI package to stay self-contained. This locates that binary
+    independently of PATH ordering so we can put it first for Nuitka.
+    """
+    import importlib.metadata as md
+
+    try:
+        dist = md.distribution("patchelf")
+    except md.PackageNotFoundError:
+        return None
+    for entry in dist.files or []:
+        if entry.name == "patchelf" or entry.name.startswith("patchelf."):
+            located = Path(entry.locate()).resolve()
+            if located.exists():
+                return located.parent
+    return None
+
+
+@contextmanager
+def _bundled_patchelf_on_path() -> Iterator[None]:
+    """Prepends the bundled `patchelf` directory to PATH, if that package is installed."""
+    bindir = _bundled_patchelf_dir()
+    if bindir is None:
+        yield
+        return
+    path = os.environ.get("PATH", "")
+    with _environ_overridden(PATH=f"{bindir}{os.pathsep}{path}" if path else str(bindir)):
+        yield
+
+
 def run_nuitka_data_composer(build_folder: str) -> Path:
     """
     Runs Nuitka's data composer over `build_folder` to produce the constants blob.
@@ -252,7 +288,10 @@ def compile_with_nuitka(
 
     _logger.debug("Running %s", " ".join(cmd))
 
-    cmd_trace = call_command(*cmd, printer=print)
+    # Standalone/onefile builds shell out to `patchelf`; prefer our bundled, known-good
+    # copy over whatever the system ships (some distro releases are Nuitka-blacklisted).
+    with _bundled_patchelf_on_path():
+        cmd_trace = call_command(*cmd, printer=print)
     if context:
         context.add_trace(cmd_trace)
     if cmd_trace.exit_code != 0:
