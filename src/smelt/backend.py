@@ -185,7 +185,7 @@ def run_backend(
     without_entrypoint = without_entrypoint or config.entrypoint is None
     if not without_entrypoint:
         entrypoint_file = locate_module(
-            config.entrypoint, strategy=strategy, package_root=path_solver
+            config.entrypoint, strategy=strategy, package_root=path_solver.project_root
         )
         compile_with_nuitka(
             entrypoint_file, stdout=stdout, include_modules=shared_runtime_extensions
