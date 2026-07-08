@@ -54,13 +54,17 @@ NUITKA_MACROS = [
     ("_NUITKA_MODULE_MODE", 1),
 ]
 
+# Note: no `-fvisibility=hidden`. Nuitka's static runtime helpers are declared as
+# plain `extern` (e.g. nuitka/calling.h) with no per-symbol export attribute, so a
+# blanket hidden visibility is the *only* thing that would hide them. Once the runtime
+# is factored into a shared `.so` (upcoming), the module `.so`s must resolve those
+# symbols at load, which requires them exported. `PyInit_*` is force-exported by
+# `PyMODINIT_FUNC` regardless, so module loading is unaffected either way.
 NUITKA_MINIMAL_FLAGS: Final[tuple[str, ...]] = (
     "-std=c11",
     "-fwrapv",
     "-pipe",
     "-w",
-    "-fvisibility=hidden",
-    "-fvisibility-inlines-hidden",
     "-Wno-unused-but-set-variable",
     "-O3",
     "-fPIC",
