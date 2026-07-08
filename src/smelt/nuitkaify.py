@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass
 import sys
 from pathlib import Path
@@ -41,7 +43,10 @@ type Stdout = Literal["stdout", "logger"]
 NUITKA_MACROS = [
     ("_XOPEN_SOURCE", None),
     ("__NUITKA_NO_ASSERT__", None),
-    ("_NUITKA_CONSTANTS_FROM_CODE", None),
+    # We embed the constants blob via INCBIN (see write_constants_incbin): it only
+    # needs a small generated wrapper + the blob file, unlike _NUITKA_CONSTANTS_FROM_CODE
+    # which expects a full C-array source that generate-c-only does not produce.
+    ("_NUITKA_CONSTANTS_FROM_INCBIN", None),
     ("_NUITKA_FROZEN", 0),
     # TODO:
     # Note: seems that that one was NUITKA_MODULE_MODE
@@ -88,6 +93,124 @@ def iterate_nuitka_c_sources(build_folder: str) -> Iterator[Path]:
     for f in os.listdir(static_src):
         if f.endswith(".c"):
             yield static_src / f
+
+
+# Static runtime C sources that a full Nuitka module build copies into the build
+# folder but `--generate-c-only` does not. Mirrors
+# `nuitka.build.SconsInterface.provideStaticSourceFilesBackend` for module mode
+# (exe/dll additionally pull `MainProgram.c`, which we never build here).
+# Hardcoded on purpose: calling Nuitka's own function requires its Options global
+# state to be initialised, which the subprocess-based invocation deliberately avoids.
+NUITKA_MODULE_STATIC_SOURCES: Final[tuple[str, ...]] = ("CompiledFunctionType.c",)
+
+
+def _nuitka_root() -> Path:
+    import nuitka
+
+    return Path(nuitka.__file__).parent
+
+
+@contextmanager
+def _environ_overridden(**overrides: str) -> Iterator[None]:
+    """Temporarily set environment variables, restoring the previous state on exit."""
+    previous = {key: os.environ.get(key) for key in overrides}
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def run_nuitka_data_composer(build_folder: str) -> Path:
+    """
+    Runs Nuitka's data composer over `build_folder` to produce the constants blob.
+
+    `--generate-c-only` skips this step (see MainControl.shallNotDoExecCCompilerCall),
+    which is why the `constant_bin_data` symbol is otherwise undefined at link time.
+    Returns the path to the generated blob.
+    """
+    root = _nuitka_root()
+    data_composer = root / "tools" / "data_composer"
+    # Absolute so the INCBIN directive in __constants_data.c resolves regardless of the
+    # working directory the later setuptools/zig compile runs from.
+    blobs_dir = Path(build_folder).resolve() / "blobs"
+    blobs_dir.mkdir(parents=True, exist_ok=True)
+    blob_path = blobs_dir / "__constant.bin"
+    stats_path = blobs_dir / "__constant.txt"
+
+    # NUITKA_PACKAGE_HOME is required by the data composer entrypoint (tools/data_composer
+    # /__main__.py) to locate the nuitka package, mirroring runDataComposer's behaviour.
+    package_home = str(root.parent)
+    cmd = (
+        sys.executable,
+        str(data_composer),
+        build_folder,
+        str(blob_path),
+        str(stats_path),
+    )
+    _logger.debug("Running %s", " ".join(cmd))
+    with _environ_overridden(NUITKA_PACKAGE_HOME=package_home):
+        cmd_trace = call_command(*cmd)
+    context = get_context()
+    if context:
+        context.add_trace(cmd_trace)
+    if cmd_trace.exit_code != 0:
+        raise RuntimeError(
+            f"Nuitka data composer failed with exitcode {cmd_trace.exit_code}: {' '.join(cmd)}"
+        )
+    assert blob_path.exists(), f"Data composer did not produce a blob at {blob_path}"
+    return blob_path
+
+
+def write_constants_incbin(build_folder: str, blob_path: Path) -> None:
+    """
+    Writes `__constants_data.c` embedding the constants blob via INCBIN.
+
+    Reproduces `nuitka.build.SconsCompilerSettings._addConstantBlobFileIncbin`, which a
+    full build runs from Scons. The blob is referenced by its absolute path so the
+    `.incbin` directive resolves regardless of the compiler's working directory during
+    the later setuptools build. Pairs with the `_NUITKA_CONSTANTS_FROM_INCBIN` macro.
+    """
+    # Symbols per Nuitka's contract for the "__constant.bin" blob:
+    # INCBIN(constant_bin, ...) defines `constant_bin_data`; getConstantBlobData()
+    # is declared by NUITKA_DECLARE_CONSTANT_BLOB(constant_bin, ConstantBlob, ...).
+    contents = f"""\
+#define INCBIN_PREFIX
+#define INCBIN_STYLE INCBIN_STYLE_SNAKE
+#define INCBIN_LOCAL
+#define CONST_CONSTANT const
+
+#include "nuitka/incbin.h"
+
+INCBIN(constant_bin, "{blob_path.as_posix()}");
+
+#ifdef __cplusplus
+extern "C" {{
+#endif
+unsigned CONST_CONSTANT char *getConstantBlobData(void) {{
+    return (unsigned CONST_CONSTANT char *)constant_bin_data;
+}}
+#ifdef __cplusplus
+}}
+#endif
+"""
+    (Path(build_folder) / "__constants_data.c").write_text(contents)
+
+
+def provide_nuitka_static_sources(build_folder: str) -> None:
+    """
+    Copies the static runtime C sources that `--generate-c-only` omits into the build
+    folder's `static_src`, mirroring `provideStaticSourceFilesBackend` for module mode.
+    """
+    src_dir = _nuitka_root() / "build" / "static_src"
+    dst_dir = Path(build_folder) / "static_src"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for filename in NUITKA_MODULE_STATIC_SOURCES:
+        shutil.copyfile(src_dir / filename, dst_dir / filename)
 
 
 def compile_with_nuitka(
@@ -164,17 +287,12 @@ def nuitkaify_module(
     cmd = list(NUITKA_ENTRYPOINT)
     cmd.append("--module")
     cmd.append(str(src_path))
-    # TODO: the clean approach will to use the `--generate-c-only` since we want to
-    # compile ourselves, however, when enabled nuitka generates the C code
-    # but does not copy the static source files from its own package
-    # These static files can be found in the .build folder when running a full build
-    # but not when using generate-c-only.
-    # The logic to find the ones that are required is not so trivial (nuitka only includes the ones)
-    # that are actually needed, we we would have to tap into the scons stuff to extract them
-    # ideal way would to do a dry run to extract all the build system data instead of trying
-    # to reproduce it
-    # As it now, nuitka will do the full compilation only for us to recompile again
-    # cmd.append("--generate-c-only")
+    # We compile ourselves, so ask Nuitka for the C sources only. `--generate-c-only`
+    # returns early (MainControl.shallNotDoExecCCompilerCall) and therefore skips three
+    # steps a full build performs: the data composer (constants blob), the constants-blob
+    # C wrapper, and copying static runtime sources. We reproduce all three below, which
+    # avoids the previous behaviour of letting Nuitka compile fully just to recompile.
+    cmd.append("--generate-c-only")
 
     # handling special flags
     if include_modules:
@@ -197,6 +315,12 @@ def nuitkaify_module(
 
     build_folder = mod_filename.replace(".py", ".build")
     assert os.path.exists(build_folder)
+
+    # Reproduce the build steps `--generate-c-only` skips (see comment above).
+    blob_path = run_nuitka_data_composer(build_folder)
+    write_constants_incbin(build_folder, blob_path)
+    provide_nuitka_static_sources(build_folder)
+
     c_sources = [str(src) for src in iterate_nuitka_c_sources(build_folder)]
     assert c_sources, (
         "Nuitka did not produce any C file or build folder path logic is incorrect"
