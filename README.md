@@ -110,3 +110,27 @@ from the per-module `getConstantBlobData`, and the module's generated call sites
 rewritten to pass their own blob. Everything else — the bulk of the runtime — is
 compiled once and shared. The net effect matches the other backends: N thin module
 `.so`s plus one shared runtime, with the constants of each module kept private to it.
+
+### Current limitation: packages themselves are not auto-compiled
+
+`auto_mode` (`"package"`/`"all"`) walks a package's filesystem tree and proposes every
+`.py` file it finds as a compile target — except a package's own `__init__.py`, at any
+depth. This isn't a discovery oversight; Nuitka has no way to do it that fits Smelt's
+model.
+
+Nuitka draws a hard line between compiling a *module* (point it at a `.py` file, get a
+`.so`) and compiling a *package* (point it at the package's *directory*, which
+transpiles the whole package — `__init__.py` and everything Nuitka can see under it —
+into a single artifact meant to *replace* that directory as the importable module).
+Smelt's per-module model, described above, keeps every original source file in place
+and drops a same-named `.so` next to it — there is no step where the source is removed.
+Applying that same model to a package's `__init__.py` would produce an
+`automode.cpython-*.so` sitting right next to the still-present `automode/` directory.
+Python's import system always resolves a name to a package directory before it
+considers a same-named extension module in that directory, so the freshly compiled
+`.so` would simply never be imported — dead weight, silently never taking effect.
+
+Until Nuitka's whole-package compilation mode gets its own place in Smelt's model
+(package in, single replacement artifact out — a different shape from the shared-runtime
+scheme above), `auto_mode` skips packages entirely and only ever proposes their concrete
+submodules.

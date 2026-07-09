@@ -130,9 +130,14 @@ def find_modules_under_root(import_path: ImportPath, root: PathExists) -> set[Im
     """
     modules: set[ImportPath] = set()
     for py_file in Path(root).rglob("*.py"):
+        if py_file.name == "__init__.py":
+            # A package's own `__init__.py` can't be compiled the way Smelt compiles
+            # every other module: the result would sit right next to the still-present
+            # package directory under the same import name, and a directory always
+            # wins over a same-named extension module on import. Only compile a
+            # package's concrete submodules, never the package itself.
+            continue
         parts = py_file.relative_to(root).with_suffix("").parts
-        if parts and parts[-1] == "__init__":
-            parts = parts[:-1]
         if not all(is_valid_module_name(p) for p in parts):
             continue
         modules.add(assert_is_valid_import_path(".".join([import_path, *parts])))
