@@ -9,6 +9,38 @@ is run on import, a few critical components are handled global variables, so the
 trying to import the code and call directly.
 This might be changed later.
 
+Sharing the Nuitka runtime across modules
+------------------------------------------
+Unlike mypyc/cython, Nuitka's main mode of operation is *whole-program*: it turns an
+entrypoint into a single artifact that embeds Nuitka's large C "static runtime"
+(compiled functions, generators, calling conventions, the constants system, ...).
+Smelt also drives Nuitka per *module* (one native `.so` per Python module, like the
+other backends). Done naively that re-embeds the whole static runtime into every
+module `.so` — several megabytes of identical C code duplicated N times. So Smelt
+builds that runtime **once** as `lib{RUNTIME_LIB_NAME}.so` and links every module
+against it (resolved at load via an `$ORIGIN` rpath).
+
+The one thing that makes the runtime not trivially shareable is Nuitka's **constants
+blob**. Python constants (strings, numbers, tuples, interned names...) are live
+`PyObject`s that cannot be emitted as C statics, so Nuitka serializes them into a
+compact binary blob embedded in the artifact and materializes them at import time. The
+blob is a whole-program structure: named sections, one universal section shared by all
+modules plus one per module; a startup loader (`loadConstantsBlob`) fetches "the" blob
+via `getConstantBlobData()` and unpacks a module's section by name.
+
+That single-blob assumption breaks once modules are independent import units: each
+module `.so` must keep its **own** blob (its literals + a copy of the universal
+constants), and merging blobs would fuse the modules back into one unit. What is shared
+is only *code*, not *data*. So Smelt splits the build:
+  * the shared runtime carries the generic static runtime and the (identical) universal
+    constants;
+  * each module keeps its own blob and *passes it* into the runtime's loader, which is
+    made blob-agnostic — `loadConstantsBlob` takes the blob as an argument instead of
+    fetching a single global one, and each module's generated call sites are rewritten
+    to pass their own `getConstantBlobData()`.
+This keeps every module reading its own constants while the multi-megabyte machinery is
+compiled once. See `build_nuitka_runtime` and `patch_module_constants_calls`.
+
 @date: 11.06.2025
 @author: Baptiste Pestourie
 """
@@ -17,6 +49,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sysconfig
 import tempfile
@@ -131,50 +164,213 @@ def iterate_nuitka_module_sources(build_folder: str) -> Iterator[Path]:
             yield root / f
 
 
-def iterate_nuitka_runtime_sources(build_folder: str) -> Iterator[Path]:
-    """
-    Iterates over the shared Nuitka static runtime C sources of `build_folder`.
+# Static runtime C sources a full Nuitka module build copies into the build folder but
+# `--generate-c-only` does not (mirrors `provideStaticSourceFilesBackend` for module
+# mode; exe/dll additionally pull `MainProgram.c`, which we never build). Compiling
+# `CompiledFunctionType.c` pulls in the whole static runtime via its `#include` tree.
+# Used by the standalone path (`use_runtime=False`) to embed the runtime into the module;
+# the shared-runtime path builds the runtime separately (see `build_nuitka_runtime`).
+NUITKA_MODULE_STATIC_SOURCES: Final[tuple[str, ...]] = ("CompiledFunctionType.c",)
 
-    Yields the *canonical* Nuitka source (symlinks resolved): the static runtime is
-    identical for every module compiled by the same Nuitka, so resolving lets the
-    contributions of different module build folders deduplicate when accumulated in a
-    `NuitkaBuildContext`.
+
+def provide_nuitka_static_sources(build_folder: str) -> None:
     """
+    Copies the static runtime C sources that `--generate-c-only` omits into the build
+    folder's `static_src`. Used by the standalone build path, which compiles the runtime
+    straight into the module `.so`.
+    """
+    src_dir = _nuitka_root() / "build" / "static_src"
+    dst_dir = Path(build_folder) / "static_src"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for filename in NUITKA_MODULE_STATIC_SOURCES:
+        shutil.copyfile(src_dir / filename, dst_dir / filename)
+
+
+def iterate_nuitka_static_sources(build_folder: str) -> Iterator[Path]:
+    """Iterates the static runtime C sources provided into `build_folder`/static_src."""
     static_src = Path(build_folder) / "static_src"
     if not static_src.exists():
         return
     for f in os.listdir(static_src):
         if f.endswith(".c"):
-            yield (static_src / f).resolve()
+            yield static_src / f
+
+
+# Compiling this single Nuitka static-runtime translation unit pulls in the whole
+# static runtime via its `#include` tree, so it is all we compile into the shared lib.
+NUITKA_RUNTIME_AGGREGATION: Final[str] = "CompiledFunctionType.c"
+
+# Files in that `#include` tree we must ship *our own* copies of so the aggregation
+# resolves ours (quoted includes look in the including file's directory first):
+# the aggregation root and the intermediate that pulls in the blob loader are copied
+# verbatim, while the blob loader itself is rewritten (see `_patched_blob_loader`).
+_RUNTIME_VERBATIM_SOURCES: Final[tuple[str, ...]] = (
+    NUITKA_RUNTIME_AGGREGATION,
+    "CompiledCodeHelpers.c",
+)
+_BLOB_LOADER_SOURCE: Final[str] = "HelpersConstantsBlob.c"
+
+
+def _nuitka_root() -> Path:
+    import nuitka
+
+    return Path(nuitka.__file__).parent
+
+
+def _runtime_source_paths() -> list[str]:
+    """Logical source(s) the shared runtime is built from (the aggregation root)."""
+    return [str(_nuitka_root() / "build" / "static_src" / NUITKA_RUNTIME_AGGREGATION)]
+
+
+def _apply_replacements(text: str, replacements: Iterable[tuple[str, str]]) -> str:
+    """Applies each (old, new) replacement, asserting every one actually matched.
+
+    The patched C is coupled to Nuitka internals; a failed replacement means a Nuitka
+    version drift we must notice rather than silently produce a broken runtime.
+    """
+    for old, new in replacements:
+        assert old in text, (
+            f"Expected Nuitka source fragment not found (version drift?): {old!r}"
+        )
+        text = text.replace(old, new)
+    return text
+
+
+def _patched_blob_loader(nuitka_static_src: Path) -> str:
+    """
+    Nuitka's `HelpersConstantsBlob.c`, rewritten so `loadConstantsBlob` takes the blob
+    as a parameter instead of fetching the single per-artifact `getConstantBlobData()`.
+
+    This is what lets the loader live in the *shared* runtime while each module reads
+    its *own* blob (passed in by the rewritten call sites, see
+    `patch_module_constants_calls`).
+    """
+    src = (nuitka_static_src / _BLOB_LOADER_SOURCE).read_text()
+    return _apply_replacements(
+        src,
+        [
+            (
+                "int loadConstantsBlob(PyThreadState *tstate, PyObject **output, char const *name) {",
+                "int loadConstantsBlob(PyThreadState *tstate, PyObject **output, "
+                "char const *name, unsigned char const *blob_data) {",
+            ),
+            (
+                "        constant_bin = getConstantBlobData();",
+                "        constant_bin = blob_data;",
+            ),
+            (
+                "    unsigned char const *w = constant_bin;",
+                "    unsigned char const *w = blob_data;",
+            ),
+        ],
+    )
+
+
+def _shadow_constants_header(nuitka_include: Path) -> str:
+    """
+    Nuitka's `nuitka/constants_blob.h` with the `loadConstantsBlob` prototype updated to
+    the blob-parameter signature and a `getConstantBlobData` declaration added, so both
+    the shared runtime and the modules compile against the patched contract.
+    """
+    src = (nuitka_include / "nuitka" / "constants_blob.h").read_text()
+    return _apply_replacements(
+        src,
+        [
+            (
+                "extern int loadConstantsBlob(PyThreadState *tstate, PyObject **, char const *name);",
+                "extern int loadConstantsBlob(PyThreadState *tstate, PyObject **, "
+                "char const *name, unsigned char const *blob_data);\n"
+                "extern unsigned char const *getConstantBlobData(void);",
+            ),
+        ],
+    )
+
+
+def _write_shadow_include(dest_dir: Path) -> Path:
+    """
+    Writes the shadowing `nuitka/constants_blob.h` into `dest_dir` and returns it, for
+    use as a priority include dir (before Nuitka's own include) so the patched
+    `loadConstantsBlob` prototype is the one seen at compile time.
+    """
+    shadow_nuitka = dest_dir / "nuitka"
+    shadow_nuitka.mkdir(parents=True, exist_ok=True)
+    header = _shadow_constants_header(_nuitka_root() / "build" / "include")
+    (shadow_nuitka / "constants_blob.h").write_text(header)
+    return dest_dir
+
+
+_LOAD_CONSTANTS_CALL: Final[re.Pattern[str]] = re.compile(
+    r"loadConstantsBlob\(tstate,.*?\);"
+)
+
+
+def patch_module_constants_calls(build_folder: str) -> None:
+    """
+    Rewrites the module's generated `loadConstantsBlob(tstate, out, name)` calls to
+    `loadConstantsBlob(tstate, out, name, getConstantBlobData())`.
+
+    Each module thus passes its *own* blob into the shared runtime's blob-agnostic
+    loader (see `_patched_blob_loader`), so it reads its own constants while the loader
+    itself is shared. Idempotent.
+    """
+
+    def _add_blob(match: re.Match[str]) -> str:
+        call = match.group(0)
+        if "getConstantBlobData()" in call:
+            return call
+        return call[:-2] + ", getConstantBlobData());"
+
+    for entry in os.listdir(build_folder):
+        if not entry.endswith(".c"):
+            continue
+        path = Path(build_folder) / entry
+        text = path.read_text()
+        patched = _LOAD_CONSTANTS_CALL.sub(_add_blob, text)
+        if patched != text:
+            path.write_text(patched)
 
 
 def build_nuitka_runtime(
-    sources: Iterable[str],
     include_dirs: Iterable[str],
     dest_folder: Path,
 ) -> Path:
     """
-    Compiles the shared Nuitka static runtime `sources` into a single
-    `lib{RUNTIME_LIB_NAME}.so` placed in `dest_folder`.
+    Compiles the shared Nuitka static runtime into a single `lib{RUNTIME_LIB_NAME}.so`
+    placed in `dest_folder`, built once and linked by every module.
 
-    The static runtime is identical for every module compiled by the same Nuitka, so
-    factoring it into one shared library lets each module `.so` link against it rather
-    than embed its own copy. Built with default symbol visibility (see
-    NUITKA_MINIMAL_FLAGS) so its helpers stay resolvable from the module `.so`s, and
-    with an explicit SONAME so those modules record a clean `NEEDED` entry resolvable
-    via their `$ORIGIN` rpath.
+    The runtime is the full `CompiledFunctionType.c` aggregation, but with the constants
+    blob loader replaced by a blob-agnostic version (`_patched_blob_loader`) so it holds
+    no per-module blob reference — only the (universal) `global_constants`. We compile
+    *our* copies of the aggregation files (quoted includes resolve to the including
+    file's directory first) plus a shadow `constants_blob.h`, falling back to Nuitka's
+    own sources/headers via `include_dirs` for everything else.
+
+    Built with default symbol visibility (see NUITKA_MINIMAL_FLAGS) so its helpers stay
+    resolvable from the module `.so`s, and with an explicit SONAME so those modules
+    record a clean `NEEDED` entry resolvable via their `$ORIGIN` rpath.
     """
     compiler = ZigCompiler()
+    nuitka_static_src = _nuitka_root() / "build" / "static_src"
     python_includes = [
         sysconfig.get_path("include"),
         sysconfig.get_path("platinclude"),
     ]
     soname = f"lib{RUNTIME_LIB_NAME}.so"
-    with tempfile.TemporaryDirectory() as build_folder:
+    with tempfile.TemporaryDirectory() as tmp:
+        patch_dir = Path(tmp)
+        for name in _RUNTIME_VERBATIM_SOURCES:
+            shutil.copyfile(nuitka_static_src / name, patch_dir / name)
+        (patch_dir / _BLOB_LOADER_SOURCE).write_text(
+            _patched_blob_loader(nuitka_static_src)
+        )
+        shadow_inc = _write_shadow_include(patch_dir / "shadow_inc")
+
         objects = compiler.compile(
-            sources=list(sources),
-            output_dir=build_folder,
-            include_dirs=python_includes + list(include_dirs),
+            sources=[str(patch_dir / NUITKA_RUNTIME_AGGREGATION)],
+            output_dir=str(patch_dir / "obj"),
+            include_dirs=[str(shadow_inc), str(patch_dir)]
+            + python_includes
+            + list(include_dirs),
             extra_postargs=list(NUITKA_MINIMAL_FLAGS),
             macros=list(NUITKA_MACROS),
         )
@@ -188,21 +384,6 @@ def build_nuitka_runtime(
     runtime_path = dest_folder / soname
     assert runtime_path.exists(), f"Runtime library not produced at {runtime_path}"
     return runtime_path
-
-
-# Static runtime C sources that a full Nuitka module build copies into the build
-# folder but `--generate-c-only` does not. Mirrors
-# `nuitka.build.SconsInterface.provideStaticSourceFilesBackend` for module mode
-# (exe/dll additionally pull `MainProgram.c`, which we never build here).
-# Hardcoded on purpose: calling Nuitka's own function requires its Options global
-# state to be initialised, which the subprocess-based invocation deliberately avoids.
-NUITKA_MODULE_STATIC_SOURCES: Final[tuple[str, ...]] = ("CompiledFunctionType.c",)
-
-
-def _nuitka_root() -> Path:
-    import nuitka
-
-    return Path(nuitka.__file__).parent
 
 
 @contextmanager
@@ -334,18 +515,6 @@ unsigned CONST_CONSTANT char *getConstantBlobData(void) {{
     (Path(build_folder) / "__constants_data.c").write_text(contents)
 
 
-def provide_nuitka_static_sources(build_folder: str) -> None:
-    """
-    Copies the static runtime C sources that `--generate-c-only` omits into the build
-    folder's `static_src`, mirroring `provideStaticSourceFilesBackend` for module mode.
-    """
-    src_dir = _nuitka_root() / "build" / "static_src"
-    dst_dir = Path(build_folder) / "static_src"
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    for filename in NUITKA_MODULE_STATIC_SOURCES:
-        shutil.copyfile(src_dir / filename, dst_dir / filename)
-
-
 def compile_with_nuitka(
     path: str,
     no_follow_imports: bool = False,
@@ -411,23 +580,28 @@ def nuitkaify_module(
     stdout: Stdout | None = None,
     include_modules: Iterable[str] | None = None,
     include_packages: Iterable[str] | None = None,
-    build_runtime: bool = True,
+    use_runtime: bool = True,
     nuitka_context: NuitkaBuildContext | None = None,
 ) -> GenericExtension:
     """
-    Compiles the module given by `path` into a `.so` linked against a shared Nuitka
-    runtime library (see `build_nuitka_runtime`).
+    Compiles the module given by `path` into a native `.so`.
 
-    `build_runtime` controls whether this call also compiles that runtime library:
-    - True (default): the runtime is built here, right before the module, reproducing
-      the current self-contained behaviour.
-    - False: the runtime build is deferred (to be done once for all modules); the
-      required runtime sources are only accumulated into `nuitka_context`.
+    `use_runtime` selects how the Nuitka static runtime is provided:
+    - True (default): shared runtime. The static runtime is compiled once into
+      `lib{RUNTIME_LIB_NAME}.so` and linked by the module `.so`, which then holds only
+      its own generated code. The module keeps its own constants blob and its
+      `loadConstantsBlob` call sites are rewritten to pass it into the runtime's
+      blob-agnostic loader (`patch_module_constants_calls`), so each module reads its own
+      constants while the multi-megabyte runtime is compiled once and shared.
+    - False: standalone. The static runtime is embedded straight into the module `.so`
+      (via `provide_nuitka_static_sources`), producing a fully self-contained module with
+      no external runtime dependency — larger, but with nothing shared between modules.
 
-    `nuitka_context` is the persistence the deferred runtime build reads from. When not
-    provided it is resolved from the "nuitka" persistent context, and created if that
-    is absent too, so the accumulated sources are never lost. It is distinct from the
-    generic `GlobalContext` (which tracks run-command traces).
+    `nuitka_context` (used only when `use_runtime=True`) is the persistence a future
+    build-once-for-all-modules step reads from. When not provided it is resolved from the
+    "nuitka" persistent context, and created if that is absent too, so the accumulated
+    sources are never lost. It is distinct from the generic `GlobalContext` (which tracks
+    run-command traces).
     """
     if nuitka_context is None:
         existing = get_context("nuitka")
@@ -447,10 +621,10 @@ def nuitkaify_module(
     cmd.append("--module")
     cmd.append(str(src_path))
     # We compile ourselves, so ask Nuitka for the C sources only. `--generate-c-only`
-    # returns early (MainControl.shallNotDoExecCCompilerCall) and therefore skips three
-    # steps a full build performs: the data composer (constants blob), the constants-blob
-    # C wrapper, and copying static runtime sources. We reproduce all three below, which
-    # avoids the previous behaviour of letting Nuitka compile fully just to recompile.
+    # returns early (MainControl.shallNotDoExecCCompilerCall) and therefore skips the
+    # data composer (constants blob) and the constants-blob C wrapper, which we reproduce
+    # below. This avoids the previous behaviour of letting Nuitka compile fully just to
+    # recompile.
     cmd.append("--generate-c-only")
 
     # handling special flags
@@ -478,36 +652,50 @@ def nuitkaify_module(
     # Reproduce the build steps `--generate-c-only` skips (see comment above).
     blob_path = run_nuitka_data_composer(build_folder)
     write_constants_incbin(build_folder, blob_path)
-    provide_nuitka_static_sources(build_folder)
 
-    # The generated sources split into the per-module code (compiled into the module's
-    # own `.so`) and the shared static runtime (factored into `lib{RUNTIME_LIB_NAME}.so`).
     module_sources = [str(src) for src in iterate_nuitka_module_sources(build_folder)]
     assert module_sources, (
         "Nuitka did not produce any C file or build folder path logic is incorrect"
     )
-    runtime_sources = [str(src) for src in iterate_nuitka_runtime_sources(build_folder)]
-    header_sources = [str(f) for f in locate_nuitka_headers()]
-    header_sources.append(build_folder)
     # patching build_definitions.h, as we don't need extensions
     open(os.path.join(build_folder, "build_definitions.h"), "w+").close()
 
-    nuitka_context.runtime_sources.update(runtime_sources)
-
     dest_folder = Path(src_path).parent
-    if build_runtime:
-        build_nuitka_runtime(runtime_sources, header_sources, dest_folder)
+    header_sources = [str(f) for f in locate_nuitka_headers()]
+    header_sources.append(build_folder)
 
-    # The module links against the shared runtime; `$ORIGIN` lets its `.so` locate the
-    # runtime library sitting next to it in the final package.
+    if use_runtime:
+        # Shared runtime: only the per-module generated code goes into the module `.so`;
+        # the static runtime lives in `lib{RUNTIME_LIB_NAME}.so`. Rewrite the module's
+        # constants-loader calls to pass its own blob into the runtime's blob-agnostic
+        # loader, and shadow `constants_blob.h` (patched prototype) ahead of Nuitka's.
+        patch_module_constants_calls(build_folder)
+        shadow_inc = _write_shadow_include(Path(build_folder) / "__smelt_shadow")
+        header_sources.insert(0, str(shadow_inc))
+        nuitka_context.runtime_sources.update(_runtime_source_paths())
+        build_nuitka_runtime(header_sources, dest_folder)
+        # `$ORIGIN` lets the module `.so` find the runtime sitting next to it in the package.
+        libraries = [RUNTIME_LIB_NAME, "m", "dl", "z"]
+        library_dirs = [str(dest_folder)]
+        runtime_library_dirs = ["$ORIGIN"]
+    else:
+        # Standalone: compile the static runtime straight into the module `.so`.
+        provide_nuitka_static_sources(build_folder)
+        module_sources.extend(
+            str(src) for src in iterate_nuitka_static_sources(build_folder)
+        )
+        libraries = ["m", "dl", "z"]
+        library_dirs = []
+        runtime_library_dirs = []
+
     setup_tools_ext = Extension(
         name=mod_filename.replace(".py", ""),
         sources=module_sources,
         include_dirs=header_sources,
         define_macros=NUITKA_MACROS,
-        libraries=[RUNTIME_LIB_NAME, "m", "dl", "z"],
-        library_dirs=[str(dest_folder)],
-        runtime_library_dirs=["$ORIGIN"],
+        libraries=libraries,
+        library_dirs=library_dirs,
+        runtime_library_dirs=runtime_library_dirs,
         extra_compile_args=list(NUITKA_MINIMAL_FLAGS),
     )
     return GenericExtension(
