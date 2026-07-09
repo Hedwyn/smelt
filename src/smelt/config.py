@@ -10,7 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 import os
 from dataclasses import MISSING, dataclass, field, fields, asdict
-from typing import TYPE_CHECKING, Any, Iterable, Self
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Self
 
 from smelt.utils import (
     ImportPath,
@@ -172,6 +173,19 @@ def toml_get_nested_section(toml_data: TomlData, *path: str) -> _TomlData:
     return section
 
 
+class Backend(StrEnum):
+    """
+    A pure-python-to-native compilation backend, selectable via `backend_priority_order`.
+    """
+
+    NUITKA = "nuitka"
+    MYPYC = "mypyc"
+    CYTHON = "cython"
+
+
+type AutoMode = Literal["off", "package", "all"]
+
+
 @dataclass
 class NuitkaModule:
     import_path: ImportPath
@@ -221,11 +235,18 @@ class SmeltConfig:
     platforms: Iterable[str] | None = None
     entrypoint: str | None = None
     debug: bool = False
+    auto_mode: AutoMode = "off"
+    backend_priority_order: list[Backend] = field(
+        default_factory=lambda: [Backend.NUITKA]
+    )
 
     @classmethod
     def from_toml_data(
         cls, toml_data: dict[str, Any], project_root: Path | None = None
     ) -> Self:
+        # operate on a copy: callers (e.g. the hatch build hook) keep their own
+        # reference to `toml_data` around for error reporting after this call.
+        toml_data = dict(toml_data)
         # native code
         native_extensions_decl = toml_data.pop("c_extensions", [])
         native_extensions = [
@@ -258,12 +279,35 @@ class SmeltConfig:
             for decl in nuitka_modules_decl
         ]
 
+        # auto discovery mode
+        auto_mode: AutoMode = toml_data.pop("auto_mode", "off")
+        if auto_mode not in ("off", "package", "all"):
+            raise SmeltConfigError(
+                f"Invalid auto_mode: {auto_mode!r}. Expected one of 'off', 'package', 'all'."
+            )
+
+        # backend fallback order, used for modules discovered by auto_mode
+        backend_priority_order_decl = toml_data.pop(
+            "backend_priority_order", ["nuitka"]
+        )
+        assert_type_is(backend_priority_order_decl, list)
+        try:
+            backend_priority_order = [
+                Backend(name) for name in backend_priority_order_decl
+            ]
+        except ValueError as exc:
+            raise SmeltConfigError(
+                f"Invalid backend in backend_priority_order: {exc}"
+            ) from exc
+
         return cls(
             mypyc_modules=mypyc_modules,
             c_extensions=native_extensions,
             zig_modules=zig_modules,
             cython_modules=cython_modules,
             nuitka_modules=nuitka_modules,
+            auto_mode=auto_mode,
+            backend_priority_order=backend_priority_order,
             **toml_data,
         )
 

@@ -118,6 +118,35 @@ def _resolve_module_path(import_path: ImportPath) -> tuple[PathExists, bool] | N
     return path, spec.submodule_search_locations is not None
 
 
+def find_modules_under_root(import_path: ImportPath, root: PathExists) -> set[ImportPath]:
+    """
+    Finds every python module under `root`, the filesystem location `import_path`
+    resolves to, as fully dotted import paths.
+
+    Unlike `find_modules_in_distribution`, this walks the filesystem directly and
+    does not require the package to be part of an installed distribution (nor its
+    RECORD to be up to date), at the cost of not resolving namespace packages
+    spread across several roots.
+    """
+    modules: set[ImportPath] = set()
+    for py_file in Path(root).rglob("*.py"):
+        parts = py_file.relative_to(root).with_suffix("").parts
+        if parts and parts[-1] == "__init__":
+            parts = parts[:-1]
+        if not all(is_valid_module_name(p) for p in parts):
+            continue
+        modules.add(assert_is_valid_import_path(".".join([import_path, *parts])))
+    return modules
+
+
+def has_local_source(import_path: ImportPath) -> bool:
+    """
+    True if `import_path` resolves to a local, non-native `.py` source file,
+    as opposed to a builtin, frozen, C extension, or namespace package.
+    """
+    return _resolve_module_path(import_path) is not None
+
+
 def _expand_prefixes(import_path: ImportPath) -> Iterator[ImportPath]:
     """
     Yields every package prefix of `import_path`, included itself,
@@ -150,8 +179,15 @@ def _walk_module(
         return
     path, is_package = resolved
 
+    try:
+        raw_imports = list(_iter_raw_imports(path.read_text()))
+    except (SyntaxError, UnicodeDecodeError):
+        # Unparseable source (e.g. a work-in-progress file): treat as a leaf,
+        # same as a module we can't resolve at all.
+        return
+
     targets: set[ImportPath] = set()
-    for module, level in _iter_raw_imports(path.read_text()):
+    for module, level in raw_imports:
         target: ImportPath | None
         if level:
             target = _resolve_relative_import(node.name, is_package, module, level)
