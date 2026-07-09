@@ -25,6 +25,7 @@ from smelt.backend import (
     compile_mypyc_extensions,
     nuitkaify_module,
     run_backend,
+    write_auto_mode_report,
 )
 from smelt.compiler import SupportedPlatforms, compile_extension
 from smelt.config import (
@@ -231,6 +232,8 @@ def build_standalone_binary(
         run_backend(config, stdout="stdout", path_solver=path_solver)
     except Exception as e:
         click.echo(f"Error during build: {e}")
+    if config.report_path is not None:
+        write_auto_mode_report(config.report_path)
     if report is not None:
         global_context = get_context()
         assert global_context is not None
@@ -341,7 +344,15 @@ def build_extensions(*, package: PathExists) -> None:
         except tomllib.TOMLDecodeError as exc:
             error_exit(f"Invalid TOML file [{pyproject_path}]: {exc}")
         config = parse_config_from_pyproject(toml_data, project_root=package)
+        config.load_env()
         path_solver = config.get_path_solver(project_root=package)
-        run_backend(
-            config, stdout="stdout", path_solver=path_solver, without_entrypoint=True
-        )
+        try:
+            run_backend(
+                config,
+                stdout="stdout",
+                path_solver=path_solver,
+                without_entrypoint=True,
+            )
+        finally:
+            if config.report_path is not None:
+                write_auto_mode_report(config.report_path)

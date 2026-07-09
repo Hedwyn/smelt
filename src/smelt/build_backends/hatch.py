@@ -14,7 +14,7 @@ from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from hatchling.plugin import hookimpl
 
 from smelt.config import SmeltConfig
-from smelt.backend import run_backend
+from smelt.backend import run_backend, write_auto_mode_report
 from smelt.utils import ModpathType
 
 
@@ -58,15 +58,19 @@ class HatchlingBuildHook(BuildHookInterface):
             return
 
         self.debug_log(f"Smelt: Calling build hook with config:\n{self.config}")
+        config = self.smelt_config
         try:
             run_backend(
-                self.smelt_config,
+                config,
                 strategy=ModpathType.FS,
                 without_entrypoint=True,
                 stdout="stdout",
             )
         except Exception as exc:
             raise RuntimeError(f"Smelt build failed: {exc}")
+        finally:
+            if config.report_path is not None:
+                write_auto_mode_report(config.report_path)
 
 
 @hookimpl

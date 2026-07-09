@@ -239,6 +239,7 @@ class SmeltConfig:
     backend_priority_order: list[Backend] = field(
         default_factory=lambda: [Backend.NUITKA]
     )
+    report_path: str | None = None
 
     @classmethod
     def from_toml_data(
@@ -345,3 +346,5 @@ class SmeltConfig:
         """
         if os.environ.get("SMELT_DEBUG"):
             self.debug = True
+        if report_path := os.environ.get("SMELT_REPORT"):
+            self.report_path = report_path

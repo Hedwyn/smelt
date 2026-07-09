@@ -7,11 +7,13 @@ Build backend implementation for smelt.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
 import shutil
 import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -19,6 +21,7 @@ from typing import Any, Iterable
 from smelt.compiler import compile_extension, compile_zig_module
 
 from mypyc.build import mypycify
+from smelt.context import create_context_if_enabled, get_context
 from smelt.explorer import (
     build_dependency_graph,
     find_modules_under_root,
@@ -156,6 +159,112 @@ def _generate_with_backend(
             return _cythonize_one(CythonExtension(import_path), path_solver)
 
 
+@dataclass
+class BackendAttempt:
+    """
+    The outcome of trying a single backend to compile one auto-discovered module.
+    """
+
+    backend: Backend
+    succeeded: bool
+    error: str | None = None
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend.value,
+            "succeeded": self.succeeded,
+            "error": self.error,
+        }
+
+
+@dataclass
+class ModuleAutoCompileReport:
+    """
+    Every backend attempted for a single auto-discovered module, in order,
+    and whichever one was ultimately selected (None if all of them failed).
+    """
+
+    import_path: ImportPath
+    attempts: list[BackendAttempt] = field(default_factory=list)
+    selected_backend: Backend | None = None
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "import_path": self.import_path,
+            "attempts": [attempt.serialize() for attempt in self.attempts],
+            "selected_backend": (
+                self.selected_backend.value if self.selected_backend else None
+            ),
+        }
+
+
+@dataclass
+class AutoModeContext:
+    """
+    Persistent context (registered as "auto_mode" in the `GlobalContext`) tracking,
+    for every module discovered by `auto_mode`, which backends from
+    `backend_priority_order` were tried, their errors on failure, and which backend
+    was ultimately selected.
+    """
+
+    modules: dict[ImportPath, ModuleAutoCompileReport] = field(default_factory=dict)
+
+    def record_attempt(
+        self, import_path: ImportPath, backend: Backend, error: str | None
+    ) -> None:
+        report = self.modules.setdefault(
+            import_path, ModuleAutoCompileReport(import_path)
+        )
+        report.attempts.append(
+            BackendAttempt(backend, succeeded=error is None, error=error)
+        )
+        if error is None:
+            report.selected_backend = backend
+
+    def render(self) -> str:
+        lines = ["Auto-mode backend attempts:"]
+        for report in self.modules.values():
+            lines.append(f"  {report.import_path}:")
+            for attempt in report.attempts:
+                status = "OK" if attempt.succeeded else f"FAILED ({attempt.error})"
+                lines.append(f"    - {attempt.backend.value}: {status}")
+        return "\n".join(lines)
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "modules": {
+                import_path: report.serialize()
+                for import_path, report in self.modules.items()
+            }
+        }
+
+
+def _get_auto_mode_context() -> AutoModeContext:
+    """
+    Fetches the persistent "auto_mode" context, creating it if context tracking is
+    enabled, or a throwaway local instance otherwise (mirrors `NuitkaBuildContext`'s
+    lookup in `nuitkaify_module`).
+    """
+    existing = get_context("auto_mode")
+    if existing is not None:
+        assert isinstance(existing, AutoModeContext)
+        return existing
+    return create_context_if_enabled("auto_mode", AutoModeContext) or AutoModeContext()
+
+
+def write_auto_mode_report(path: str | os.PathLike[str]) -> None:
+    """
+    Serializes the "auto_mode" context (if any) as JSON to `path`.
+    """
+    context = get_context("auto_mode")
+    report = (
+        context.serialize()
+        if isinstance(context, AutoModeContext)
+        else AutoModeContext().serialize()
+    )
+    Path(path).write_text(json.dumps(report, indent=2))
+
+
 def compile_module_with_fallback(
     import_path: ImportPath,
     backend_priority_order: Iterable[Backend],
@@ -165,17 +274,22 @@ def compile_module_with_fallback(
     Compiles `import_path` trying each backend in `backend_priority_order` in turn,
     falling back to the next one when a backend fails to produce a working extension.
     """
+    auto_context = _get_auto_mode_context()
     last_exc: Exception | None = None
     for backend in backend_priority_order:
         try:
-            return _compile_and_place(
+            ext = _compile_and_place(
                 _generate_with_backend(backend, import_path, path_solver)
             )
         except (SmeltError, RuntimeError, ImportError) as exc:
+            auto_context.record_attempt(import_path, backend, error=str(exc))
             _logger.warning(
                 "Backend %s failed to compile %s: %s", backend.value, import_path, exc
             )
             last_exc = exc
+            continue
+        auto_context.record_attempt(import_path, backend, error=None)
+        return ext
     raise SmeltError(
         f"All backends {[b.value for b in backend_priority_order]} failed to compile {import_path}"
     ) from last_exc
@@ -196,7 +310,9 @@ def _pinned_import_paths(config: SmeltConfig) -> set[ImportPath]:
     }
 
 
-def discover_auto_targets(config: SmeltConfig, path_solver: PathSolver) -> set[ImportPath]:
+def discover_auto_targets(
+    config: SmeltConfig, path_solver: PathSolver
+) -> set[ImportPath]:
     """
     Resolves `config.auto_mode` into the set of import paths to auto-compile,
     on top of whatever was explicitly pinned in `*_modules`.
@@ -210,7 +326,9 @@ def discover_auto_targets(config: SmeltConfig, path_solver: PathSolver) -> set[I
 
     known_roots = path_solver.known_roots
     if not known_roots:
-        raise SmeltConfigError("auto_mode requires at least one entry in packages_location")
+        raise SmeltConfigError(
+            "auto_mode requires at least one entry in packages_location"
+        )
 
     package_modules: set[ImportPath] = set()
     for root_import_path, root_path in known_roots:

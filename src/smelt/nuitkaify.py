@@ -61,7 +61,7 @@ from typing import Final, Iterable, Iterator, Literal
 
 from setuptools import Extension
 
-from .process import call_command
+from .process import CommandContext, call_command
 
 from smelt.compiler import ZigCompiler
 from smelt.context import create_context_if_enabled, get_context
@@ -69,6 +69,19 @@ from smelt.utils import GenericExtension, PathSolver
 from smelt.config import NuitkaModule
 
 _logger = logging.getLogger(__name__)
+
+
+def _describe_command_failure(cmd_trace: CommandContext, cmd: Iterable[str]) -> str:
+    """
+    Renders a failed command's exit code alongside its captured stdout/stderr,
+    so callers get the actual compiler/tool output rather than just an exit code.
+    """
+    lines = [f"exitcode {cmd_trace.exit_code}: {' '.join(cmd)}"]
+    if cmd_trace.stdout:
+        lines.append("stdout:\n" + "\n".join(cmd_trace.stdout))
+    if cmd_trace.stderr:
+        lines.append("stderr:\n" + "\n".join(cmd_trace.stderr))
+    return "\n".join(lines)
 
 
 NUITKA_ENTRYPOINT: Final[tuple[str, ...]] = (sys.executable, "-m", "nuitka")
@@ -474,7 +487,7 @@ def run_nuitka_data_composer(build_folder: str) -> Path:
         context.add_trace(cmd_trace)
     if cmd_trace.exit_code != 0:
         raise RuntimeError(
-            f"Nuitka data composer failed with exitcode {cmd_trace.exit_code}: {' '.join(cmd)}"
+            f"Nuitka data composer failed: {_describe_command_failure(cmd_trace, cmd)}"
         )
     assert blob_path.exists(), f"Data composer did not produce a blob at {blob_path}"
     return blob_path
@@ -562,7 +575,7 @@ def compile_with_nuitka(
         context.add_trace(cmd_trace)
     if cmd_trace.exit_code != 0:
         raise RuntimeError(
-            f"Nuitka failed with exitcode {cmd_trace.exit_code}: {' '.join(cmd)}"
+            f"Nuitka failed: {_describe_command_failure(cmd_trace, cmd)}"
         )
 
     expected_extension = ".exe" if sys.platform == "Windows" else ".bin"
@@ -643,7 +656,7 @@ def nuitkaify_module(
         context.add_trace(cmd_trace)
     if cmd_trace.exit_code != 0:
         raise RuntimeError(
-            f"Nuitka failed with exitcode {cmd_trace.exit_code}: {' '.join(cmd)}"
+            f"Nuitka failed: {_describe_command_failure(cmd_trace, cmd)}"
         )
 
     build_folder = mod_filename.replace(".py", ".build")
