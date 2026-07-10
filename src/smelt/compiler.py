@@ -273,6 +273,14 @@ def compile_extension(
     include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
     libdir = sysconfig.get_config_var("LIBDIR")
     library_dirs = [libdir] if libdir is not None else []
+    libraries: list[str] = []
+
+    if platform.system() == "Windows":
+        # Unlike ELF/Mach-O shared libs, Windows DLLs must resolve
+        # __declspec(dllimport) symbols (e.g. PyModule_Create2) at link time:
+        # link explicitly against the Python import library.
+        library_dirs.append(os.path.join(sys.base_prefix, "libs"))
+        libraries.append(f"python{sys.version_info.major}{sys.version_info.minor}")
 
     if isinstance(extension, (str, Path)):
         if not os.path.exists(extension):
@@ -334,7 +342,7 @@ def compile_extension(
                 objects,
                 ext_name,
                 output_dir=str(output_dir),
-                libraries=extension_obj.libraries,
+                libraries=extension_obj.libraries + libraries,
                 library_dirs=extension_obj.library_dirs + library_dirs,
                 runtime_library_dirs=extension_obj.runtime_library_dirs,
                 extra_preargs=extra_preargs,
