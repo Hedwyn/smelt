@@ -17,6 +17,7 @@ import sys
 import sysconfig
 import tempfile
 import warnings
+from collections.abc import Iterable
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Final
@@ -42,6 +43,60 @@ _SMELT_ROOT: Final[str] = os.path.dirname(__file__)
 PYCONFIG_PATH: Final[str] = os.path.join(_SMELT_ROOT, "pyconfig")
 
 _logger = logging.getLogger(__name__)
+
+# MSVC (cl.exe) optimization-level flags, mapped to their zig/clang equivalent.
+_MSVC_OPT_LEVELS: Final[dict[str, str]] = {
+    "/Od": "-O0",
+    "/O1": "-O1",
+    "/O2": "-O2",
+    "/Ox": "-O3",
+}
+
+
+def sanity_msvc_flags(flags: Iterable[str]) -> list[str]:
+    """
+    Strip or translate MSVC-style (`/`-prefixed) compiler flags out of a flag list.
+
+    Smelt standardizes on Zig as its single, cross-platform compiler interface:
+    every extension is built through `zig cc`, a clang/GNU-style driver, on every
+    host platform, Windows included. Some backends we shell out to (e.g. mypyc's
+    `mypycify`) pick their compiler flags by calling distutils'
+    `ccompiler.new_compiler()`, which selects flags based on the *host platform*
+    rather than the compiler actually in use, so on Windows they hand back
+    MSVC-flavored flags (`/O2`, `/DEBUG:FULL`, `/wd4102`, ...) regardless of the
+    fact that zig, not cl.exe, will consume them.
+
+    `zig cc` doesn't recognize `/`-prefixed arguments as flags at all: it parses
+    them as positional input files, so a flag like `/O2` fails the build with an
+    "unknown file" error instead of being silently ignored. This helper closes
+    that gap: known MSVC flags are translated to their zig/clang equivalent,
+    and unrecognized MSVC-only flags (warning suppression, runtime linkage,
+    debug format, ...) are dropped rather than left to break the build.
+
+    Parameters
+    ----------
+    flags: Iterable[str]
+        Raw compiler flags, as produced by an upstream backend.
+
+    Returns
+    -------
+    list[str]
+        `flags` with every MSVC-style entry translated or removed. Flags not
+        starting with `/` (already zig/clang-compatible) pass through unchanged.
+    """
+    sanitized: list[str] = []
+    for flag in flags:
+        if not flag.startswith("/"):
+            sanitized.append(flag)
+        elif flag in _MSVC_OPT_LEVELS:
+            sanitized.append(_MSVC_OPT_LEVELS[flag])
+        elif flag.startswith("/D"):
+            sanitized.append("-D" + flag[2:])
+        elif flag.startswith("/I"):
+            sanitized.append("-I" + flag[2:])
+        # else: MSVC-only flag (e.g. /DEBUG:*, /wd####, /W3, /MD, /GX) with no
+        # zig/clang equivalent needed for a shared-library build: drop it.
+    return sanitized
 
 
 def _zig_shared_lib_name(name: str) -> str:
@@ -95,7 +150,7 @@ class ZigCompiler(Compiler):
     # Expanding to add .zig files
     src_extensions: ClassVar[list[str]] = Compiler.src_extensions + [".zig"]
 
-    executables = {
+    executables: ClassVar[dict[str, list[str] | None]] = {
         "preprocessor": None,
         "compiler": [*zig_base_path, "cc"],
         "compiler_so": [*zig_base_path, "cc"],
@@ -328,7 +383,7 @@ def compile_extension(
             output_dir=build_folder,
             include_dirs=include_dirs + extension_obj.include_dirs,
             extra_preargs=extra_preargs,
-            extra_postargs=extension_obj.extra_compile_args or [],
+            extra_postargs=sanity_msvc_flags(extension_obj.extra_compile_args or []),
             macros=extension_obj.define_macros,
         )
 
