@@ -271,7 +271,8 @@ def compile_extension(
     """
     compiler = compiler or ZigCompiler()
     include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
-    library_dirs = [sysconfig.get_config_var("LIBDIR")]
+    libdir = sysconfig.get_config_var("LIBDIR")
+    library_dirs = [libdir] if libdir is not None else []
 
     if isinstance(extension, (str, Path)):
         if not os.path.exists(extension):
