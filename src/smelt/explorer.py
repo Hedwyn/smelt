@@ -118,7 +118,9 @@ def _resolve_module_path(import_path: ImportPath) -> tuple[PathExists, bool] | N
     return path, spec.submodule_search_locations is not None
 
 
-def find_modules_under_root(import_path: ImportPath, root: PathExists) -> set[ImportPath]:
+def find_modules_under_root(
+    import_path: ImportPath, root: PathExists
+) -> set[ImportPath]:
     """
     Finds every python module under `root`, the filesystem location `import_path`
     resolves to, as fully dotted import paths.

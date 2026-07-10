@@ -7,14 +7,14 @@ Build hook hatchling backend.
 
 from __future__ import annotations
 
-from functools import cached_property
 from dataclasses import fields
+from functools import cached_property
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from hatchling.plugin import hookimpl
 
-from smelt.config import SmeltConfig
 from smelt.backend import run_backend, write_auto_mode_report
+from smelt.config import SmeltConfig
 from smelt.utils import ModpathType
 
 

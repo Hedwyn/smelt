@@ -13,7 +13,7 @@ import shutil
 import sys
 import tomllib
 import warnings
-from contextlib import contextmanager, chdir
+from contextlib import chdir, contextmanager
 from pathlib import Path
 from typing import Callable, Generator, Literal, NoReturn, ParamSpec, TypeVar
 

@@ -7,8 +7,9 @@ Test suite for smelt frontend.
 
 from __future__ import annotations
 
-import pytest
 import tomllib
+
+import pytest
 
 from smelt.frontend import TomlData, parse_config_from_pyproject
 

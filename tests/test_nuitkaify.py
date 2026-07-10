@@ -32,9 +32,9 @@ def test_nuitkaify() -> None:
             # Compile the standalone app using nuitka
             compile_with_nuitka(str(standalone_app), stdout="stdout")
         expected_exe_path = os.path.join(tmpdir, "entrypoint.bin")
-        assert os.path.exists(
-            expected_exe_path
-        ), "Nuitka did not produce the expected executable."
+        assert os.path.exists(expected_exe_path), (
+            "Nuitka did not produce the expected executable."
+        )
 
         # testing the produced exe - computing fib(10), checking if we get it on stdout
         p = subprocess.run(

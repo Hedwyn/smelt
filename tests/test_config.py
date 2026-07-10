@@ -1,19 +1,17 @@
 from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
+import pytest
 
 from smelt.config import (
-    NuitkaModule,
-    MypycModule,
     CythonExtension,
+    MypycModule,
+    NuitkaModule,
     SmeltConfig,
     TomlData,
     build_datacls_from_toml,
 )
-
-
-import pytest
-
 from smelt.utils import SmeltConfigError, TomlData
 
 if TYPE_CHECKING:

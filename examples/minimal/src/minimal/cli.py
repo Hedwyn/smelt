@@ -1,6 +1,7 @@
 import time
 
 import click
+
 from minimal.fib import fib as fib_mypyc
 from minimal.fib_cython import fibx as fib_cython
 

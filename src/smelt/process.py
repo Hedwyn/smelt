@@ -281,15 +281,13 @@ def call_command(
     """
     start_time = time.time()
     current_cwd = Path(cwd) if cwd else Path.cwd()
-    cmd = " ".join(args)
     proc = Popen(
-        cmd,
+        args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=current_cwd,
         text=True,  # Enable text mode
         bufsize=1,  # Request line buffering
-        shell=True,
     )
     if on_popen is not None:
         on_popen(proc)

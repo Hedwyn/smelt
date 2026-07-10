@@ -7,10 +7,10 @@ Config definitions for Smelt.
 
 from __future__ import annotations
 
-from pathlib import Path
 import os
-from dataclasses import MISSING, dataclass, field, fields, asdict
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Literal, Self
 
 from smelt.utils import (

@@ -49,24 +49,25 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import re
 import shutil
+import sys
 import sysconfig
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-import sys
 from pathlib import Path
 from typing import Final, Iterable, Iterator, Literal
 
 from setuptools import Extension
 
-from .process import CommandContext, call_command
-
 from smelt.compiler import ZigCompiler
+from smelt.config import NuitkaModule
 from smelt.context import create_context_if_enabled, get_context
 from smelt.utils import GenericExtension, PathSolver
-from smelt.config import NuitkaModule
+
+from .process import CommandContext, call_command
 
 _logger = logging.getLogger(__name__)
 
@@ -578,7 +579,7 @@ def compile_with_nuitka(
             f"Nuitka failed: {_describe_command_failure(cmd_trace, cmd)}"
         )
 
-    expected_extension = ".exe" if sys.platform == "Windows" else ".bin"
+    expected_extension = ".exe" if platform.system() == "Windows" else ".bin"
     bin_path = os.path.basename(path).replace(".py", expected_extension)
     absolute_bin_path = os.path.join(os.getcwd(), bin_path)
     assert os.path.exists(absolute_bin_path), (

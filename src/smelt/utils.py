@@ -7,8 +7,8 @@ Common utilities for this package.
 
 from __future__ import annotations
 
-import importlib.util
 import importlib
+import importlib.util
 import keyword
 import logging
 import os
@@ -25,10 +25,10 @@ from types import ModuleType
 from typing import (
     Generator,
     Literal,
-    TypeGuard,
     NamedTuple,
     NewType,
     Self,
+    TypeGuard,
     assert_never,
     cast,
     overload,

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -23,16 +24,16 @@ from typing import TYPE_CHECKING, ClassVar, Final
 from distutils.compilers.C.unix import Compiler
 from setuptools import Extension
 
+from smelt.process import call_command
 from smelt.utils import (
     ImportPath,
+    PathExists,
     PathSolver,
     SmeltError,
     assert_path_exists,
     get_extension_suffix,
-    PathExists,
     path_exists,
 )
-from smelt.process import call_command
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -41,6 +42,19 @@ _SMELT_ROOT: Final[str] = os.path.dirname(__file__)
 PYCONFIG_PATH: Final[str] = os.path.join(_SMELT_ROOT, "pyconfig")
 
 _logger = logging.getLogger(__name__)
+
+
+def _zig_shared_lib_name(name: str) -> str:
+    """
+    Name of the shared library `zig build-lib --name {name}` (or `zig build`
+    building a matching target) produces on the current host platform.
+    """
+    system = platform.system()
+    if system == "Windows":
+        return f"{name}.dll"
+    if system == "Darwin":
+        return f"lib{name}.dylib"
+    return f"lib{name}.so"
 
 
 class SupportedPlatforms(StrEnum):
@@ -137,7 +151,7 @@ def zig_build_lib(
 
     _logger.info("Running zig build-lib: \n%s", " ".join(cmd))
     subprocess.run(cmd)
-    # Note: zig build-lib will produce a file named lib{name}.so
+    # Note: zig build-lib produces a file named per _zig_shared_lib_name(name)
 
     if crosscompile is not None:
         suffix = get_extension_suffix(crosscompile.get_triple_name())
@@ -146,7 +160,7 @@ def zig_build_lib(
     # copying
     dest_name = f"{name}{suffix}"
     # copying the shared library to the expected name
-    shutil.copy(f"lib{name}.so", dest_name)
+    shutil.copy(_zig_shared_lib_name(name), dest_name)
     return dest_name
 
 
@@ -211,8 +225,7 @@ def compile_zig_module(
     flags = flags or []
     with contextlib.chdir(folder):
         call_command("zig", "build", *flags)
-        # TODO windows
-        lib_path = Path.cwd() / "zig-out" / "lib" / (name + ".so")
+        lib_path = Path.cwd() / "zig-out" / "lib" / _zig_shared_lib_name(name)
     if not path_exists(lib_path):
         raise SmeltError(
             f"Ran `zig build` successfully, but no library `{lib_path}` was found afterwards"

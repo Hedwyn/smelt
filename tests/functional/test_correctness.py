@@ -6,11 +6,13 @@ build hook.
 """
 
 from __future__ import annotations
-import sys
-import pytest
-from types import ModuleType
-from pytest import FixtureRequest
+
 import importlib
+import sys
+from types import ModuleType
+
+import pytest
+from pytest import FixtureRequest
 
 from smelt.process import call_command
 

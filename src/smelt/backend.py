@@ -17,10 +17,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from mypyc.build import mypycify
 
 from smelt.compiler import compile_extension, compile_zig_module
-
-from mypyc.build import mypycify
+from smelt.config import (
+    Backend,
+    CythonExtension,
+    MypycModule,
+    NuitkaModule,
+    SmeltConfig,
+)
 from smelt.context import create_context_if_enabled, get_context
 from smelt.explorer import (
     build_dependency_graph,
@@ -37,13 +43,6 @@ from smelt.utils import (
     SmeltConfigError,
     SmeltError,
     locate_module,
-)
-from smelt.config import (
-    Backend,
-    CythonExtension,
-    MypycModule,
-    NuitkaModule,
-    SmeltConfig,
 )
 
 # TODO: replace .so references to a variable that's set to .so

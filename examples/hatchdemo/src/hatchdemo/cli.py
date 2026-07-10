@@ -3,8 +3,8 @@ import time
 import click
 
 from hatchdemo.fib import fib as fib_mypyc
-from hatchdemo.fib_purepython import fib as fib_purepython
 from hatchdemo.fib_cython import fib as fib_cython
+from hatchdemo.fib_purepython import fib as fib_purepython
 
 
 @click.group()
