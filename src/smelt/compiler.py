@@ -299,6 +299,23 @@ def compile_zig_module(
     return target_path
 
 
+def python_import_library_link_args() -> tuple[list[str], list[str]]:
+    """
+    Extra `library_dirs`/`libraries` needed to resolve the Python C-API at link time.
+
+    Unlike ELF/Mach-O shared libs, Windows DLLs must resolve __declspec(dllimport)
+    symbols (e.g. PyModule_Create2) at link time: link explicitly against the
+    Python import library. On POSIX those symbols are resolved at runtime against
+    the running interpreter, so nothing extra is needed there.
+    """
+    if platform.system() != "Windows":
+        return [], []
+    return (
+        [os.path.join(sys.base_prefix, "libs")],
+        [f"python{sys.version_info.major}{sys.version_info.minor}"],
+    )
+
+
 def compile_extension(
     extension: Path | str | Extension,
     compiler: Compiler | None = None,
@@ -330,12 +347,9 @@ def compile_extension(
     library_dirs = [libdir] if libdir is not None else []
     libraries: list[str] = []
 
-    if platform.system() == "Windows":
-        # Unlike ELF/Mach-O shared libs, Windows DLLs must resolve
-        # __declspec(dllimport) symbols (e.g. PyModule_Create2) at link time:
-        # link explicitly against the Python import library.
-        library_dirs.append(os.path.join(sys.base_prefix, "libs"))
-        libraries.append(f"python{sys.version_info.major}{sys.version_info.minor}")
+    win_library_dirs, win_libraries = python_import_library_link_args()
+    library_dirs += win_library_dirs
+    libraries += win_libraries
 
     if isinstance(extension, (str, Path)):
         if not os.path.exists(extension):

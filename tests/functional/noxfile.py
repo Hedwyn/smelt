@@ -135,25 +135,15 @@ def spawn_package(
         src_dir: Path = root / "src" / project_name
         os.makedirs(src_dir)
 
-        (src_dir / "fib_pure_python.py").write_text(
-            FIB_PYTHON.format(fib_name="fib_pure_python")
-        )
+        (src_dir / "fib_pure_python.py").write_text(FIB_PYTHON.format(fib_name="fib_pure_python"))
         if config.has_mypyc:
-            (src_dir / "fib_mypyc.py").write_text(
-                FIB_PYTHON.format(fib_name="fib_mypyc")
-            )
+            (src_dir / "fib_mypyc.py").write_text(FIB_PYTHON.format(fib_name="fib_mypyc"))
         if config.has_cython_py:
-            (src_dir / "fib_cython.py").write_text(
-                FIB_PYTHON.format(fib_name="fib_cython")
-            )
+            (src_dir / "fib_cython.py").write_text(FIB_PYTHON.format(fib_name="fib_cython"))
         if config.has_cython_pyx:
-            (src_dir / "fib_cython.pyx").write_text(
-                FIB_CYTHON.format(fib_name="fib_cython_pyx")
-            )
+            (src_dir / "fib_cython.pyx").write_text(FIB_CYTHON.format(fib_name="fib_cython_pyx"))
         if config.has_nuitka:
-            (src_dir / "cli.py").write_text(
-                CLI_ENTRYPOINT.format(project_name=project_name)
-            )
+            (src_dir / "cli.py").write_text(CLI_ENTRYPOINT.format(project_name=project_name))
         yield root
 
 
@@ -173,9 +163,7 @@ def spawn_package_sanity_check(session: Session) -> None:
     Checks that a basic package can be generated and installed.
     """
     project_name = "testproject"
-    with spawn_package(
-        project_name=project_name, config=NUITKA_ONLY_CONFIG
-    ) as proj_dir:
+    with spawn_package(project_name=project_name, config=NUITKA_ONLY_CONFIG) as proj_dir:
         session.install(str(proj_dir))
         # sanity check: importing the package we jsut installed
         session.run("python", "-c", f'"import {project_name}"')

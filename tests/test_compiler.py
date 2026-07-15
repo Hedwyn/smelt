@@ -104,9 +104,7 @@ def build_temp_extension(
         (extension,) = mypycify_module(ext_name)
         shared_lib_path = compile_extension(extension, crosscompile=crosscompile)
     else:
-        shared_lib_path = compile_extension(
-            get_extension_path(ext_name), crosscompile=crosscompile
-        )
+        shared_lib_path = compile_extension(get_extension_path(ext_name), crosscompile=crosscompile)
     try:
         yield shared_lib_path
     finally:
@@ -174,9 +172,7 @@ def test_compiler_builds_so(ext_name: TestExtension) -> None:
 
 @pytest.mark.parametrize("ext_name", AVAILABLE_EXTENSIONS)
 @pytest.mark.parametrize("platform", [SupportedPlatforms.AARCH64_LINUX])
-def test_compiler_crosscompiled_so(
-    ext_name: TestExtension, platform: SupportedPlatforms
-) -> None:
+def test_compiler_crosscompiled_so(ext_name: TestExtension, platform: SupportedPlatforms) -> None:
     """
     Verifies that the compiler is able to build a shared library for a foreign platform.
     Does not verify that the shared library works - this requires tooling beyond

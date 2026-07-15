@@ -191,9 +191,7 @@ class ModuleAutoCompileReport:
         return {
             "import_path": self.import_path,
             "attempts": [attempt.serialize() for attempt in self.attempts],
-            "selected_backend": (
-                self.selected_backend.value if self.selected_backend else None
-            ),
+            "selected_backend": (self.selected_backend.value if self.selected_backend else None),
         }
 
 
@@ -208,15 +206,9 @@ class AutoModeContext:
 
     modules: dict[ImportPath, ModuleAutoCompileReport] = field(default_factory=dict)
 
-    def record_attempt(
-        self, import_path: ImportPath, backend: Backend, error: str | None
-    ) -> None:
-        report = self.modules.setdefault(
-            import_path, ModuleAutoCompileReport(import_path)
-        )
-        report.attempts.append(
-            BackendAttempt(backend, succeeded=error is None, error=error)
-        )
+    def record_attempt(self, import_path: ImportPath, backend: Backend, error: str | None) -> None:
+        report = self.modules.setdefault(import_path, ModuleAutoCompileReport(import_path))
+        report.attempts.append(BackendAttempt(backend, succeeded=error is None, error=error))
         if error is None:
             report.selected_backend = backend
 
@@ -232,8 +224,7 @@ class AutoModeContext:
     def serialize(self) -> dict[str, Any]:
         return {
             "modules": {
-                import_path: report.serialize()
-                for import_path, report in self.modules.items()
+                import_path: report.serialize() for import_path, report in self.modules.items()
             }
         }
 
@@ -277,14 +268,10 @@ def compile_module_with_fallback(
     last_exc: Exception | None = None
     for backend in backend_priority_order:
         try:
-            ext = _compile_and_place(
-                _generate_with_backend(backend, import_path, path_solver)
-            )
+            ext = _compile_and_place(_generate_with_backend(backend, import_path, path_solver))
         except (SmeltError, RuntimeError, ImportError) as exc:
             auto_context.record_attempt(import_path, backend, error=str(exc))
-            _logger.warning(
-                "Backend %s failed to compile %s: %s", backend.value, import_path, exc
-            )
+            _logger.warning("Backend %s failed to compile %s: %s", backend.value, import_path, exc)
             last_exc = exc
             continue
         auto_context.record_attempt(import_path, backend, error=None)
@@ -309,9 +296,7 @@ def _pinned_import_paths(config: SmeltConfig) -> set[ImportPath]:
     }
 
 
-def discover_auto_targets(
-    config: SmeltConfig, path_solver: PathSolver
-) -> set[ImportPath]:
+def discover_auto_targets(config: SmeltConfig, path_solver: PathSolver) -> set[ImportPath]:
     """
     Resolves `config.auto_mode` into the set of import paths to auto-compile,
     on top of whatever was explicitly pinned in `*_modules`.
@@ -325,9 +310,7 @@ def discover_auto_targets(
 
     known_roots = path_solver.known_roots
     if not known_roots:
-        raise SmeltConfigError(
-            "auto_mode requires at least one entry in packages_location"
-        )
+        raise SmeltConfigError("auto_mode requires at least one entry in packages_location")
 
     package_modules: set[ImportPath] = set()
     for root_import_path, root_path in known_roots:
@@ -339,8 +322,7 @@ def discover_auto_targets(
         discovered = set(package_modules)
         for module in package_modules:
             discovered.update(
-                node.name
-                for node in flatten_dependency_graph(build_dependency_graph(module))
+                node.name for node in flatten_dependency_graph(build_dependency_graph(module))
             )
 
     pinned = _pinned_import_paths(config)
@@ -412,9 +394,7 @@ def run_backend(
         compile_cython_extensions(config.cython_modules, path_solver=path_solver)
     )
     for nuitka_mod in config.nuitka_modules:
-        collected_extensions.append(
-            nuitkaify_module(nuitka_mod, path_solver=path_solver)
-        )
+        collected_extensions.append(nuitkaify_module(nuitka_mod, path_solver=path_solver))
 
     for generic_ext in collected_extensions:
         _compile_and_place(generic_ext)

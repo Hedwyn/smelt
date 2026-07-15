@@ -171,9 +171,7 @@ def locate_module_by_import_path(import_path: ImportPath) -> PathExists:
             "You might be referring to a namespace package, which is not a valid module to import"
         )
     module_path = Path(origin)
-    assert path_exists(module_path), (
-        "importlib.util.find_spec returned an invalid system path"
-    )
+    assert path_exists(module_path), "importlib.util.find_spec returned an invalid system path"
     return module_path
 
 
@@ -257,8 +255,7 @@ class PathResolutionTrace:
                 )
             case ModpathType.IMPORT:
                 return (
-                    f"Resolving import path of file `{self.import_path}`:"
-                    f"found `{self.module_path}`"
+                    f"Resolving import path of file `{self.import_path}`:found `{self.module_path}`"
                 )
 
 
@@ -290,9 +287,7 @@ def detect_package_layout(package_name: str, package_root: str = ".") -> Package
     has_eponym_folder = (root / package_name).exists()
 
     if not has_src and not has_eponym_folder:
-        raise RuntimeError(
-            f"No `src` or `{package_name}` found cannot detect package layout"
-        )
+        raise RuntimeError(f"No `src` or `{package_name}` found cannot detect package layout")
     if has_eponym_folder:
         if has_src:
             warnings.warn(
@@ -351,8 +346,7 @@ def find_mod_from_import_path_locally(
         return path
     if not path_exists(path):
         raise SmeltConfigError(
-            f"Module {import_path} is not visible from current working dir:"
-            f" {path} does not exists"
+            f"Module {import_path} is not visible from current working dir: {path} does not exists"
         )
 
     return path
@@ -427,13 +421,9 @@ def locate_module(
     locates from the import"""
     match strategy:
         case ModpathType.IMPORT:
-            import_path = locate_module_by_import_path(
-                toggle_mod_path(mod_path, strategy)
-            )
+            import_path = locate_module_by_import_path(toggle_mod_path(mod_path, strategy))
             if ctx := get_context():
-                ctx.add_trace(
-                    PathResolutionTrace(mod_path, mod_path, ModpathType.IMPORT)
-                )
+                ctx.add_trace(PathResolutionTrace(mod_path, mod_path, ModpathType.IMPORT))
             return import_path
 
         case ModpathType.FS:
@@ -556,9 +546,7 @@ class PackageRootPath(NamedTuple):
     def from_path(cls, path: PathExists) -> Self:
         package_name = path.parts[-1]
         if not is_valid_import_path(package_name):
-            raise SmeltConfigError(
-                f"Module path uses invalid characters: {package_name}"
-            )
+            raise SmeltConfigError(f"Module path uses invalid characters: {package_name}")
         return cls(package_name, path)
 
 
@@ -577,9 +565,7 @@ class PathSolver:
             but can be used as a shortcut for usage within an already installed environement
             (i.e. frontend usage).
         """
-        roots = [
-            PackageRootPath(p, locate_module_by_import_path(p)) for p in import_path
-        ]
+        roots = [PackageRootPath(p, locate_module_by_import_path(p)) for p in import_path]
         return cls(roots)
 
     @overload

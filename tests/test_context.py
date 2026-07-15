@@ -57,9 +57,7 @@ def test_add_trace() -> None:
     ctx = get_context()
     import_path = "a.b"
     fs_path = "a/b"
-    trace1 = PathResolutionTrace(
-        import_path, fs_path, resolution_type=ModpathType.IMPORT
-    )
+    trace1 = PathResolutionTrace(import_path, fs_path, resolution_type=ModpathType.IMPORT)
     trace2 = PathResolutionTrace(import_path, fs_path, resolution_type=ModpathType.FS)
     assert ctx is not None
     ctx.add_trace(trace1)
