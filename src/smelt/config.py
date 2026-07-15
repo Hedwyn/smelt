@@ -43,19 +43,14 @@ def convert_path(
     match type_hint:
         case "PathExists" | "PathExists | None":
             assert_type_is(path_decl, str)
-            path = (
-                project_root / path_decl
-                if project_root is not None
-                else Path(path_decl)
-            )
+            path = project_root / path_decl if project_root is not None else Path(path_decl)
 
             assert_path_exists(path)
             return path
         case "list[PathExists]":
             assert_type_is(path_decl, list)
             return [
-                assert_path_exists(project_root / p if project_root else Path(p))
-                for p in path_decl
+                assert_path_exists(project_root / p if project_root else Path(p)) for p in path_decl
             ]
 
         case "list[str]":
@@ -109,9 +104,7 @@ def build_datacls_from_toml[T: DataclassInstance](
                 )
             continue
         local_ctx.append(f.name)
-        assert isinstance(f.type, str), (
-            "Expected annotations from __future__ to be used"
-        )
+        assert isinstance(f.type, str), "Expected annotations from __future__ to be used"
         try:
             value = convert_path(value_decl, f.type, project_root)
         except SmeltError as exc:
@@ -167,9 +160,7 @@ def toml_get_nested_section(toml_data: TomlData, *path: str) -> _TomlData:
         ctx.append(subsection_name)
         section = section.get(subsection_name, {})
         if not isinstance(section, dict):
-            raise SmeltConfigError(
-                f"{_format_context(ctx)}Expected section, found {section}"
-            )
+            raise SmeltConfigError(f"{_format_context(ctx)}Expected section, found {section}")
     return section
 
 
@@ -236,15 +227,11 @@ class SmeltConfig:
     entrypoint: str | None = None
     debug: bool = False
     auto_mode: AutoMode = "off"
-    backend_priority_order: list[Backend] = field(
-        default_factory=lambda: [Backend.NUITKA]
-    )
+    backend_priority_order: list[Backend] = field(default_factory=lambda: [Backend.NUITKA])
     report_path: str | None = None
 
     @classmethod
-    def from_toml_data(
-        cls, toml_data: dict[str, Any], project_root: Path | None = None
-    ) -> Self:
+    def from_toml_data(cls, toml_data: dict[str, Any], project_root: Path | None = None) -> Self:
         # operate on a copy: callers (e.g. the hatch build hook) keep their own
         # reference to `toml_data` around for error reporting after this call.
         toml_data = dict(toml_data)
@@ -288,18 +275,12 @@ class SmeltConfig:
             )
 
         # backend fallback order, used for modules discovered by auto_mode
-        backend_priority_order_decl = toml_data.pop(
-            "backend_priority_order", ["nuitka"]
-        )
+        backend_priority_order_decl = toml_data.pop("backend_priority_order", ["nuitka"])
         assert_type_is(backend_priority_order_decl, list)
         try:
-            backend_priority_order = [
-                Backend(name) for name in backend_priority_order_decl
-            ]
+            backend_priority_order = [Backend(name) for name in backend_priority_order_decl]
         except ValueError as exc:
-            raise SmeltConfigError(
-                f"Invalid backend in backend_priority_order: {exc}"
-            ) from exc
+            raise SmeltConfigError(f"Invalid backend in backend_priority_order: {exc}") from exc
 
         return cls(
             mypyc_modules=mypyc_modules,
@@ -334,9 +315,7 @@ class SmeltConfig:
             if isinstance(value, list):
                 value = ",".join(value)
             if isinstance(value, dict):
-                value = "".join(
-                    ("\n * " + f"{key} -> {val}" for key, val in value.items())
-                )
+                value = "".join(("\n * " + f"{key} -> {val}" for key, val in value.items()))
             lines.append(f"{field_name:20}: {value}")
         return "\n".join(lines)
 

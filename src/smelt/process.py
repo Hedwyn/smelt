@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import io
-import selectors
 import signal
 import subprocess
 import time
@@ -21,9 +19,10 @@ from asyncio import AbstractEventLoop
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
+from queue import Empty, Queue
 from subprocess import Popen
 from threading import Lock, Thread
-from typing import Callable, Self
+from typing import IO, Callable, Self
 
 
 @dataclass
@@ -244,6 +243,19 @@ class ProcessGarbageCollector(Thread):
                     proc.kill()
 
 
+def _stream_lines(stream: IO[str], tag: str, queue: Queue[tuple[str, str | None]]) -> None:
+    """
+    Reads lines from `stream` and pushes them to `queue` tagged with `tag`,
+    until EOF, at which point a sentinel (`tag`, None) is pushed.
+    Runs in a dedicated thread so stdout/stderr can be drained without
+    relying on `select()`, which on Windows only supports sockets and
+    cannot be used to poll subprocess pipes.
+    """
+    for line in iter(stream.readline, ""):
+        queue.put((tag, line))
+    queue.put((tag, None))
+
+
 def call_command(
     *args: str,
     timeout: float | None = None,
@@ -253,7 +265,8 @@ def call_command(
     on_popen: Callable[[Popen[str]], None] | None = None,
 ) -> CommandContext:
     """
-    Calls a command without blocking on IO, using selectors.
+    Calls a command without blocking on IO, using dedicated reader threads
+    for stdout/stderr.
     It reads stdout and stderr as data comes in.
     It will leave early if the timeout is reached.
     The optional printer is called for each line received.
@@ -295,46 +308,53 @@ def call_command(
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
 
-    sel = selectors.DefaultSelector()
+    lines_queue: Queue[tuple[str, str | None]] = Queue()
+    active_streams = 0
     if proc.stdout:
-        sel.register(proc.stdout, selectors.EVENT_READ, "stdout")
+        active_streams += 1
+        Thread(target=_stream_lines, args=(proc.stdout, "stdout", lines_queue), daemon=True).start()
     if proc.stderr:
-        sel.register(proc.stderr, selectors.EVENT_READ, "stderr")
+        active_streams += 1
+        Thread(target=_stream_lines, args=(proc.stderr, "stderr", lines_queue), daemon=True).start()
 
-    while sel.get_map():
+    timed_out = False
+    while active_streams > 0:
         remaining_timeout = None
         if timeout is not None:
             elapsed_time = time.time() - start_time
             if elapsed_time >= timeout:
+                timed_out = True
                 break
             remaining_timeout = timeout - elapsed_time
 
-        events = sel.select(timeout=remaining_timeout)
-
-        if not events:
-            # Timeout in select
+        try:
+            tag, line = lines_queue.get(timeout=remaining_timeout)
+        except Empty:
+            # Timeout waiting for the next line
+            timed_out = True
             break
 
-        for key, _ in events:
-            # key.fileobj will be an io.TextIOWrapper because text=True
-            assert isinstance(key.fileobj, io.TextIOWrapper)
-            line = key.fileobj.readline()
-            if not line:  # EOF for text streams is an empty string
-                sel.unregister(key.fileobj)
-                continue
+        if line is None:  # EOF sentinel from the reader thread
+            active_streams -= 1
+            continue
 
-            # readline() includes the newline, rstrip() to remove it before printing/storing
-            processed_line = line.rstrip("\n")
+        # readline() includes the newline, rstrip() to remove it before printing/storing
+        processed_line = line.rstrip("\n")
 
-            if printer:
-                printer(processed_line)
+        if printer:
+            printer(processed_line)
 
-            if key.data == "stdout":
-                stdout_lines.append(processed_line)
-            else:  # stderr
-                stderr_lines.append(processed_line)
+        if tag == "stdout":
+            stdout_lines.append(processed_line)
+        else:  # stderr
+            stderr_lines.append(processed_line)
 
-    final_exit_code = proc.poll()
+    if timed_out:
+        final_exit_code = proc.poll()
+    else:
+        # Both streams reached EOF on their own: the process is done or about to be,
+        # so wait for it rather than racing proc.poll() against it being reaped.
+        final_exit_code = proc.wait()
 
     if final_exit_code is None:  # Process still running -> timeout occurred
         should_interrupt = True

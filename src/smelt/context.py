@@ -120,8 +120,7 @@ class TaskTrace:
 
     def render(self) -> str:
         rendered_elements = [
-            element if isinstance(element, str) else element.render()
-            for element in self.elements
+            element if isinstance(element, str) else element.render() for element in self.elements
         ]
         return "\n".join(rendered_elements)
 
@@ -182,9 +181,7 @@ def clear_contexts() -> None:
     _GLOBAL_CONTEXT = None
 
 
-def create_context_if_enabled[Ctx: Context](
-    name: str, context: type[Ctx] | Ctx
-) -> Ctx | None:
+def create_context_if_enabled[Ctx: Context](name: str, context: type[Ctx] | Ctx) -> Ctx | None:
     global_ctx = get_context()
     if global_ctx is None:
         return None

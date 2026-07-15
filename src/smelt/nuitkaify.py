@@ -62,7 +62,7 @@ from typing import Final, Iterable, Iterator, Literal
 
 from setuptools import Extension
 
-from smelt.compiler import ZigCompiler
+from smelt.compiler import ZigCompiler, python_import_library_link_args
 from smelt.config import NuitkaModule
 from smelt.context import create_context_if_enabled, get_context
 from smelt.utils import GenericExtension, PathSolver
@@ -86,6 +86,19 @@ def _describe_command_failure(cmd_trace: CommandContext, cmd: Iterable[str]) -> 
 
 
 NUITKA_ENTRYPOINT: Final[tuple[str, ...]] = (sys.executable, "-m", "nuitka")
+
+
+def _runtime_link_libraries(*extra: str) -> list[str]:
+    """
+    System libraries needed to link the Nuitka runtime/module shared objects.
+    `dl` (dlopen) and `z` (zlib) are POSIX system libraries with no Windows
+    equivalent under that name, so only request them off Windows.
+    """
+    libraries = list(extra) + ["m"]
+    if platform.system() != "Windows":
+        libraries += ["dl", "z"]
+    return libraries
+
 
 type Stdout = Literal["stdout", "logger"]
 
@@ -243,9 +256,7 @@ def _apply_replacements(text: str, replacements: Iterable[tuple[str, str]]) -> s
     version drift we must notice rather than silently produce a broken runtime.
     """
     for old, new in replacements:
-        assert old in text, (
-            f"Expected Nuitka source fragment not found (version drift?): {old!r}"
-        )
+        assert old in text, f"Expected Nuitka source fragment not found (version drift?): {old!r}"
         text = text.replace(old, new)
     return text
 
@@ -313,9 +324,7 @@ def _write_shadow_include(dest_dir: Path) -> Path:
     return dest_dir
 
 
-_LOAD_CONSTANTS_CALL: Final[re.Pattern[str]] = re.compile(
-    r"loadConstantsBlob\(tstate,.*?\);"
-)
+_LOAD_CONSTANTS_CALL: Final[re.Pattern[str]] = re.compile(r"loadConstantsBlob\(tstate,.*?\);")
 
 
 def patch_module_constants_calls(build_folder: str) -> None:
@@ -374,25 +383,23 @@ def build_nuitka_runtime(
         patch_dir = Path(tmp)
         for name in _RUNTIME_VERBATIM_SOURCES:
             shutil.copyfile(nuitka_static_src / name, patch_dir / name)
-        (patch_dir / _BLOB_LOADER_SOURCE).write_text(
-            _patched_blob_loader(nuitka_static_src)
-        )
+        (patch_dir / _BLOB_LOADER_SOURCE).write_text(_patched_blob_loader(nuitka_static_src))
         shadow_inc = _write_shadow_include(patch_dir / "shadow_inc")
 
         objects = compiler.compile(
             sources=[str(patch_dir / NUITKA_RUNTIME_AGGREGATION)],
             output_dir=str(patch_dir / "obj"),
-            include_dirs=[str(shadow_inc), str(patch_dir)]
-            + python_includes
-            + list(include_dirs),
+            include_dirs=[str(shadow_inc), str(patch_dir)] + python_includes + list(include_dirs),
             extra_postargs=list(NUITKA_MINIMAL_FLAGS),
             macros=list(NUITKA_MACROS),
         )
+        win_library_dirs, win_libraries = python_import_library_link_args()
         compiler.link_shared_object(
             objects,
             soname,
             output_dir=str(dest_folder),
-            libraries=["m", "dl", "z"],
+            libraries=_runtime_link_libraries() + win_libraries,
+            library_dirs=win_library_dirs,
             extra_preargs=[f"-Wl,-soname,{soname}"],
         )
     runtime_path = dest_folder / soname
@@ -447,9 +454,7 @@ def _bundled_patchelf_on_path() -> Iterator[None]:
         yield
         return
     path = os.environ.get("PATH", "")
-    with _environ_overridden(
-        PATH=f"{bindir}{os.pathsep}{path}" if path else str(bindir)
-    ):
+    with _environ_overridden(PATH=f"{bindir}{os.pathsep}{path}" if path else str(bindir)):
         yield
 
 
@@ -575,16 +580,12 @@ def compile_with_nuitka(
     if context:
         context.add_trace(cmd_trace)
     if cmd_trace.exit_code != 0:
-        raise RuntimeError(
-            f"Nuitka failed: {_describe_command_failure(cmd_trace, cmd)}"
-        )
+        raise RuntimeError(f"Nuitka failed: {_describe_command_failure(cmd_trace, cmd)}")
 
     expected_extension = ".exe" if platform.system() == "Windows" else ".bin"
     bin_path = os.path.basename(path).replace(".py", expected_extension)
     absolute_bin_path = os.path.join(os.getcwd(), bin_path)
-    assert os.path.exists(absolute_bin_path), (
-        f"Nuitka binary not found at {absolute_bin_path}"
-    )
+    assert os.path.exists(absolute_bin_path), f"Nuitka binary not found at {absolute_bin_path}"
     return absolute_bin_path
 
 
@@ -594,22 +595,26 @@ def nuitkaify_module(
     stdout: Stdout | None = None,
     include_modules: Iterable[str] | None = None,
     include_packages: Iterable[str] | None = None,
-    use_runtime: bool = True,
+    use_runtime: bool = platform.system() != "Windows",
     nuitka_context: NuitkaBuildContext | None = None,
 ) -> GenericExtension:
     """
     Compiles the module given by `path` into a native `.so`.
 
     `use_runtime` selects how the Nuitka static runtime is provided:
-    - True (default): shared runtime. The static runtime is compiled once into
-      `lib{RUNTIME_LIB_NAME}.so` and linked by the module `.so`, which then holds only
-      its own generated code. The module keeps its own constants blob and its
+    - True (default off Windows): shared runtime. The static runtime is compiled once
+      into `lib{RUNTIME_LIB_NAME}.so` and linked by the module `.so`, which then holds
+      only its own generated code. The module keeps its own constants blob and its
       `loadConstantsBlob` call sites are rewritten to pass it into the runtime's
       blob-agnostic loader (`patch_module_constants_calls`), so each module reads its own
       constants while the multi-megabyte runtime is compiled once and shared.
-    - False: standalone. The static runtime is embedded straight into the module `.so`
-      (via `provide_nuitka_static_sources`), producing a fully self-contained module with
-      no external runtime dependency — larger, but with nothing shared between modules.
+      Relies on cross-shared-object symbols staying unresolved at link time and being
+      satisfied by whichever module loads the runtime, which ELF/Mach-O shared objects
+      allow but Windows DLLs do not — so this mode is unavailable there.
+    - False (default on Windows): standalone. The static runtime is embedded straight
+      into the module `.so` (via `provide_nuitka_static_sources`), producing a fully
+      self-contained module with no external runtime dependency — larger, but with
+      nothing shared between modules.
 
     `nuitka_context` (used only when `use_runtime=True`) is the persistence a future
     build-once-for-all-modules step reads from. When not provided it is resolved from the
@@ -624,8 +629,7 @@ def nuitkaify_module(
             nuitka_context = existing
     if nuitka_context is None:
         nuitka_context = (
-            create_context_if_enabled("nuitka", NuitkaBuildContext)
-            or NuitkaBuildContext()
+            create_context_if_enabled("nuitka", NuitkaBuildContext) or NuitkaBuildContext()
         )
     path_solver = path_solver or PathSolver()
     context = get_context()
@@ -656,9 +660,7 @@ def nuitkaify_module(
     if context:
         context.add_trace(cmd_trace)
     if cmd_trace.exit_code != 0:
-        raise RuntimeError(
-            f"Nuitka failed: {_describe_command_failure(cmd_trace, cmd)}"
-        )
+        raise RuntimeError(f"Nuitka failed: {_describe_command_failure(cmd_trace, cmd)}")
 
     build_folder = mod_filename.replace(".py", ".build")
     assert os.path.exists(build_folder)
@@ -689,16 +691,14 @@ def nuitkaify_module(
         nuitka_context.runtime_sources.update(_runtime_source_paths())
         build_nuitka_runtime(header_sources, dest_folder)
         # `$ORIGIN` lets the module `.so` find the runtime sitting next to it in the package.
-        libraries = [RUNTIME_LIB_NAME, "m", "dl", "z"]
+        libraries = _runtime_link_libraries(RUNTIME_LIB_NAME)
         library_dirs = [str(dest_folder)]
         runtime_library_dirs = ["$ORIGIN"]
     else:
         # Standalone: compile the static runtime straight into the module `.so`.
         provide_nuitka_static_sources(build_folder)
-        module_sources.extend(
-            str(src) for src in iterate_nuitka_static_sources(build_folder)
-        )
-        libraries = ["m", "dl", "z"]
+        module_sources.extend(str(src) for src in iterate_nuitka_static_sources(build_folder))
+        libraries = _runtime_link_libraries()
         library_dirs = []
         runtime_library_dirs = []
 

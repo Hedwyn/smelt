@@ -118,9 +118,7 @@ def _resolve_module_path(import_path: ImportPath) -> tuple[PathExists, bool] | N
     return path, spec.submodule_search_locations is not None
 
 
-def find_modules_under_root(
-    import_path: ImportPath, root: PathExists
-) -> set[ImportPath]:
+def find_modules_under_root(import_path: ImportPath, root: PathExists) -> set[ImportPath]:
     """
     Finds every python module under `root`, the filesystem location `import_path`
     resolves to, as fully dotted import paths.
@@ -164,9 +162,7 @@ def _expand_prefixes(import_path: ImportPath) -> Iterator[ImportPath]:
         yield assert_is_valid_import_path(".".join(parts[:i]))
 
 
-def _get_or_create_node(
-    import_path: ImportPath, registry: dict[ImportPath, Node]
-) -> Node:
+def _get_or_create_node(import_path: ImportPath, registry: dict[ImportPath, Node]) -> Node:
     node = registry.get(import_path)
     if node is None:
         node = Node(import_path, set())
@@ -174,9 +170,7 @@ def _get_or_create_node(
     return node
 
 
-def _walk_module(
-    node: Node, registry: dict[ImportPath, Node], visited: set[ImportPath]
-) -> None:
+def _walk_module(node: Node, registry: dict[ImportPath, Node], visited: set[ImportPath]) -> None:
     if node.name in visited:
         return
     visited.add(node.name)

@@ -79,9 +79,7 @@ class CliImportPath(ParamType):
 
     name = "import_path"
 
-    def convert(
-        self, value: str, param: Parameter | None, ctx: Context | None
-    ) -> ImportPath:
+    def convert(self, value: str, param: Parameter | None, ctx: Context | None) -> ImportPath:
         _ = param
         _ = ctx
         if not is_valid_import_path(value):
@@ -96,9 +94,7 @@ class CliExistingPath(ParamType):
 
     name = "existing_path"
 
-    def convert(
-        self, value: str, param: Parameter | None, ctx: Context | None
-    ) -> PathExists:
+    def convert(self, value: str, param: Parameter | None, ctx: Context | None) -> PathExists:
         _ = param
         _ = ctx
         path = Path(value)
@@ -156,9 +152,7 @@ def parse_config_from_pyproject(
         raise SmeltConfigError("No smelt config defined in pyproject")
 
     if not isinstance(smelt_config, dict):
-        raise SmeltConfigError(
-            f"`smelt` section should be a dictionary, got {smelt_config}. "
-        )
+        raise SmeltConfigError(f"`smelt` section should be a dictionary, got {smelt_config}. ")
     return SmeltConfig.from_toml_data(smelt_config, project_root=project_root)
 
 
@@ -210,9 +204,7 @@ def show_config(*, path: PathExists) -> None:
     type=CliExistingPath(),
 )
 @add_logging_option
-@click.option(
-    "-r", "--report", type=str, default=None, help="Produces a report at the given path"
-)
+@click.option("-r", "--report", type=str, default=None, help="Produces a report at the given path")
 @wrap_smelt_errors()
 def build_standalone_binary(
     package_path: PathExists, logging_level: str, report: str | None
@@ -292,9 +284,7 @@ def compile_module(
     path_solver = PathSolver.from_installed_import_paths(module_import_path)
     click.echo(f"Compiling module {module_import_path}")
     try:
-        module_source = path_solver.resolve_import_path(
-            module_import_path, should_exist=True
-        )
+        module_source = path_solver.resolve_import_path(module_import_path, should_exist=True)
     except SmeltConfigError as exc:
         error_exit(str(exc))
 
@@ -304,9 +294,7 @@ def compile_module(
 
     elif backend == "mypyc":
         target_platform = SupportedPlatforms(crosscompile) if crosscompile else None
-        target_triple_name = (
-            None if target_platform is None else target_platform.get_triple_name()
-        )
+        target_triple_name = None if target_platform is None else target_platform.get_triple_name()
         modules = [MypycModule(module_import_path)]
         (generic_ext,) = compile_mypyc_extensions(modules, path_solver)
 
