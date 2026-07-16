@@ -458,6 +458,17 @@ def _bundled_patchelf_on_path() -> Iterator[None]:
         yield
 
 
+def _bundled_zig_path() -> Path | None:
+    """Returns the `ziglang` PyPI package's bundled `zig` binary, or None if not installed."""
+    try:
+        import ziglang
+    except ImportError:
+        return None
+    zig_dir = Path(ziglang.__file__).resolve().parent
+    zig_exe = zig_dir / ("zig.exe" if platform.system() == "Windows" else "zig")
+    return zig_exe if zig_exe.exists() else None
+
+
 def run_nuitka_data_composer(build_folder: str) -> Path:
     """
     Runs Nuitka's data composer over `build_folder` to produce the constants blob.
@@ -534,6 +545,25 @@ unsigned CONST_CONSTANT char *getConstantBlobData(void) {{
     (Path(build_folder) / "__constants_data.c").write_text(contents)
 
 
+def _package_search_root(script_path: str | Path) -> Path:
+    """
+    Walks up from `script_path` through parent directories containing an
+    `__init__.py`, returning the first ancestor without one.
+
+    That ancestor is the directory that must be on `sys.path` for the script's
+    own package to be importable by dotted name. Nuitka infers this itself
+    while following imports from the entry script, but resolves an explicit
+    `--include-module=<dotted name>` (e.g. a mypyc runtime extension, never
+    actually `import`-ed anywhere) via plain `sys.path`/`PYTHONPATH` lookup
+    instead, so that directory has to be added to the subprocess environment
+    for such names to resolve.
+    """
+    current = Path(script_path).resolve().parent
+    while (current / "__init__.py").exists():
+        current = current.parent
+    return current
+
+
 def compile_with_nuitka(
     path: str,
     no_follow_imports: bool = False,
@@ -573,9 +603,33 @@ def compile_with_nuitka(
 
     _logger.debug("Running %s", " ".join(cmd))
 
+    env_overrides: dict[str, str] = {}
+    if include_modules or include_packages:
+        # `--include-module`/`--include-package` name modules that are never actually
+        # `import`-ed anywhere (e.g. a mypyc runtime extension), so Nuitka can't infer
+        # their location the way it does for followed imports; it resolves them via
+        # plain `sys.path` lookup instead, which needs the script's own package root.
+        search_root = str(_package_search_root(path))
+        existing = os.environ.get("PYTHONPATH")
+        env_overrides["PYTHONPATH"] = (
+            os.pathsep.join([search_root, existing]) if existing else search_root
+        )
+
+    if platform.system() == "Windows" and "CC" not in os.environ:
+        # This is the only step that invokes an actual C backend compiler, and Windows
+        # has none by default. Nuitka's fallback is to download its own MinGW64 gcc, but
+        # smelt uses Zig for every other compile step, so point it at our already-
+        # installed Zig instead: Nuitka's Scons backend recognizes a `CC` binary named
+        # "zig" and drives it correctly (`zig cc ...`), no Nuitka-version-specific flag
+        # (like the newer `--zig`) required.
+        zig_path = _bundled_zig_path()
+        if zig_path is not None:
+            env_overrides["CC"] = str(zig_path)
+            env_overrides["CXX"] = str(zig_path)
+
     # Standalone/onefile builds shell out to `patchelf`; prefer our bundled, known-good
     # copy over whatever the system ships (some distro releases are Nuitka-blacklisted).
-    with _bundled_patchelf_on_path():
+    with _bundled_patchelf_on_path(), _environ_overridden(**env_overrides):
         cmd_trace = call_command(*cmd, printer=print)
     if context:
         context.add_trace(cmd_trace)
