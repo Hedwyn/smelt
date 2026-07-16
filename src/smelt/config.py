@@ -181,24 +181,28 @@ type AutoMode = Literal["off", "package", "all"]
 class NuitkaModule:
     import_path: ImportPath
     source: PathExists | None = None
+    extras: list[str] = field(default_factory=list)
 
 
 @dataclass
 class NativeExtension:
     import_path: ImportPath
     sources: list[PathExists]
+    extras: list[str] = field(default_factory=list)
 
 
 @dataclass
 class CythonExtension:
     import_path: ImportPath
     source: PathExists | None = None
+    extras: list[str] = field(default_factory=list)
 
 
 @dataclass
 class MypycModule:
     import_path: ImportPath
     source: PathExists | None = None
+    extras: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -207,6 +211,7 @@ class ZigModule:
     import_path: ImportPath
     folder: PathExists = assert_path_exists(".")
     flags: list[str] = field(default_factory=list)
+    extras: list[str] = field(default_factory=list)
 
 
 @dataclass
