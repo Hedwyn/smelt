@@ -49,7 +49,9 @@ class HatchlingBuildHook(BuildHookInterface):
     @cached_property
     def smelt_config(self) -> SmeltConfig:
         try:
-            config = SmeltConfig.from_toml_data(self.config)
+            config = SmeltConfig.from_toml_data(
+                self.config, project_scripts=self.metadata.core.scripts
+            )
         except Exception as exc:
             raise ValueError(
                 "Smelt config is invalid:"

@@ -13,6 +13,7 @@ import os
 import platform
 import shutil
 import sysconfig
+import tempfile
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +36,7 @@ from smelt.explorer import (
     flatten_dependency_graph,
     has_local_source,
 )
-from smelt.nuitkaify import Stdout, compile_with_nuitka, nuitkaify_module
+from smelt.nuitkaify import Stdout, compile_with_nuitka, nuitkaify_module, package_search_root
 from smelt.utils import (
     GenericExtension,
     ImportPath,
@@ -382,7 +383,14 @@ def create_entrypoint_script(entrypoint: str, dest_dir: str | os.PathLike[str]) 
         'if __name__ == "__main__":\n'
         f"    sys.exit({func_name}())\n"
     )
-    dest_path = Path(dest_dir) / f"{func_name}.py"
+    # Nuitka names the compiled entry script after its own filename; if that name
+    # collides with a top-level component of `module_path` (e.g. a CLI function
+    # named after its own package, as in `pkg = "pkg.cli:pkg"`), it shadows the
+    # real package at runtime instead of importing it. Disambiguate in that case.
+    script_name = func_name
+    if script_name in module_path.split("."):
+        script_name = f"_{script_name}_entrypoint"
+    dest_path = Path(dest_dir) / f"{script_name}.py"
     dest_path.write_text(script)
     return dest_path
 
@@ -489,17 +497,33 @@ def run_backend(
                     f"Available entrypoints: {config.entrypoints}"
                 )
             entrypoints_to_build = [entrypoint]
-        for entrypoint_import_path in entrypoints_to_build:
-            entrypoint_file = locate_module(
-                entrypoint_import_path, strategy=strategy, package_root=path_solver.project_root
+        for entrypoint_spec in entrypoints_to_build:
+            module_path, sep, func_name = entrypoint_spec.partition(":")
+            module_file = locate_module(
+                module_path, strategy=strategy, package_root=path_solver.project_root
             )
-            entrypoint_options = config.entrypoints[entrypoint_import_path]
-            compile_with_nuitka(
-                entrypoint_file,
-                stdout=stdout,
-                include_modules=shared_runtime_extensions
-                | set(entrypoint_options.get("include-modules", [])),
-                include_packages=entrypoint_options.get("include-package", []),
-                include_package_data=entrypoint_options.get("include-package-data", []),
-                extra_flags=entrypoint_options.get("extra_flags", []),
-            )
+            entrypoint_options = config.entrypoints[entrypoint_spec]
+            # a codegen'd wrapper script must live outside the package tree it imports
+            # (colliding on name with that package -- a common case, e.g. a `main`
+            # function in the package's own top-level module -- would otherwise shadow
+            # it), so its real package root is passed along explicitly via PYTHONPATH.
+            # `output_name` decouples the produced binary's name from the wrapper
+            # script's own (possibly disambiguated) filename.
+            with tempfile.TemporaryDirectory() as scratch_dir:
+                entrypoint_file = (
+                    str(create_entrypoint_script(entrypoint_spec, scratch_dir))
+                    if sep
+                    else module_file
+                )
+                extra_search_paths = [str(package_search_root(module_file))] if sep else []
+                compile_with_nuitka(
+                    entrypoint_file,
+                    stdout=stdout,
+                    include_modules=shared_runtime_extensions
+                    | set(entrypoint_options.get("include-modules", [])),
+                    include_packages=entrypoint_options.get("include-package", []),
+                    include_package_data=entrypoint_options.get("include-package-data", []),
+                    extra_flags=entrypoint_options.get("extra_flags", []),
+                    extra_search_paths=extra_search_paths,
+                    output_name=func_name if sep else None,
+                )

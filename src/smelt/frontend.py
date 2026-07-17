@@ -8,14 +8,13 @@ Command-line interface for Smelt
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import sys
 import tomllib
-import warnings
-from contextlib import chdir, contextmanager
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Generator, Literal, NoReturn, ParamSpec, TypeVar
+from typing import Literal, NoReturn, ParamSpec, TypeVar
 
 import click
 from click import Context, Parameter, ParamType
@@ -104,7 +103,8 @@ class CliExistingPath(ParamType):
 
 
 def wrap_smelt_errors(
-    should_exist: bool = True, exit_code: int = 1
+    should_exist: bool = True,
+    exit_code: int = 1,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """
     Captures `SmeltError` exceptions and displays them to the user in a nicer way.
@@ -145,7 +145,7 @@ def parse_config_from_pyproject(
     if not isinstance(tool_config, dict):
         raise SmeltConfigError(
             f"`tool` section in toml data is not a dictionary, got {tool_config}. "
-            "Does the TOML data come from a valid pyproject ?"
+            "Does the TOML data come from a valid pyproject ?",
         )
     smelt_config = toml_get_nested_section(toml_data, *config_path)
     if smelt_config is None:
@@ -153,7 +153,23 @@ def parse_config_from_pyproject(
 
     if not isinstance(smelt_config, dict):
         raise SmeltConfigError(f"`smelt` section should be a dictionary, got {smelt_config}. ")
-    return SmeltConfig.from_toml_data(smelt_config, project_root=project_root)
+
+    project_scripts_decl = toml_get_nested_section(toml_data, "project", "scripts")
+    if not isinstance(project_scripts_decl, dict):
+        raise SmeltConfigError(
+            f"`project.scripts` section should be a dictionary, got {project_scripts_decl}. ",
+        )
+    project_scripts: dict[str, str] = {}
+    for name, target in project_scripts_decl.items():
+        if not isinstance(target, str):
+            raise SmeltConfigError(f"`project.scripts.{name}` should be a string, got {target}. ")
+        project_scripts[name] = target
+
+    return SmeltConfig.from_toml_data(
+        smelt_config,
+        project_root=project_root,
+        project_scripts=project_scripts,
+    )
 
 
 def error_exit(msg: str, code: int = 1) -> NoReturn:
@@ -208,14 +224,18 @@ def show_config(*, path: PathExists) -> None:
 @click.option(
     "-e",
     "--entrypoint",
-    type=CliImportPath(),
+    type=str,
     default=None,
-    help="Restrict the build to this entrypoint (import path). Builds all configured "
+    help="Restrict the build to this entrypoint ('module.path' or 'module.path:func_name', "
+    "as declared in [tool.smelt.entrypoints] or [project.scripts]). Builds all configured "
     "entrypoints if omitted.",
 )
 @wrap_smelt_errors()
 def build_standalone_binary(
-    package_path: PathExists, logging_level: str, report: str | None, entrypoint: ImportPath | None
+    package_path: PathExists,
+    logging_level: str,
+    report: str | None,
+    entrypoint: str | None,
 ) -> None:
     levelno = logging._nameToLevel[logging_level]
     logging.basicConfig(level=levelno)

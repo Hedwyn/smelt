@@ -19,9 +19,6 @@ packages = ["src/hatchdemo"]
 [tool.hatch.build.hooks.smelt]
 packages_location = { "hatchdemo" = "src/hatchdemo" }
 
-[tool.hatch.build.hooks.smelt.entrypoints]
-"hatchdemo.cli" = {}
-
 [[tool.hatch.build.hooks.smelt.mypyc_modules]]
 import_path = "hatchdemo.fib"
 

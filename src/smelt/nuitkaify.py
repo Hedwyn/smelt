@@ -55,10 +55,11 @@ import shutil
 import sys
 import sysconfig
 import tempfile
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Iterable, Iterator, Literal
+from typing import Final, Literal
 
 from setuptools import Extension
 
@@ -504,7 +505,7 @@ def run_nuitka_data_composer(build_folder: str) -> Path:
         context.add_trace(cmd_trace)
     if cmd_trace.exit_code != 0:
         raise RuntimeError(
-            f"Nuitka data composer failed: {_describe_command_failure(cmd_trace, cmd)}"
+            f"Nuitka data composer failed: {_describe_command_failure(cmd_trace, cmd)}",
         )
     assert blob_path.exists(), f"Data composer did not produce a blob at {blob_path}"
     return blob_path
@@ -545,7 +546,7 @@ unsigned CONST_CONSTANT char *getConstantBlobData(void) {{
     (Path(build_folder) / "__constants_data.c").write_text(contents)
 
 
-def _package_search_root(script_path: str | Path) -> Path:
+def package_search_root(script_path: str | Path) -> Path:
     """
     Walks up from `script_path` through parent directories containing an
     `__init__.py`, returning the first ancestor without one.
@@ -572,10 +573,21 @@ def compile_with_nuitka(
     include_packages: Iterable[str] | None = None,
     include_package_data: Iterable[str] | None = None,
     extra_flags: Iterable[str] | None = None,
+    extra_search_paths: Iterable[str] | None = None,
+    output_name: str | None = None,
 ) -> str:
     """
     Compiles the module given by `path`.
     Follows imports by default, but can be disabled with `no_follow_imports`.
+
+    `extra_search_paths` is added to the subprocess's `PYTHONPATH` verbatim, for callers
+    whose `path` isn't itself located inside the package it imports (e.g. a codegen'd
+    entrypoint script sitting in a scratch directory) -- `package_search_root(path)`
+    would otherwise compute a meaningless root from that scratch directory.
+
+    `output_name` names the produced binary, overriding the default of reusing `path`'s
+    basename -- useful when `path` was itself renamed to something other than the
+    entrypoint's name (e.g. to dodge a collision with a package of the same name).
     """
     context = get_context()
     try:
@@ -586,13 +598,22 @@ def compile_with_nuitka(
         _ = nuitka
     except ImportError:
         raise ImportError(
-            "Nuitka is not installed. Please install this package with nuitka extra: `pip install smelt[nuitka]`."
+            "Nuitka is not installed. Please install this package with nuitka extra: `pip install smelt[nuitka]`.",
         )
+    expected_extension = ".exe" if platform.system() == "Windows" else ".bin"
+    bin_path = (
+        f"{output_name}{expected_extension}"
+        if output_name
+        else os.path.basename(path).replace(".py", expected_extension)
+    )
+
     cmd = list(NUITKA_ENTRYPOINT)
     if not no_follow_imports:
         cmd.append("--follow-imports")
     cmd.append("--onefile")
     cmd.append(path)
+    if output_name is not None:
+        cmd.append(f"--output-filename={bin_path}")
 
     # handling special flags
     if include_modules:
@@ -613,15 +634,20 @@ def compile_with_nuitka(
     _logger.debug("Running %s", " ".join(cmd))
 
     env_overrides: dict[str, str] = {}
-    if include_modules or include_packages:
+    if extra_search_paths:
+        search_roots = list(extra_search_paths)
+    elif include_modules or include_packages:
         # `--include-module`/`--include-package` name modules that are never actually
         # `import`-ed anywhere (e.g. a mypyc runtime extension), so Nuitka can't infer
         # their location the way it does for followed imports; it resolves them via
         # plain `sys.path` lookup instead, which needs the script's own package root.
-        search_root = str(_package_search_root(path))
+        search_roots = [str(package_search_root(path))]
+    else:
+        search_roots = []
+    if search_roots:
         existing = os.environ.get("PYTHONPATH")
-        env_overrides["PYTHONPATH"] = (
-            os.pathsep.join([search_root, existing]) if existing else search_root
+        env_overrides["PYTHONPATH"] = os.pathsep.join(
+            [*search_roots, existing] if existing else search_roots,
         )
 
     if platform.system() == "Windows" and "CC" not in os.environ:
@@ -645,8 +671,6 @@ def compile_with_nuitka(
     if cmd_trace.exit_code != 0:
         raise RuntimeError(f"Nuitka failed: {_describe_command_failure(cmd_trace, cmd)}")
 
-    expected_extension = ".exe" if platform.system() == "Windows" else ".bin"
-    bin_path = os.path.basename(path).replace(".py", expected_extension)
     absolute_bin_path = os.path.join(os.getcwd(), bin_path)
     assert os.path.exists(absolute_bin_path), f"Nuitka binary not found at {absolute_bin_path}"
     return absolute_bin_path

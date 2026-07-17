@@ -248,10 +248,23 @@ class SmeltConfig:
     report_path: str | None = None
 
     @classmethod
-    def from_toml_data(cls, toml_data: dict[str, Any], project_root: Path | None = None) -> Self:
+    def from_toml_data(
+        cls,
+        toml_data: dict[str, Any],
+        project_root: Path | None = None,
+        project_scripts: dict[str, str] | None = None,
+    ) -> Self:
         # operate on a copy: callers (e.g. the hatch build hook) keep their own
         # reference to `toml_data` around for error reporting after this call.
         toml_data = dict(toml_data)
+
+        # entrypoints: every `[project.scripts]` target is picked up automatically
+        # (default options), `entrypoints` declarations on top of that only customize
+        # options for one of them, or declare additional entrypoints of their own.
+        entrypoints: dict[str, EntrypointOptions] = {
+            target: EntrypointOptions() for target in (project_scripts or {}).values()
+        }
+        entrypoints.update(toml_data.pop("entrypoints", {}))
         # native code
         native_extensions_decl = toml_data.pop("c_extensions", [])
         native_extensions = [
@@ -307,6 +320,7 @@ class SmeltConfig:
             nuitka_modules=nuitka_modules,
             auto_mode=auto_mode,
             backend_priority_order=backend_priority_order,
+            entrypoints=entrypoints,
             **toml_data,
         )
 
