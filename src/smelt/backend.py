@@ -546,12 +546,17 @@ def run_backend(
     if not without_entrypoint:
         entrypoints_to_build = list(config.entrypoints)
         if entrypoint is not None:
-            if entrypoint not in config.entrypoints:
+            # accepts either the entrypoint's own key ("module.path[:func_name]") or,
+            # for one picked up from `[project.scripts]`, the script name as the user
+            # invokes it (e.g. "afpu" for `afpu = "advantics.afpu.cli:afpu"`).
+            resolved_entrypoint = config.script_names.get(entrypoint, entrypoint)
+            if resolved_entrypoint not in config.entrypoints:
                 raise SmeltError(
                     f"Unknown entrypoint {entrypoint!r}. "
-                    f"Available entrypoints: {config.entrypoints}"
+                    f"Available entrypoints: {list(config.entrypoints)}. "
+                    f"Available script names: {list(config.script_names)}"
                 )
-            entrypoints_to_build = [entrypoint]
+            entrypoints_to_build = [resolved_entrypoint]
         for entrypoint_spec in entrypoints_to_build:
             module_path, sep, func_name = entrypoint_spec.partition(":")
             module_file = locate_module(

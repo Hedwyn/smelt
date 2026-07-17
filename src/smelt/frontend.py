@@ -228,9 +228,9 @@ def show_config(*, path: PathExists) -> None:
     "--entrypoint",
     type=str,
     default=None,
-    help="Restrict the build to this entrypoint ('module.path' or 'module.path:func_name', "
-    "as declared in [tool.smelt.entrypoints] or [project.scripts]). Builds all configured "
-    "entrypoints if omitted.",
+    help="Restrict the build to this entrypoint: either its script name as declared in "
+    "[project.scripts] (e.g. 'afpu'), or its 'module.path'/'module.path:func_name' key "
+    "as declared in [tool.smelt.entrypoints]. Builds all configured entrypoints if omitted.",
 )
 @wrap_smelt_errors()
 def build_standalone_binary(

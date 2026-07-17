@@ -242,6 +242,7 @@ class SmeltConfig:
     zig_modules: list[ZigModule] = field(default_factory=list)
     platforms: Iterable[str] | None = None
     entrypoints: dict[str, EntrypointOptions] = field(default_factory=dict)
+    script_names: dict[str, str] = field(default_factory=dict)
     debug: bool = False
     auto_mode: AutoMode = "off"
     backend_priority_order: list[Backend] = field(default_factory=lambda: [Backend.NUITKA])
@@ -261,10 +262,36 @@ class SmeltConfig:
         # entrypoints: every `[project.scripts]` target is picked up automatically
         # (default options), `entrypoints` declarations on top of that only customize
         # options for one of them, or declare additional entrypoints of their own.
-        entrypoints: dict[str, EntrypointOptions] = {
-            target: EntrypointOptions() for target in (project_scripts or {}).values()
+        entrypoints: dict[str, EntrypointOptions] = {}
+        script_names: dict[str, str] = {}
+        for name, target in (project_scripts or {}).items():
+            entrypoints[target] = EntrypointOptions()
+            script_names[name] = target
+        entrypoints_decl_raw: dict[str, EntrypointOptions] = toml_data.pop("entrypoints", {})
+        # a declaration keyed by a `[project.scripts]` name (e.g. `entrypoints.afpu`
+        # for `afpu = "pkg.cli:afpu"`) customizes that script's auto-added target --
+        # resolve it upfront so it lines up with `entrypoints`/`script_names` below
+        # exactly like a declaration spelled out as "pkg.cli:afpu" would.
+        entrypoints_decl: dict[str, EntrypointOptions] = {
+            script_names.get(key, key): value for key, value in entrypoints_decl_raw.items()
         }
-        entrypoints.update(toml_data.pop("entrypoints", {}))
+        for explicit_key in entrypoints_decl:
+            explicit_module_path = explicit_key.partition(":")[0]
+            # an explicit declaration customizes an auto-picked-up `[project.scripts]`
+            # target sharing its module path (this also covers the pre-`[project.scripts]`
+            # convention of keying entrypoints by bare module path, e.g. `"pkg.cli"`
+            # customizing the auto-added `"pkg.cli:func"`) -- drop the auto entry so it
+            # isn't built a second time, unconfigured, alongside the explicit one.
+            for auto_key in [
+                key
+                for key in entrypoints
+                if key != explicit_key and key.partition(":")[0] == explicit_module_path
+            ]:
+                del entrypoints[auto_key]
+                for name, target in script_names.items():
+                    if target == auto_key:
+                        script_names[name] = explicit_key
+        entrypoints.update(entrypoints_decl)
         # native code
         native_extensions_decl = toml_data.pop("c_extensions", [])
         native_extensions = [
@@ -321,6 +348,7 @@ class SmeltConfig:
             auto_mode=auto_mode,
             backend_priority_order=backend_priority_order,
             entrypoints=entrypoints,
+            script_names=script_names,
             **toml_data,
         )
 
