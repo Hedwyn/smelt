@@ -1,0 +1,23 @@
+site_name: Smelt
+site_description: Binary orchestrator for Python packages
+site_url: https://hedwyn.github.io/smelt/
+repo_url: https://github.com/Hedwyn/smelt
+repo_name: Hedwyn/smelt
+
+theme:
+  name: readthedocs
+
+nav:
+  - Home: index.md
+  - Get Started: get-started.md
+  - Manifesto: manifesto.md
+  - Build Hook: build-hook.md
+  - CLI: cli.md
+  - Advanced Use Cases: advanced.md
+
+markdown_extensions:
+  - admonition
+  - fenced_code
+  - codehilite
+  - toc:
+      permalink: true
