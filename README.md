@@ -7,6 +7,8 @@ Smelt is python tool that aims to simplify greatly shipping native code from Pyt
 * Combining multiple tools building or providing native code in Python projects (e.g., mypyc, nuitka, local C/Zig extensions)
 * Providing a single high-level interface to automate binary builds, either for platform-specific wheels or even for standalone fully compiled binary Python projects.
 
+Documentation is available [here](https://hedwyn.github.io/smelt).
+
 ## Why Smelt
 
 One usual headache with Python is to distribute the software. As an interpreted language, Python has some limitations compared to other compiled languages - first because shipping your Python code requires an interpreter on the target machine, and second because the whole nature of the language makes obfuscation difficult - which is a problem for close-source projects.

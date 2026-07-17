@@ -28,12 +28,12 @@ cli = ["click"]
 nuitka = ["nuitka", "patchelf>=0.17.2,<0.18; sys_platform == 'linux'"]
 cython = ["Cython"]
 build = [
-    "Cython",
-    "nuitka",
-    "patchelf>=0.17.2,<0.18; sys_platform == 'linux'",
-    "mypy[mypyc]",
-    "hatchling",
-    "editables",
+  "Cython",
+  "nuitka",
+  "patchelf>=0.17.2,<0.18; sys_platform == 'linux'",
+  "mypy[mypyc]",
+  "hatchling",
+  "editables",
 ]
 
 [tool.setuptools]
