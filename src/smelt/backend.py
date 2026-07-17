@@ -364,6 +364,29 @@ def discover_external_mypyc_runtimes() -> set[str]:
     return found
 
 
+def create_entrypoint_script(entrypoint: str, dest_dir: str | os.PathLike[str]) -> Path:
+    """
+    Codegens a standalone script calling `entrypoint` ("module1.module2:func_name"),
+    mirroring what installers generate for `[project.scripts]`. Simpler than those,
+    since the only consumer here is Nuitka: no pythonw, no CLI argument handling.
+    """
+    module_path, sep, func_name = entrypoint.partition(":")
+    if not sep or not module_path or not func_name:
+        raise SmeltConfigError(
+            f"Invalid entrypoint {entrypoint!r}, expected 'module.path:func_name'"
+        )
+    script = (
+        "import sys\n"
+        f"from {module_path} import {func_name}\n"
+        "\n"
+        'if __name__ == "__main__":\n'
+        f"    sys.exit({func_name}())\n"
+    )
+    dest_path = Path(dest_dir) / f"{func_name}.py"
+    dest_path.write_text(script)
+    return dest_path
+
+
 def run_backend(
     config: SmeltConfig,
     stdout: Stdout | None = None,
