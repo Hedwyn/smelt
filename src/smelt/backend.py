@@ -336,12 +336,16 @@ def run_backend(
     strategy: ModpathType = ModpathType.FS,
     *,
     without_entrypoint: bool = False,
+    entrypoint: str | None = None,
 ) -> None:
     """
     Runs the whole backend pipeline:
     * C extensions compilation
     * mypyc extensions
     * Nuitka compilation
+
+    `entrypoint` restricts Nuitka compilation to a single one of
+    `config.entrypoints` (by import path). If omitted, all of them are built.
     """
     local_platform = platform.system().lower()
     if (platforms := config.platforms) is not None and local_platform not in platforms:
@@ -416,12 +420,21 @@ def run_backend(
         if auto_ext.runtime:
             shared_runtime_extensions.add(auto_ext.runtime.name)
 
-    # nuitka entrypoint compilation
-    without_entrypoint = without_entrypoint or config.entrypoint is None
+    # nuitka entrypoint(s) compilation
+    without_entrypoint = without_entrypoint or not config.entrypoints
     if not without_entrypoint:
-        entrypoint_file = locate_module(
-            config.entrypoint, strategy=strategy, package_root=path_solver.project_root
-        )
-        compile_with_nuitka(
-            entrypoint_file, stdout=stdout, include_modules=shared_runtime_extensions
-        )
+        entrypoints_to_build = list(config.entrypoints)
+        if entrypoint is not None:
+            if entrypoint not in config.entrypoints:
+                raise SmeltError(
+                    f"Unknown entrypoint {entrypoint!r}. "
+                    f"Available entrypoints: {config.entrypoints}"
+                )
+            entrypoints_to_build = [entrypoint]
+        for entrypoint_import_path in entrypoints_to_build:
+            entrypoint_file = locate_module(
+                entrypoint_import_path, strategy=strategy, package_root=path_solver.project_root
+            )
+            compile_with_nuitka(
+                entrypoint_file, stdout=stdout, include_modules=shared_runtime_extensions
+            )

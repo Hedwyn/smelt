@@ -205,9 +205,17 @@ def show_config(*, path: PathExists) -> None:
 )
 @add_logging_option
 @click.option("-r", "--report", type=str, default=None, help="Produces a report at the given path")
+@click.option(
+    "-e",
+    "--entrypoint",
+    type=CliImportPath(),
+    default=None,
+    help="Restrict the build to this entrypoint (import path). Builds all configured "
+    "entrypoints if omitted.",
+)
 @wrap_smelt_errors()
 def build_standalone_binary(
-    package_path: PathExists, logging_level: str, report: str | None
+    package_path: PathExists, logging_level: str, report: str | None, entrypoint: ImportPath | None
 ) -> None:
     levelno = logging._nameToLevel[logging_level]
     logging.basicConfig(level=levelno)
@@ -221,7 +229,7 @@ def build_standalone_binary(
     config.load_env()
     path_solver = config.get_path_solver(project_root=package_path)
     try:
-        run_backend(config, stdout="stdout", path_solver=path_solver)
+        run_backend(config, stdout="stdout", path_solver=path_solver, entrypoint=entrypoint)
     except Exception as e:
         click.echo(f"Error during build: {e}")
     if config.report_path is not None:

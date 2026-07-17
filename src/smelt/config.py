@@ -229,7 +229,7 @@ class SmeltConfig:
     c_extensions: list[NativeExtension] = field(default_factory=list)
     zig_modules: list[ZigModule] = field(default_factory=list)
     platforms: Iterable[str] | None = None
-    entrypoint: str | None = None
+    entrypoints: dict[str, dict[str, Any]] = field(default_factory=dict)
     debug: bool = False
     auto_mode: AutoMode = "off"
     backend_priority_order: list[Backend] = field(default_factory=lambda: [Backend.NUITKA])
