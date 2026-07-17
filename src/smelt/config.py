@@ -11,7 +11,7 @@ import os
 from dataclasses import MISSING, asdict, dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Literal, Self
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Self, TypedDict
 
 from smelt.utils import (
     ImportPath,
@@ -214,6 +214,18 @@ class ZigModule:
     extras: list[str] = field(default_factory=list)
 
 
+EntrypointOptions = TypedDict(
+    "EntrypointOptions",
+    {
+        "include-modules": list[str],
+        "include-package": list[str],
+        "include-package-data": list[str],
+        "extra_flags": list[str],
+    },
+    total=False,
+)
+
+
 @dataclass
 class SmeltConfig:
     """
@@ -229,7 +241,7 @@ class SmeltConfig:
     c_extensions: list[NativeExtension] = field(default_factory=list)
     zig_modules: list[ZigModule] = field(default_factory=list)
     platforms: Iterable[str] | None = None
-    entrypoints: dict[str, dict[str, Any]] = field(default_factory=dict)
+    entrypoints: dict[str, EntrypointOptions] = field(default_factory=dict)
     debug: bool = False
     auto_mode: AutoMode = "off"
     backend_priority_order: list[Backend] = field(default_factory=lambda: [Backend.NUITKA])

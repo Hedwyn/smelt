@@ -570,6 +570,8 @@ def compile_with_nuitka(
     stdout: Stdout | None = None,
     include_modules: Iterable[str] | None = None,
     include_packages: Iterable[str] | None = None,
+    include_package_data: Iterable[str] | None = None,
+    extra_flags: Iterable[str] | None = None,
 ) -> str:
     """
     Compiles the module given by `path`.
@@ -600,6 +602,13 @@ def compile_with_nuitka(
     if include_packages:
         for package in include_packages:
             cmd.append(f"--include-package={package}")
+
+    if include_package_data:
+        for package in include_package_data:
+            cmd.append(f"--include-package-data={package}")
+
+    if extra_flags:
+        cmd.extend(extra_flags)
 
     _logger.debug("Running %s", " ".join(cmd))
 

@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import shutil
+import sysconfig
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -329,6 +330,40 @@ def discover_auto_targets(config: SmeltConfig, path_solver: PathSolver) -> set[I
     return {name for name in discovered - pinned if has_local_source(name)}
 
 
+def discover_external_mypyc_runtimes() -> set[str]:
+    """
+    Finds mypyc shared-runtime libraries belonging to already-installed dependencies
+    that this smelt run never compiled itself (e.g. a third-party package built
+    against mypyc upstream, like `charset-normalizer`).
+
+    mypyc's shared runtime is dlopen'd by its compiled modules at C level, never
+    through a literal `import` statement, so Nuitka's import-follower cannot discover
+    it on its own -- the same problem `shared_runtime_extensions` solves for runtimes
+    built in this run, except here smelt has no config entry to know about the module
+    in the first place, so the whole environment has to be scanned instead.
+
+    TODO: this scans the whole venv indiscriminately, so it also picks up mypyc
+    runtimes belonging to build-time-only tools (e.g. mypy itself) that are never
+    reachable from the entrypoint at runtime -- harmless bloat today, but this should
+    be scoped down to the project's actual runtime-dependency closure (resolve
+    `[project.dependencies]` transitively via `importlib.metadata`, then only scan
+    `__mypyc` files belonging to distributions in that closure) before being wired
+    back into `run_backend`.
+    """
+    suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    site_roots = {
+        Path(path)
+        for key in ("purelib", "platlib")
+        if (path := sysconfig.get_path(key)) and Path(path).is_dir()
+    }
+    found: set[str] = set()
+    for root in site_roots:
+        for so_path in root.rglob(f"*__mypyc{suffix}"):
+            rel_stem = so_path.relative_to(root).with_name(so_path.name.removesuffix(suffix))
+            found.add(".".join(rel_stem.parts))
+    return found
+
+
 def run_backend(
     config: SmeltConfig,
     stdout: Stdout | None = None,
@@ -435,6 +470,13 @@ def run_backend(
             entrypoint_file = locate_module(
                 entrypoint_import_path, strategy=strategy, package_root=path_solver.project_root
             )
+            entrypoint_options = config.entrypoints[entrypoint_import_path]
             compile_with_nuitka(
-                entrypoint_file, stdout=stdout, include_modules=shared_runtime_extensions
+                entrypoint_file,
+                stdout=stdout,
+                include_modules=shared_runtime_extensions
+                | set(entrypoint_options.get("include-modules", [])),
+                include_packages=entrypoint_options.get("include-package", []),
+                include_package_data=entrypoint_options.get("include-package-data", []),
+                extra_flags=entrypoint_options.get("extra_flags", []),
             )
