@@ -44,7 +44,9 @@ from smelt.utils import (
     PathSolver,
     SmeltConfigError,
     SmeltError,
+    get_module_name,
     locate_module,
+    path_exists,
 )
 
 # TODO: replace .so references to a variable that's set to .so
@@ -363,6 +365,59 @@ def discover_external_mypyc_runtimes() -> set[str]:
             rel_stem = so_path.relative_to(root).with_name(so_path.name.removesuffix(suffix))
             found.add(".".join(rel_stem.parts))
     return found
+
+
+def clean_all_artifacts(
+    config: SmeltConfig,
+    path_solver: PathSolver,
+    *,
+    shadowed_only: bool = False,
+) -> dict[ImportPath, list[Path]]:
+    """
+    Deletes every built dynlib for `config`'s modules (including mypyc's shared
+    runtime, where applicable), "unshadowing" their `.py` counterpart back to
+    being the one Python imports.
+
+    `shadowed_only` restricts cleaning to modules with a pure-Python fallback
+    to unshadow (mypyc/cython/nuitka-backed modules, pinned or auto-discovered),
+    excluding handwritten C/Zig extensions that have no `.py` counterpart.
+    """
+    suffix = sysconfig.get_config_var("EXT_SUFFIX")
+
+    targets: dict[ImportPath, Path] = {}
+    for module in (*config.mypyc_modules, *config.cython_modules, *config.nuitka_modules):
+        source = module.source or path_solver.resolve_import_path(
+            module.import_path, should_exist=False
+        )
+        targets[module.import_path] = source.parent
+
+    for import_path in discover_auto_targets(config, path_solver):
+        targets[import_path] = path_solver.resolve_import_path(
+            import_path, should_exist=False
+        ).parent
+
+    if not shadowed_only:
+        for native_ext in config.c_extensions:
+            targets[native_ext.import_path] = native_ext.sources[0].parent
+        for zig_mod in config.zig_modules:
+            targets[zig_mod.import_path] = path_solver.resolve_import_path(
+                zig_mod.import_path, should_exist=False
+            ).parent
+
+    deleted: dict[ImportPath, list[Path]] = {}
+    for import_path in sorted(targets):
+        dest_folder = targets[import_path]
+        module_name = get_module_name(import_path)
+        candidates = (
+            dest_folder / f"{module_name}{suffix}",
+            dest_folder / f"{module_name}__mypyc{suffix}",
+        )
+        removed = [artifact for artifact in candidates if path_exists(artifact)]
+        for artifact in removed:
+            artifact.unlink()
+        if removed:
+            deleted[import_path] = removed
+    return deleted
 
 
 def create_entrypoint_script(entrypoint: str, dest_dir: str | os.PathLike[str]) -> Path:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import shutil
 import sys
+import sysconfig
 import tomllib
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
@@ -20,6 +21,7 @@ import click
 from click import Context, Parameter, ParamType
 
 from smelt.backend import (
+    clean_all_artifacts,
     compile_cython_extensions,
     compile_mypyc_extensions,
     nuitkaify_module,
@@ -372,3 +374,52 @@ def build_extensions(*, package: PathExists) -> None:
         finally:
             if config.report_path is not None:
                 write_auto_mode_report(config.report_path)
+
+
+@smelt.command()
+@click.option(
+    "-p",
+    "--package",
+    type=CliExistingPath(),
+    help="Path the the package to clean built artifacts for, expects to find a pyproject.toml",
+    default=Path.cwd(),
+)
+@click.option(
+    "--shadowed-only",
+    is_flag=True,
+    default=False,
+    help="Only clean modules with a pure-Python fallback to unshadow, "
+    "excluding handwritten C/Zig extensions",
+)
+@wrap_smelt_errors()
+def clean_artifacts(*, package: PathExists, shadowed_only: bool) -> None:
+    """
+    Deletes built dynlibs (and their mypyc runtime, where applicable) for the
+    passed project, unshadowing their `.py` counterpart back to being the one
+    Python imports.
+    """
+    pyproject_path = package / "pyproject.toml"
+    if not path_exists(pyproject_path):
+        error_exit("No pyproject.toml found in passed folder")
+    with pyproject_path.open("rb") as f:
+        try:
+            toml_data = tomllib.load(f)
+        except tomllib.TOMLDecodeError as exc:
+            error_exit(f"Invalid TOML file [{pyproject_path}]: {exc}")
+        config = parse_config_from_pyproject(toml_data, project_root=package)
+        path_solver = config.get_path_solver(project_root=package)
+        deleted = clean_all_artifacts(config, path_solver, shadowed_only=shadowed_only)
+
+    if not deleted:
+        click.echo("No built artifacts found.")
+        return
+    suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    click.echo("Deleted following artifacts:")
+    for import_path, artifacts in deleted.items():
+        click.echo(f"{import_path}:")
+        for artifact in artifacts:
+            if artifact.name.endswith(f"__mypyc{suffix}"):
+                click.echo(f"  - {artifact}")
+                continue
+            pure_python_path = artifact.with_name(f"{artifact.name.removesuffix(suffix)}.py")
+            click.echo(f"  - {artifact} (was shadowing {pure_python_path})")
