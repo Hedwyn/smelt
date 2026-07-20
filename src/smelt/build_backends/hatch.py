@@ -39,6 +39,26 @@ class _ExtrasAwareModule(Protocol):
 class HatchlingBuildHook(BuildHookInterface):
     PLUGIN_NAME = "smelt"
 
+    _warned_extras_isolation: bool = False
+
+    def _warn_extras_isolation_once(self) -> None:
+        """
+        Warns, at most once per build, that extras-based module skipping is
+        unreliable under build isolation: the isolated build environment never
+        has the extra's dependencies installed, regardless of whether the
+        extra was requested at install time.
+        """
+        if self._warned_extras_isolation:
+            return
+        self._warned_extras_isolation = True
+        print(
+            "Smelt: warning: skipping modules pinned to an 'extras' requirement "
+            "only works reliably with non-isolated builds (e.g. "
+            "`pip install --no-build-isolation` or `python -m build --no-isolation`). "
+            "Under build isolation, the extra's dependencies are never installed in "
+            "the build environment, so they will always look missing."
+        )
+
     @cached_property
     def is_debug(self) -> bool:
         if not self.smelt_config.debug:
@@ -120,6 +140,8 @@ class HatchlingBuildHook(BuildHookInterface):
         """
         kept: list[M] = []
         for module in modules:
+            if module.extras:
+                self._warn_extras_isolation_once()
             if reason := self._skip_reason(module.extras):
                 self.debug_log(f"Smelt: skipping {module.import_path}: {reason}")
                 continue
