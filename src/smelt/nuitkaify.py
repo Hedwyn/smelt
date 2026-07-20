@@ -89,6 +89,16 @@ def _describe_command_failure(cmd_trace: CommandContext, cmd: Iterable[str]) -> 
 NUITKA_ENTRYPOINT: Final[tuple[str, ...]] = (sys.executable, "-m", "nuitka")
 
 
+def _is_importable(module_name: str) -> bool:
+    """Checks whether `module_name` resolves via import machinery, without importing it."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
 def _runtime_link_libraries(*extra: str) -> list[str]:
     """
     System libraries needed to link the Nuitka runtime/module shared objects.
@@ -618,6 +628,9 @@ def compile_with_nuitka(
     # handling special flags
     if include_modules:
         for mod in include_modules:
+            if not _is_importable(mod):
+                _logger.warning("Skipping --include-module=%s: module is not importable", mod)
+                continue
             cmd.append(f"--include-module={mod}")
 
     if include_packages:
