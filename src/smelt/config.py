@@ -276,12 +276,19 @@ class SmeltConfig:
             script_names.get(key, key): value for key, value in entrypoints_decl_raw.items()
         }
         for explicit_key in entrypoints_decl:
-            explicit_module_path = explicit_key.partition(":")[0]
-            # an explicit declaration customizes an auto-picked-up `[project.scripts]`
-            # target sharing its module path (this also covers the pre-`[project.scripts]`
-            # convention of keying entrypoints by bare module path, e.g. `"pkg.cli"`
-            # customizing the auto-added `"pkg.cli:func"`) -- drop the auto entry so it
-            # isn't built a second time, unconfigured, alongside the explicit one.
+            if ":" in explicit_key:
+                # already a full `module.path:func_name` spec, so it matches (at
+                # most) one auto-added entry exactly by key -- `entrypoints.update`
+                # below overwrites that entry's options directly. Hunting for other
+                # auto-added entries sharing its module path would wrongly sweep up
+                # unrelated sibling scripts from the same module (e.g. two distinct
+                # `[project.scripts]` targets both living in `pkg.cli`).
+                continue
+            # bare module path (the pre-`[project.scripts]` convention, e.g. a
+            # declaration keyed `"pkg.cli"` customizing the auto-added
+            # `"pkg.cli:func"`) -- drop the auto entry so it isn't built a second
+            # time, unconfigured, alongside the explicit one.
+            explicit_module_path = explicit_key
             for auto_key in [
                 key
                 for key in entrypoints

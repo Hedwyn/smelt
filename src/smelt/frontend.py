@@ -252,10 +252,9 @@ def build_standalone_binary(
     path_solver = config.get_path_solver(project_root=package_path)
     try:
         run_backend(config, stdout="stdout", path_solver=path_solver, entrypoint=entrypoint)
-    except Exception as e:
-        click.echo(f"Error during build: {e}")
-    if config.report_path is not None:
-        write_auto_mode_report(config.report_path)
+    finally:
+        if config.report_path is not None:
+            write_auto_mode_report(config.report_path)
     if report is not None:
         global_context = get_context()
         assert global_context is not None
