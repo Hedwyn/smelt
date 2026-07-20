@@ -442,17 +442,24 @@ def find_module_in_layout(mod_path: FsPath, package_root: str | None = None) -> 
     """
     Given a module path on the filesystem,
     tries resolving that location within the package layout.
+
+    `mod_path` is always a plain-module candidate (e.g. `pkg/mod.py`), since a dotted
+    import path alone can't tell whether it names a module or a package; a package's
+    `__init__.py` (e.g. `pkg/mod/__init__.py`) is tried as a fallback candidate.
     """
+    candidates = [Path(mod_path), Path(mod_path[: -len(".py")]) / "__init__.py"]
     root = Path(package_root) if package_root else Path.cwd()
     src_location = root / "src"
     if src_location.exists():
-        mod_potential_location = src_location / mod_path
+        for candidate in candidates:
+            mod_potential_location = src_location / candidate
+            if mod_potential_location.exists():
+                return str(mod_potential_location)
+
+    for candidate in candidates:
+        mod_potential_location = root / candidate
         if mod_potential_location.exists():
             return str(mod_potential_location)
-
-    mod_potential_location = root / mod_path
-    if mod_potential_location.exists():
-        return str(mod_potential_location)
 
     raise FileNotFoundError(f"Failed to locate {mod_path}")
 
