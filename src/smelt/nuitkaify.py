@@ -624,6 +624,7 @@ def compile_with_nuitka(
     extra_search_paths: Iterable[str] | None = None,
     output_name: str | None = None,
     no_zig: bool = False,
+    no_cache: bool = False,
 ) -> str:
     """
     Compiles the module given by `path`.
@@ -665,6 +666,8 @@ def compile_with_nuitka(
     cmd.append(path)
     if output_name is not None:
         cmd.append(f"--output-filename={bin_path}")
+    if no_cache:
+        cmd.append("--disable-cache=all")
 
     # handling special flags
     if include_modules:

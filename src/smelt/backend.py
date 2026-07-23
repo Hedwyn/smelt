@@ -464,6 +464,7 @@ def run_backend(
     without_entrypoint: bool = False,
     entrypoint: str | None = None,
     embed_files: Iterable[tuple[Path, ImportPath]] | None = None,
+    no_cache: bool = False,
 ) -> list[Path]:
     """
     Runs the whole backend pipeline:
@@ -627,7 +628,8 @@ def run_backend(
                     extra_flags=entrypoint_options.get("extra_flags", []),
                     extra_search_paths=extra_search_paths,
                     output_name=func_name if sep else None,
-                    no_zig=entrypoint_options.get("no_zig", False),
+                    no_zig=entrypoint_options.get("no-zig", False),
+                    no_cache=no_cache,
                 )
 
     return built_artifacts

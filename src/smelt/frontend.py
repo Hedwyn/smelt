@@ -261,6 +261,12 @@ def show_config(*, path: PathExists) -> None:
     help="Embed a data file into the built binary. Syntax: DATA_FILE_PATH=IMPORT_PATH. "
     "Adds a --include-package-data flag to Nuitka for the given file. Repeatable.",
 )
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    default=False,
+    help="Disable Nuitka's build cache, forcing a full rebuild.",
+)
 @wrap_smelt_errors()
 def build_standalone_binary(
     package_path: PathExists,
@@ -268,6 +274,7 @@ def build_standalone_binary(
     report: str | None,
     entrypoint: str | None,
     embed_files: tuple[tuple[PathExists, ImportPath], ...],
+    no_cache: bool,
 ) -> None:
     levelno = logging._nameToLevel[logging_level]
     logging.basicConfig(level=levelno)
@@ -287,6 +294,7 @@ def build_standalone_binary(
             path_solver=path_solver,
             entrypoint=entrypoint,
             embed_files=embed_files,
+            no_cache=no_cache,
         )
     finally:
         if config.report_path is not None:
