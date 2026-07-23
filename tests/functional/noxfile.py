@@ -39,7 +39,7 @@ class PackageConfig:
         Generates the `pyproject.toml` content based
         on the defined extensions types.
         """
-        sections: list[str] = [PYPROJECT_TEMPLATE]
+        sections: list[str] = [PYPROJECT_TEMPLATE, SMELT_HEADER_SECTION]
         if self.has_nuitka:
             sections.append(SMELT_NUITKA_SECTION)
         if self.has_mypyc:
@@ -84,9 +84,14 @@ compute-fib = "{project_name}.cli:compute_fib"
 packages = ["src/{project_name}"]
 """
 
+SMELT_HEADER_SECTION = """\
+[tool.hatch.build.hooks.smelt.packages_location]
+"{project_name}" = "src/{project_name}"
+"""
+
 SMELT_NUITKA_SECTION = """\
-[tool.hatch.build.hooks.smelt]
-entrypoint = "{project_name}.cli"
+[[tool.hatch.build.hooks.smelt.nuitka_modules]]
+import_path = "{project_name}.cli"
 """
 
 SMELT_CYTHON_SECTION = """\
