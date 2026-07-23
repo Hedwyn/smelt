@@ -627,6 +627,7 @@ def run_backend(
                     extra_flags=entrypoint_options.get("extra_flags", []),
                     extra_search_paths=extra_search_paths,
                     output_name=func_name if sep else None,
+                    no_zig=entrypoint_options.get("no_zig", False),
                 )
 
     return built_artifacts

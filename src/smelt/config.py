@@ -221,6 +221,7 @@ EntrypointOptions = TypedDict(
         "include-package": list[str],
         "include-package-data": list[str],
         "extra_flags": list[str],
+        "no_zig": bool,
     },
     total=False,
 )

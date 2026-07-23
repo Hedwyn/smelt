@@ -623,6 +623,7 @@ def compile_with_nuitka(
     extra_flags: Iterable[str] | None = None,
     extra_search_paths: Iterable[str] | None = None,
     output_name: str | None = None,
+    no_zig: bool = False,
 ) -> str:
     """
     Compiles the module given by `path`.
@@ -717,7 +718,7 @@ def compile_with_nuitka(
             [*search_roots, existing] if existing else search_roots,
         )
 
-    if platform.system() == "Windows" and "CC" not in os.environ:
+    if not no_zig and platform.system() == "Windows" and "CC" not in os.environ:
         # This is the only step that invokes an actual C backend compiler, and Windows
         # has none by default. Nuitka's fallback is to download its own MinGW64 gcc, but
         # smelt uses Zig for every other compile step, so point it at our already-
