@@ -104,6 +104,27 @@ class CliExistingPath(ParamType):
         return path
 
 
+class CliEmbedFile(ParamType):
+    """
+    Parses `--embed-file` values of the form DATA_FILE_PATH=IMPORT_PATH.
+    """
+
+    name = "embed_file"
+
+    def convert(
+        self, value: str, param: Parameter | None, ctx: Context | None
+    ) -> tuple[PathExists, ImportPath]:
+        data_file_path, sep, import_path = value.partition("=")
+        if not sep:
+            self.fail(f"{value!r} is not of the form DATA_FILE_PATH=IMPORT_PATH", param, ctx)
+        if not is_valid_import_path(import_path):
+            self.fail(f"{import_path!r} is not a valid Python import path", param, ctx)
+        path = Path(data_file_path)
+        if not path_exists(path):
+            self.fail(f"{data_file_path!r} not found", param, ctx)
+        return path, import_path
+
+
 def wrap_smelt_errors(
     should_exist: bool = True,
     exit_code: int = 1,
@@ -232,12 +253,21 @@ def show_config(*, path: PathExists) -> None:
     "[project.scripts] (e.g. 'afpu'), or its 'module.path'/'module.path:func_name' key "
     "as declared in [tool.smelt.entrypoints]. Builds all configured entrypoints if omitted.",
 )
+@click.option(
+    "--embed-file",
+    "embed_files",
+    type=CliEmbedFile(),
+    multiple=True,
+    help="Embed a data file into the built binary. Syntax: DATA_FILE_PATH=IMPORT_PATH. "
+    "Adds a --include-package-data flag to Nuitka for the given file. Repeatable.",
+)
 @wrap_smelt_errors()
 def build_standalone_binary(
     package_path: PathExists,
     logging_level: str,
     report: str | None,
     entrypoint: str | None,
+    embed_files: tuple[tuple[PathExists, ImportPath], ...],
 ) -> None:
     levelno = logging._nameToLevel[logging_level]
     logging.basicConfig(level=levelno)
@@ -251,7 +281,13 @@ def build_standalone_binary(
     config.load_env()
     path_solver = config.get_path_solver(project_root=package_path)
     try:
-        run_backend(config, stdout="stdout", path_solver=path_solver, entrypoint=entrypoint)
+        run_backend(
+            config,
+            stdout="stdout",
+            path_solver=path_solver,
+            entrypoint=entrypoint,
+            embed_files=embed_files,
+        )
     finally:
         if config.report_path is not None:
             write_auto_mode_report(config.report_path)

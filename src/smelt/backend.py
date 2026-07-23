@@ -36,7 +36,12 @@ from smelt.explorer import (
     flatten_dependency_graph,
     has_local_source,
 )
-from smelt.nuitkaify import Stdout, compile_with_nuitka, nuitkaify_module, package_search_root
+from smelt.nuitkaify import (
+    Stdout,
+    compile_with_nuitka,
+    import_path_search_root,
+    nuitkaify_module,
+)
 from smelt.utils import (
     GenericExtension,
     ImportPath,
@@ -458,7 +463,8 @@ def run_backend(
     *,
     without_entrypoint: bool = False,
     entrypoint: str | None = None,
-) -> None:
+    embed_files: Iterable[tuple[Path, ImportPath]] | None = None,
+) -> list[Path]:
     """
     Runs the whole backend pipeline:
     * C extensions compilation
@@ -467,17 +473,27 @@ def run_backend(
 
     `entrypoint` restricts Nuitka compilation to a single one of
     `config.entrypoints` (by import path). If omitted, all of them are built.
+
+    `embed_files` are (data_file_path, import_path) pairs, each turned into a
+    Nuitka `--include-data-files=data_file_path=dest` flag (`dest` being
+    `import_path`, dotted-to-slash, joined with `data_file_path`'s filename),
+    applied to every entrypoint built in this run.
+
+    Returns the filesystem paths of every compiled artifact placed next to its
+    Python source (module + shared runtime .so/.pyd files), for callers (e.g. the
+    hatchling build hook) that need to force-include them in packaging.
     """
     local_platform = platform.system().lower()
     if (platforms := config.platforms) is not None and local_platform not in platforms:
         if stdout is None:
-            return
+            return []
         printer = _logger.info if stdout == "logger" else print
         printer(
             f"Running on {local_platform}, build hook is restricted to {platforms}, skipping extension building"
         )
-        return
+        return []
 
+    built_artifacts: list[Path] = []
     path_solver = path_solver or config.get_path_solver()
     # Starting with C extensions
     warnings.warn(
@@ -485,12 +501,14 @@ def run_backend(
         "compile C extensions"
     )
     for zig_mod in config.zig_modules:
-        compile_zig_module(
-            zig_mod.name,
-            zig_mod.folder,
-            zig_mod.import_path,
-            flags=zig_mod.flags,
-            path_solver=path_solver,
+        built_artifacts.append(
+            compile_zig_module(
+                zig_mod.name,
+                zig_mod.folder,
+                zig_mod.import_path,
+                flags=zig_mod.flags,
+                path_solver=path_solver,
+            )
         )
 
     for native_extension in config.c_extensions:
@@ -503,6 +521,7 @@ def run_backend(
         built_so_path = compile_extension(c_extension_path)
         so_final_path = parent_folder_path / os.path.basename(built_so_path)
         shutil.move(built_so_path, so_final_path)
+        built_artifacts.append(so_final_path)
 
     # Note: mypyc has a runtime shipped as a separate extension
     # this runtime should be named modname__mypy
@@ -512,8 +531,10 @@ def run_backend(
     collected_extensions: list[GenericExtension] = []
     built_mypyc_extensions = compile_mypyc_extensions(config.mypyc_modules, path_solver)
     for ext in built_mypyc_extensions:
+        built_artifacts.append(ext.get_dest_path())
         if ext.runtime:
             shared_runtime_extensions.add(ext.runtime.name)
+            built_artifacts.append(ext.get_runtime_dest_path())
     # cython extensions
     collected_extensions.extend(
         compile_cython_extensions(config.cython_modules, path_solver=path_solver)
@@ -523,6 +544,9 @@ def run_backend(
 
     for generic_ext in collected_extensions:
         _compile_and_place(generic_ext)
+        built_artifacts.append(generic_ext.get_dest_path())
+        if generic_ext.runtime:
+            built_artifacts.append(generic_ext.get_runtime_dest_path())
 
     # auto-discovered modules (see `config.auto_mode`), each compiled by trying
     # `config.backend_priority_order` in turn until one succeeds. Unlike pinned
@@ -538,10 +562,16 @@ def run_backend(
         except SmeltError as exc:
             _logger.warning("Skipping auto-discovered module %s: %s", import_path, exc)
             continue
+        built_artifacts.append(auto_ext.get_dest_path())
         if auto_ext.runtime:
             shared_runtime_extensions.add(auto_ext.runtime.name)
+            built_artifacts.append(auto_ext.get_runtime_dest_path())
 
     # nuitka entrypoint(s) compilation
+    embed_data_files = [
+        f"{data_file_path}={import_path.replace('.', '/')}/{data_file_path.name}"
+        for data_file_path, import_path in (embed_files or ())
+    ]
     without_entrypoint = without_entrypoint or not config.entrypoints
     if not without_entrypoint:
         entrypoints_to_build = list(config.entrypoints)
@@ -575,7 +605,17 @@ def run_backend(
                     if sep
                     else module_file
                 )
-                extra_search_paths = [str(package_search_root(module_file))] if sep else []
+                if sep:
+                    module_is_package = Path(module_file).name == "__init__.py"
+                    extra_search_paths = [
+                        str(
+                            import_path_search_root(
+                                module_path, module_file, is_package=module_is_package
+                            )
+                        )
+                    ]
+                else:
+                    extra_search_paths = []
                 compile_with_nuitka(
                     entrypoint_file,
                     stdout=stdout,
@@ -583,7 +623,10 @@ def run_backend(
                     | set(entrypoint_options.get("include-modules", [])),
                     include_packages=entrypoint_options.get("include-package", []),
                     include_package_data=entrypoint_options.get("include-package-data", []),
+                    include_data_files=embed_data_files,
                     extra_flags=entrypoint_options.get("extra_flags", []),
                     extra_search_paths=extra_search_paths,
                     output_name=func_name if sep else None,
                 )
+
+    return built_artifacts

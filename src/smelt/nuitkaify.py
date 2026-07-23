@@ -99,6 +99,31 @@ def _is_importable(module_name: str) -> bool:
         return False
 
 
+def _find_module_location(module_name: str) -> tuple[Path, bool] | None:
+    """
+    Resolves `module_name` via import machinery to `(location, is_package)`, or None if
+    unresolvable.
+
+    `location` is the package's own directory when `is_package`, otherwise the module's
+    file. Handles PEP 420 namespace packages: those have `spec.origin is None` and give
+    their directory via `spec.submodule_search_locations` instead.
+    """
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return None
+    if spec is None:
+        return None
+    if spec.origin is not None:
+        origin = Path(spec.origin)
+        return (origin.parent, True) if origin.name == "__init__.py" else (origin, False)
+    if spec.submodule_search_locations:
+        return Path(next(iter(spec.submodule_search_locations))), True
+    return None
+
+
 def _runtime_link_libraries(*extra: str) -> list[str]:
     """
     System libraries needed to link the Nuitka runtime/module shared objects.
@@ -556,23 +581,35 @@ unsigned CONST_CONSTANT char *getConstantBlobData(void) {{
     (Path(build_folder) / "__constants_data.c").write_text(contents)
 
 
-def package_search_root(script_path: str | Path) -> Path:
+def import_path_search_root(import_path: str, location: str | Path, *, is_package: bool) -> Path:
     """
-    Walks up from `script_path` through parent directories containing an
-    `__init__.py`, returning the first ancestor without one.
+    Returns the ancestor directory that must be on `sys.path` for `location` to be
+    importable as the dotted `import_path`.
 
-    That ancestor is the directory that must be on `sys.path` for the script's
-    own package to be importable by dotted name. Nuitka infers this itself
-    while following imports from the entry script, but resolves an explicit
-    `--include-module=<dotted name>` (e.g. a mypyc runtime extension, never
-    actually `import`-ed anywhere) via plain `sys.path`/`PYTHONPATH` lookup
-    instead, so that directory has to be added to the subprocess environment
-    for such names to resolve.
+    That directory has to be added to the subprocess environment for an explicit
+    `--include-module=<dotted name>` (e.g. a mypyc runtime extension, never actually
+    `import`-ed anywhere) to resolve: Nuitka infers this itself while following imports
+    from the entry script, but resolves such names via plain `sys.path`/`PYTHONPATH`
+    lookup instead.
+
+    Derived purely from the number of dotted segments in `import_path` (climbing that
+    many parents from `location`, one fewer when `location` is a plain module file
+    rather than a package directory) -- never by walking parents looking for
+    `__init__.py`. That used to be how this was computed, and breaks for PEP 420
+    namespace packages: a namespace package has no `__init__.py`, so the walk stopped
+    climbing at the first namespace-package ancestor, computing a root nested one or
+    more levels too deep inside the real one (or, if the whole hierarchy above
+    `location` is a namespace package, not climbing at all).
     """
-    current = Path(script_path).resolve().parent
-    while (current / "__init__.py").exists():
-        current = current.parent
-    return current
+    resolved = Path(location).resolve()
+    if is_package and resolved.name == "__init__.py":
+        # Accept either the package's own directory or its `__init__.py` file.
+        resolved = resolved.parent
+    root = resolved if is_package else resolved.parent
+    ascend = len(import_path.split(".")) - (0 if is_package else 1)
+    for _ in range(ascend):
+        root = root.parent
+    return root
 
 
 def compile_with_nuitka(
@@ -582,6 +619,7 @@ def compile_with_nuitka(
     include_modules: Iterable[str] | None = None,
     include_packages: Iterable[str] | None = None,
     include_package_data: Iterable[str] | None = None,
+    include_data_files: Iterable[str] | None = None,
     extra_flags: Iterable[str] | None = None,
     extra_search_paths: Iterable[str] | None = None,
     output_name: str | None = None,
@@ -592,8 +630,10 @@ def compile_with_nuitka(
 
     `extra_search_paths` is added to the subprocess's `PYTHONPATH` verbatim, for callers
     whose `path` isn't itself located inside the package it imports (e.g. a codegen'd
-    entrypoint script sitting in a scratch directory) -- `package_search_root(path)`
-    would otherwise compute a meaningless root from that scratch directory.
+    entrypoint script sitting in a scratch directory) -- needed so Nuitka's own
+    `--follow-imports` can resolve `path`'s import of the real entrypoint module. This is
+    unrelated to `include_modules`/`include_packages`, which (see below) resolve their
+    own search root independently via import machinery.
 
     `output_name` names the produced binary, overriding the default of reusing `path`'s
     basename -- useful when `path` was itself renamed to something other than the
@@ -641,6 +681,10 @@ def compile_with_nuitka(
         for package in include_package_data:
             cmd.append(f"--include-package-data={package}")
 
+    if include_data_files:
+        for entry in include_data_files:
+            cmd.append(f"--include-data-files={entry}")
+
     if extra_flags:
         cmd.extend(extra_flags)
 
@@ -653,8 +697,18 @@ def compile_with_nuitka(
         # `--include-module`/`--include-package` name modules that are never actually
         # `import`-ed anywhere (e.g. a mypyc runtime extension), so Nuitka can't infer
         # their location the way it does for followed imports; it resolves them via
-        # plain `sys.path` lookup instead, which needs the script's own package root.
-        search_roots = [str(package_search_root(path))]
+        # plain `sys.path` lookup instead. Each name's own root is resolved
+        # independently via import machinery (see `import_path_search_root`), rather
+        # than assumed to share `path`'s root.
+        search_roots = []
+        for mod in {*(include_modules or ()), *(include_packages or ())}:
+            location = _find_module_location(mod)
+            if location is None:
+                continue
+            resolved_path, is_package = location
+            root = str(import_path_search_root(mod, resolved_path, is_package=is_package))
+            if root not in search_roots:
+                search_roots.append(root)
     else:
         search_roots = []
     if search_roots:
