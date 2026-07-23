@@ -11,6 +11,7 @@ from dataclasses import fields
 from functools import cached_property
 from importlib import metadata as importlib_metadata
 from importlib.util import find_spec
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
@@ -171,7 +172,7 @@ class HatchlingBuildHook(BuildHookInterface):
         config.c_extensions = self._filter_modules_by_extras(config.c_extensions)
         config.zig_modules = self._filter_modules_by_extras(config.zig_modules)
         try:
-            run_backend(
+            built_artifacts = run_backend(
                 config,
                 strategy=ModpathType.FS,
                 without_entrypoint=True,
@@ -182,6 +183,23 @@ class HatchlingBuildHook(BuildHookInterface):
         finally:
             if config.report_path is not None:
                 write_auto_mode_report(config.report_path)
+
+        if built_artifacts:
+            # Hatchling's default global exclude (`*.py[cdo]`, meant for stray .pyc/.pyo
+            # bytecode) also matches Windows' native-extension suffix `.pyd`, silently
+            # dropping compiled modules from non-editable wheels on that platform. Force
+            # them in as build artifacts, which bypasses that exclude, and mark the wheel
+            # as platform-specific since it now ships compiled native code.
+            root = Path(self.root)
+            artifacts = build_data["artifacts"]
+            assert isinstance(artifacts, list), (
+                "hatchling always seeds build_data['artifacts'] as a list before calling hooks"
+            )
+            for artifact_path in built_artifacts:
+                relative_path = artifact_path.resolve().relative_to(root).as_posix()
+                artifacts.append(f"/{relative_path}")
+            build_data["pure_python"] = False
+            build_data["infer_tag"] = True
 
 
 @hookimpl
