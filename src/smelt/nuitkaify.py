@@ -236,16 +236,22 @@ def iterate_nuitka_module_sources(build_folder: str) -> Iterator[Path]:
 NUITKA_MODULE_STATIC_SOURCES: Final[tuple[str, ...]] = ("CompiledFunctionType.c",)
 
 
-def provide_nuitka_static_sources(build_folder: str) -> None:
+def provide_nuitka_static_sources(
+    build_folder: str,
+    sources: Iterable[str] = NUITKA_MODULE_STATIC_SOURCES,
+) -> None:
     """
     Copies the static runtime C sources that `--generate-c-only` omits into the build
     folder's `static_src`. Used by the standalone build path, which compiles the runtime
-    straight into the module `.so`.
+    straight into the module (or, for other artifact kinds, executable) `.so`.
+
+    `sources` defaults to the module-mode list; other artifact kinds (e.g. an
+    executable, which also needs `MainProgram.c`) pass their own.
     """
     src_dir = _nuitka_root() / "build" / "static_src"
     dst_dir = Path(build_folder) / "static_src"
     dst_dir.mkdir(parents=True, exist_ok=True)
-    for filename in NUITKA_MODULE_STATIC_SOURCES:
+    for filename in sources:
         shutil.copyfile(src_dir / filename, dst_dir / filename)
 
 
@@ -721,12 +727,14 @@ def compile_with_nuitka(
             [*search_roots, existing] if existing else search_roots,
         )
 
-    if not no_zig and platform.system() == "Windows" and "CC" not in os.environ:
-        # This is the only step that invokes an actual C backend compiler, and Windows
-        # has none by default. Nuitka's fallback is to download its own MinGW64 gcc, but
-        # smelt uses Zig for every other compile step, so point it at our already-
-        # installed Zig instead: Nuitka's Scons backend recognizes a `CC` binary named
-        # "zig" and drives it correctly (`zig cc ...`), no Nuitka-version-specific flag
+    if not no_zig and "CC" not in os.environ:
+        # This is the only step that invokes an actual C backend compiler. On Windows
+        # there is none by default, and Nuitka's fallback is to download its own
+        # MinGW64 gcc; on Linux Nuitka falls back to the system gcc/clang, which may
+        # not be present or may link against system dynlibs. smelt uses Zig for every
+        # other compile step, so point it at our already-installed Zig instead on
+        # every platform: Nuitka's Scons backend recognizes a `CC` binary named "zig"
+        # and drives it correctly (`zig cc ...`), no Nuitka-version-specific flag
         # (like the newer `--zig`) required.
         zig_path = _bundled_zig_path()
         if zig_path is not None:

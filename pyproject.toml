@@ -25,11 +25,15 @@ cli = ["click"]
 # bundling a known-good build keeps smelt self-contained rather than relying on the
 # host distro's version. Capped below 0.18 because Nuitka blacklists patchelf 0.18.0
 # (a buggy upstream release); the 0.17.2.x line is the current good stable series.
-nuitka = ["nuitka", "patchelf>=0.17.2,<0.18; sys_platform == 'linux'"]
+# nuitka: capped below 4.2 -- smelt's shared-runtime build (nuitkaify.py) patches
+# Nuitka's generated `HelpersConstantsBlob.c`/`constants_blob.h` by exact source-text
+# match; Nuitka 4.2 changed `loadConstantsBlob`'s signature (return type and the blob
+# symbol naming), breaking that match. Raise the cap once the patch is updated for it.
+nuitka = ["nuitka<4.2", "patchelf>=0.17.2,<0.18; sys_platform == 'linux'"]
 cython = ["Cython"]
 build = [
   "Cython",
-  "nuitka[onefile]",
+  "nuitka[onefile]<4.2",
   "patchelf>=0.17.2,<0.18; sys_platform == 'linux'",
   "mypy[mypyc]",
   "hatchling",

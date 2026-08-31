@@ -69,7 +69,10 @@ def {fib_name}(n: int) -> int:
 
 PYPROJECT_TEMPLATE = """\
 [build-system]
-requires = ["hatchling", "smelt", "mypy[mypyc]", "Cython", "Nuitka"]
+# Nuitka capped below 4.2: see the matching cap/comment in smelt's own pyproject.toml
+# -- smelt's shared-runtime build patches Nuitka-generated C by exact source match,
+# and 4.2 changed the `loadConstantsBlob` signature that patch targets.
+requires = ["hatchling", "smelt", "mypy[mypyc]", "Cython", "Nuitka<4.2"]
 build-backend = "hatchling.build"
 
 [project]

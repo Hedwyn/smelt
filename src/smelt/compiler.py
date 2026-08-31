@@ -316,6 +316,61 @@ def python_import_library_link_args() -> tuple[list[str], list[str]]:
     )
 
 
+def python_embed_library_link_args() -> tuple[list[str], list[str]]:
+    """
+    Extra `library_dirs`/`libraries` needed to link libpython into an executable that
+    embeds the interpreter.
+
+    Unlike an extension module -- loaded *by* an already-running interpreter, which
+    resolves the Python C-API against it (see `python_import_library_link_args`) -- an
+    embedding executable is the one starting the interpreter, so it must link against
+    libpython explicitly on every platform, not just Windows.
+    """
+    if platform.system() == "Windows":
+        return python_import_library_link_args()
+    libdir = sysconfig.get_config_var("LIBDIR")
+    ldversion = sysconfig.get_config_var("LDVERSION") or sysconfig.get_config_var("VERSION")
+    assert ldversion is not None, "sysconfig did not report a Python version to link against"
+    return ([libdir] if libdir is not None else []), [f"python{ldversion}"]
+
+
+def _compile_extension_sources(
+    compiler: Compiler,
+    extension_obj: Extension,
+    include_dirs: list[str],
+    crosscompile: SupportedPlatforms | None,
+    build_folder: str,
+) -> tuple[list[str], list[str]]:
+    """
+    Compiles `extension_obj`'s sources into `build_folder`, returning the produced
+    object files alongside the `extra_preargs` (the crosscompile `--target`, if any)
+    the caller must also pass to its own link step.
+
+    Shared by `compile_extension` and `compile_executable`: both compile the same way
+    and only differ in how the resulting objects are linked.
+    """
+    extra_preargs: list[str] = []
+    if crosscompile is not None:
+        # TODO: generate/obtain pyconfig.h for the target platform
+        warnings.warn(
+            "Support for cross-compiling is experimental.\n"
+            "Do not assume stability from the built artifacts"
+        )
+        extra_preargs.append(f"--target={crosscompile.value}")
+        # adding pyconfig
+        include_dirs.append(PYCONFIG_PATH)
+
+    objects = compiler.compile(
+        sources=extension_obj.sources,
+        output_dir=build_folder,
+        include_dirs=include_dirs + extension_obj.include_dirs,
+        extra_preargs=extra_preargs,
+        extra_postargs=sanity_msvc_flags(extension_obj.extra_compile_args or []),
+        macros=extension_obj.define_macros,
+    )
+    return objects, extra_preargs
+
+
 def compile_extension(
     extension: Path | str | Extension,
     compiler: Compiler | None = None,
@@ -375,16 +430,7 @@ def compile_extension(
         ext_name = extension.name
 
     # Compile the C file
-    extra_preargs: list[str] = []
     if crosscompile is not None:
-        # TODO: generate/obtain pyconfig.h for the target platform
-        warnings.warn(
-            "Support for cross-compiling is experimental.\n"
-            "Do not assume stability from the built artifacts"
-        )
-        extra_preargs.append(f"--target={crosscompile.value}")
-        # adding pyconfig
-        include_dirs.append(PYCONFIG_PATH)
         so_suffix = get_extension_suffix(crosscompile.get_triple_name())
     else:
         so_suffix = sysconfig.get_config_var("EXT_SUFFIX")
@@ -392,13 +438,8 @@ def compile_extension(
     with tempfile.TemporaryDirectory() as build_folder:
         # TODO: investigate the pure setuptools alternative
         # as the distutils compiler is deprecated
-        objects = compiler.compile(
-            sources=extension_obj.sources,
-            output_dir=build_folder,
-            include_dirs=include_dirs + extension_obj.include_dirs,
-            extra_preargs=extra_preargs,
-            extra_postargs=sanity_msvc_flags(extension_obj.extra_compile_args or []),
-            macros=extension_obj.define_macros,
+        objects, extra_preargs = _compile_extension_sources(
+            compiler, extension_obj, include_dirs, crosscompile, build_folder
         )
 
         # Link it into a shared object
@@ -420,3 +461,75 @@ def compile_extension(
             zig_build_lib(extension.name, objects, crosscompile=crosscompile)
     so_path = os.path.join(output_dir, ext_name)
     return assert_path_exists(so_path)
+
+
+def compile_executable(
+    extension: Path | str | Extension,
+    compiler: Compiler | None = None,
+    dest_folder: PathLike[str] | None = None,
+    crosscompile: SupportedPlatforms | None = None,
+) -> PathExists:
+    """
+    Standalone function compiling a low-level source (C, C++ or Zig) into a native,
+    Python-embedding executable -- the executable counterpart of `compile_extension`.
+
+    Parameters
+    ----------
+    extension: Path | str | Extension
+        Path to the source file to compile,
+        or a pre-built Extension object
+
+    compiler: Compiler | None
+        The compiler to use,
+        spawns a ZigCompiler if omitted
+
+    dest_folder: PathLike[str]
+        The folder in which to place the built executable.
+        Defaults to cwd.
+    """
+    compiler = compiler or ZigCompiler()
+    include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
+    embed_library_dirs, embed_libraries = python_embed_library_link_args()
+
+    if isinstance(extension, (str, Path)):
+        if not os.path.exists(extension):
+            raise FileNotFoundError(f"Extension does not exists: {extension}")
+
+        extension = Path(extension)
+        if extension.suffix not in compiler.src_extensions:
+            raise ValueError(
+                f"Unsupported extension: {extension.suffix} "
+                f"Supported values: {','.join(compiler.src_extensions)}"
+            )
+        extension_obj = Extension(
+            name=extension.name.replace(extension.suffix, ""),
+            sources=[
+                str(extension),
+            ],
+        )
+    else:
+        extension_obj = extension
+
+    exe_suffix = sysconfig.get_config_var("EXE") or (
+        ".exe" if platform.system() == "Windows" else ""
+    )
+
+    with tempfile.TemporaryDirectory() as build_folder:
+        objects, extra_preargs = _compile_extension_sources(
+            compiler, extension_obj, include_dirs, crosscompile, build_folder
+        )
+
+        exe_name = extension_obj.name + exe_suffix
+        output_dir = dest_folder or "."
+
+        compiler.link_executable(
+            objects,
+            exe_name,
+            output_dir=str(output_dir),
+            libraries=extension_obj.libraries + embed_libraries,
+            library_dirs=extension_obj.library_dirs + embed_library_dirs,
+            runtime_library_dirs=extension_obj.runtime_library_dirs,
+            extra_preargs=extra_preargs,
+        )
+    exe_path = os.path.join(output_dir, exe_name)
+    return assert_path_exists(exe_path)
