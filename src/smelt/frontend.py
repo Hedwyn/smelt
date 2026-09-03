@@ -39,6 +39,7 @@ from smelt.config import (
     toml_get_nested_section,
 )
 from smelt.context import enable_global_context, get_context
+from smelt.dist import build_dist, run_instructions
 from smelt.utils import (
     ImportPath,
     PathExists,
@@ -303,6 +304,91 @@ def build_standalone_binary(
         global_context = get_context()
         assert global_context is not None
         Path(report).write_text(global_context.render())
+
+
+@smelt.command("build-dist")
+@click.option(
+    "-p",
+    "--package-path",
+    default=".",
+    type=CliExistingPath(),
+    help="Path to the package to build a distribution for, expects to find a pyproject.toml",
+)
+@click.option(
+    "-e",
+    "--entrypoint",
+    type=str,
+    default=None,
+    help="Entrypoint to build the distribution for: either its script name as declared "
+    "in [project.scripts] (e.g. 'afpu'), or its 'module.path'/'module.path:func_name' "
+    "key as declared in [tool.smelt.entrypoints]. Can be omitted when the project "
+    "declares a single entrypoint.",
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("dist"),
+    help="Folder the distribution is assembled in. Defaults to ./dist",
+)
+@click.option(
+    "--optimize",
+    type=click.IntRange(0, 2),
+    default=None,
+    help="Bytecode optimization level (0, 1 or 2). Defaults to the level this "
+    "interpreter runs with. Note that 2 strips docstrings, which breaks help(), pydoc, "
+    "doctests, and any library building its own help text from docstrings.",
+)
+@click.option(
+    "--no-build",
+    is_flag=True,
+    default=False,
+    help="Skip the extension build and reuse whatever artifacts are already on disk.",
+)
+@add_logging_option
+@click.option("-r", "--report", type=str, default=None, help="Produces a report at the given path")
+@wrap_smelt_errors()
+def build_dist_folder(
+    package_path: PathExists,
+    entrypoint: str | None,
+    output_dir: Path,
+    optimize: int | None,
+    no_build: bool,
+    logging_level: str,
+    report: str | None,
+) -> None:
+    """
+    Assembles a distribution folder for an entrypoint: smelt-built extensions plus
+    every other module it imports, shipped as bytecode.
+
+    The result runs on any machine with a matching CPython already installed -- the
+    interpreter itself is not bundled. Instructions are printed at the end of the run
+    and written into the folder.
+    """
+    levelno = logging._nameToLevel[logging_level]
+    logging.basicConfig(level=levelno)
+    try:
+        with (package_path / "pyproject.toml").open("rb") as f:
+            toml_data = tomllib.load(f)
+    except FileNotFoundError:
+        error_exit("No pyproject.toml found in passed folder")
+    config = parse_config_from_pyproject(toml_data, project_root=package_path)
+    config.load_env()
+    path_solver = config.get_path_solver(project_root=package_path)
+    dist_report = build_dist(
+        config,
+        entrypoint=entrypoint,
+        output_dir=output_dir,
+        path_solver=path_solver,
+        optimize=-1 if optimize is None else optimize,
+        stdout="stdout",
+        build_extensions=not no_build,
+    )
+    click.echo(dist_report.render())
+    click.echo("")
+    click.echo(run_instructions(dist_report))
+    if report is not None:
+        Path(report).write_text(dist_report.render())
 
 
 @smelt.command()

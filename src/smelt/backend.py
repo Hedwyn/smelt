@@ -37,6 +37,7 @@ from smelt.explorer import (
     has_local_source,
 )
 from smelt.nuitkaify import (
+    RUNTIME_LIB_NAME,
     Stdout,
     compile_with_nuitka,
     import_path_search_root,
@@ -372,23 +373,20 @@ def discover_external_mypyc_runtimes() -> set[str]:
     return found
 
 
-def clean_all_artifacts(
+def artifact_target_folders(
     config: SmeltConfig,
     path_solver: PathSolver,
     *,
     shadowed_only: bool = False,
-) -> dict[ImportPath, list[Path]]:
+) -> dict[ImportPath, Path]:
     """
-    Deletes every built dynlib for `config`'s modules (including mypyc's shared
-    runtime, where applicable), "unshadowing" their `.py` counterpart back to
-    being the one Python imports.
+    The folder each of `config`'s modules has (or would have) its built dynlib placed
+    in, i.e. the folder holding that module's own source.
 
-    `shadowed_only` restricts cleaning to modules with a pure-Python fallback
-    to unshadow (mypyc/cython/nuitka-backed modules, pinned or auto-discovered),
-    excluding handwritten C/Zig extensions that have no `.py` counterpart.
+    `shadowed_only` restricts the result to modules with a pure-Python fallback
+    (mypyc/cython/nuitka-backed, pinned or auto-discovered), excluding handwritten
+    C/Zig extensions that have no `.py` counterpart.
     """
-    suffix = sysconfig.get_config_var("EXT_SUFFIX")
-
     targets: dict[ImportPath, Path] = {}
     for module in (*config.mypyc_modules, *config.cython_modules, *config.nuitka_modules):
         source = module.source or path_solver.resolve_import_path(
@@ -408,6 +406,63 @@ def clean_all_artifacts(
             targets[zig_mod.import_path] = path_solver.resolve_import_path(
                 zig_mod.import_path, should_exist=False
             ).parent
+    return targets
+
+
+def collect_built_artifacts(
+    config: SmeltConfig,
+    path_solver: PathSolver,
+) -> dict[ImportPath, list[Path]]:
+    """
+    Finds, for every module `config` declares (or `auto_mode` discovers), the built
+    artifacts currently sitting next to its source: the module's own dynlib, plus the
+    shared runtimes it needs at load time where applicable.
+
+    Only artifacts that actually exist on disk are reported, so this describes what a
+    build produced rather than what it was asked to produce -- `auto_mode` in
+    particular is allowed to give up on individual modules.
+
+    Both shared runtimes are included, and both must keep the package-relative
+    position they have here: mypyc's is imported under the module's own package
+    (`pkg.mod__mypyc`), and smelt's shared Nuitka runtime is resolved through an
+    `$ORIGIN` rpath, i.e. from the directory of the `.so` that needs it.
+    """
+    suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    nuitka_runtime_name = f"lib{RUNTIME_LIB_NAME}.so"
+    targets = artifact_target_folders(config, path_solver)
+
+    built: dict[ImportPath, list[Path]] = {}
+    for import_path in sorted(targets):
+        dest_folder = targets[import_path]
+        module_name = get_module_name(import_path)
+        candidates = (
+            dest_folder / f"{module_name}{suffix}",
+            dest_folder / f"{module_name}__mypyc{suffix}",
+            dest_folder / nuitka_runtime_name,
+        )
+        found = [artifact for artifact in candidates if path_exists(artifact)]
+        if found:
+            built[import_path] = found
+    return built
+
+
+def clean_all_artifacts(
+    config: SmeltConfig,
+    path_solver: PathSolver,
+    *,
+    shadowed_only: bool = False,
+) -> dict[ImportPath, list[Path]]:
+    """
+    Deletes every built dynlib for `config`'s modules (including mypyc's shared
+    runtime, where applicable), "unshadowing" their `.py` counterpart back to
+    being the one Python imports.
+
+    `shadowed_only` restricts cleaning to modules with a pure-Python fallback
+    to unshadow (mypyc/cython/nuitka-backed modules, pinned or auto-discovered),
+    excluding handwritten C/Zig extensions that have no `.py` counterpart.
+    """
+    suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    targets = artifact_target_folders(config, path_solver, shadowed_only=shadowed_only)
 
     deleted: dict[ImportPath, list[Path]] = {}
     for import_path in sorted(targets):
