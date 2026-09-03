@@ -9,8 +9,11 @@ and explores the module dependency graph reachable from a given entrypoint.
 from __future__ import annotations
 
 import ast
+import importlib.machinery
 import importlib.util
+import sys
 from collections.abc import Iterator
+from enum import StrEnum
 from importlib.metadata import Distribution
 from pathlib import Path
 from typing import NamedTuple
@@ -100,22 +103,156 @@ def _resolve_relative_import(
     return assert_is_valid_import_path(candidate)
 
 
+class ModuleKind(StrEnum):
+    """
+    What a resolved import path actually *is*, which decides what a distribution has
+    to do with it.
+
+    The graph walk only ever follows `SOURCE` (nothing else has Python source to
+    parse), but a distribution needs every case named: an `EXTENSION` has to be
+    copied and have its own native dependencies resolved, a `NAMESPACE` package is a
+    directory with no `__init__` at all, and `BUILTIN`/`FROZEN` modules live inside
+    the interpreter with no file to ship.
+    """
+
+    SOURCE = "source"
+    EXTENSION = "extension"
+    NAMESPACE = "namespace"
+    BUILTIN = "builtin"
+    FROZEN = "frozen"
+    MISSING = "missing"
+
+
+class ResolvedModule(NamedTuple):
+    """
+    An import path resolved against the import machinery.
+
+    `origin` is the file backing the module, and is None exactly for the kinds that
+    have no file (namespace packages, builtins, frozen modules, and anything that
+    failed to resolve).
+
+    `shadowed_source` is the `.py` file an `EXTENSION` module was built from, when one
+    still sits next to it. That is smelt's normal steady state rather than an oddity:
+    every backend drops its `.so` next to the source it compiled, and an extension
+    module wins over a source module on import -- so once a module has been built,
+    the import machinery only ever reports the `.so`.
+    """
+
+    import_path: ImportPath
+    kind: ModuleKind
+    origin: PathExists | None
+    is_package: bool
+    is_stdlib: bool
+    shadowed_source: PathExists | None = None
+
+    @property
+    def has_file(self) -> bool:
+        """
+        Whether this module is backed by a file that can be copied or compiled.
+        """
+        return self.origin is not None
+
+    @property
+    def parsable_source(self) -> PathExists | None:
+        """
+        The Python source to read this module's own imports from, if any.
+
+        A built module resolves to its `.so`, whose imports can only be read from the
+        source it was compiled from -- so a dependency walk that stopped at the first
+        compiled module would see nothing beyond it.
+        """
+        if self.kind == ModuleKind.SOURCE:
+            return self.origin
+        return self.shadowed_source
+
+
+def _is_extension_origin(origin: str) -> bool:
+    """
+    Whether `origin` names a native extension module, i.e. carries one of the
+    suffixes the import machinery `dlopen`s (`.so`, `.abi3.so`,
+    `.cpython-312-x86_64-linux-gnu.so`, `.pyd`, ...).
+    """
+    return origin.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES))
+
+
+def _find_shadowed_source(origin: PathExists, *, is_package: bool) -> PathExists | None:
+    """
+    The `.py` file sitting next to the extension module at `origin`, i.e. the source it
+    was compiled from, if it is still there.
+
+    Matched on the extension's own name up to its first dot, which is how every smelt
+    backend names what it produces (`fib.py` -> `fib.cpython-312-x86_64-linux-gnu.so`).
+    """
+    stem = origin.name.split(".")[0]
+    candidate = origin.parent / ("__init__.py" if is_package else f"{stem}.py")
+    return candidate if path_exists(candidate) else None
+
+
+def resolve_module(import_path: ImportPath) -> ResolvedModule:
+    """
+    Resolves `import_path` against the import machinery and classifies it.
+
+    Never raises: an import path that cannot be resolved (not installed, an import
+    error while importing its parent package, ...) comes back as
+    `ModuleKind.MISSING` rather than an exception, since discovery routinely
+    proposes names that are not resolvable in this environment (a soft dependency,
+    a platform-specific import, a typo in a string-literal import).
+    """
+    is_stdlib = import_path.partition(".")[0] in sys.stdlib_module_names
+    try:
+        spec = importlib.util.find_spec(import_path)
+    except (ImportError, ValueError, AttributeError, TypeError):
+        # ImportError/ValueError: unresolvable or invalid name. AttributeError and
+        # TypeError come from third-party packages with an exotic `__path__` or a
+        # custom meta-path finder, and are just as much "cannot resolve this" as the
+        # other two -- letting them out would abort a whole build over one module.
+        spec = None
+    if spec is None:
+        return ResolvedModule(import_path, ModuleKind.MISSING, None, False, is_stdlib)
+
+    is_package = spec.submodule_search_locations is not None
+    origin = spec.origin
+    if origin is None or origin == "namespace":
+        # PEP 420: a namespace package has no single origin (it may be spread over
+        # several roots), which is precisely what makes it a namespace package.
+        kind = ModuleKind.NAMESPACE if is_package else ModuleKind.MISSING
+        return ResolvedModule(import_path, kind, None, is_package, is_stdlib)
+    if origin == "built-in":
+        return ResolvedModule(import_path, ModuleKind.BUILTIN, None, is_package, is_stdlib)
+    if origin == "frozen":
+        return ResolvedModule(import_path, ModuleKind.FROZEN, None, is_package, is_stdlib)
+
+    path = Path(origin)
+    if not path_exists(path):
+        return ResolvedModule(import_path, ModuleKind.MISSING, None, is_package, is_stdlib)
+    if path.suffix == ".py":
+        kind = ModuleKind.SOURCE
+    elif _is_extension_origin(origin):
+        return ResolvedModule(
+            import_path,
+            ModuleKind.EXTENSION,
+            path,
+            is_package,
+            is_stdlib,
+            shadowed_source=_find_shadowed_source(path, is_package=is_package),
+        )
+    else:
+        # e.g. an already-sourceless `.pyc`, or a module provided by a custom loader
+        # from some other file format: nothing this codebase knows how to handle.
+        kind = ModuleKind.MISSING
+    return ResolvedModule(import_path, kind, path, is_package, is_stdlib)
+
+
 def _resolve_module_path(import_path: ImportPath) -> tuple[PathExists, bool] | None:
     """
     Locates the source file of `import_path`, along with whether it is a package.
     Returns None if `import_path` cannot be resolved to a `.py` source file
     (e.g. builtin, frozen, C extension, or namespace package).
     """
-    try:
-        spec = importlib.util.find_spec(import_path)
-    except (ImportError, ValueError):
+    resolved = resolve_module(import_path)
+    if resolved.kind != ModuleKind.SOURCE or resolved.origin is None:
         return None
-    if spec is None or spec.origin is None:
-        return None
-    path = Path(spec.origin)
-    if not path_exists(path) or path.suffix != ".py":
-        return None
-    return path, spec.submodule_search_locations is not None
+    return resolved.origin, resolved.is_package
 
 
 def find_modules_under_root(import_path: ImportPath, root: PathExists) -> set[ImportPath]:
@@ -175,10 +312,14 @@ def _walk_module(node: Node, registry: dict[ImportPath, Node], visited: set[Impo
         return
     visited.add(node.name)
 
-    resolved = _resolve_module_path(node.name)
-    if resolved is None:
+    # Deliberately not `_resolve_module_path`: the walk follows a built module through
+    # to the source it was compiled from (`parsable_source`), so that compiling a
+    # module does not truncate the dependency graph at it.
+    module = resolve_module(node.name)
+    path = module.parsable_source
+    if path is None:
         return
-    path, is_package = resolved
+    is_package = module.is_package
 
     try:
         raw_imports = list(_iter_raw_imports(path.read_text()))
