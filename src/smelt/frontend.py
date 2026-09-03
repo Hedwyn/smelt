@@ -346,6 +346,30 @@ def build_standalone_binary(
     help="Skip the extension build and reuse whatever artifacts are already on disk.",
 )
 @click.option(
+    "--discovery",
+    type=click.Choice(["static", "trace", "both"]),
+    default=None,
+    help="How to find the modules to ship. 'static' reads import statements, 'trace' "
+    "imports the entrypoint in a subprocess and reports what it actually loaded "
+    "(which executes its module-level code), 'both' unions them. Defaults to the "
+    "entrypoint's own declaration, then to 'both'.",
+)
+@click.option(
+    "--exclude-module",
+    "exclude_modules",
+    multiple=True,
+    help="Drop a module, and everything under it, from the distribution. For trees "
+    "discovery reached but that are not needed at runtime. Repeatable.",
+)
+@click.option(
+    "--include-distribution-metadata",
+    "include_distribution_metadata",
+    multiple=True,
+    help="Collect a distribution's *.dist-info metadata beyond those owning a shipped "
+    "module. Needed when importlib.metadata is queried for a package whose modules are "
+    "not themselves shipped. Repeatable.",
+)
+@click.option(
     "--include-module",
     "include_modules",
     multiple=True,
@@ -377,6 +401,9 @@ def build_dist_folder(
     output_dir: Path,
     optimize: int | None,
     no_build: bool,
+    discovery: Literal["static", "trace", "both"] | None,
+    exclude_modules: tuple[str, ...],
+    include_distribution_metadata: tuple[str, ...],
     include_modules: tuple[str, ...],
     include_packages: tuple[str, ...],
     include_package_data: tuple[str, ...],
@@ -409,6 +436,9 @@ def build_dist_folder(
         optimize=-1 if optimize is None else optimize,
         stdout="stdout",
         build_extensions=not no_build,
+        discovery=discovery,
+        exclude_modules=exclude_modules,
+        include_distribution_metadata=include_distribution_metadata,
         include_modules=include_modules,
         include_packages=include_packages,
         include_package_data=include_package_data,

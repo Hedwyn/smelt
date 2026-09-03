@@ -70,10 +70,42 @@ def find_modules_in_distribution(dist: Distribution) -> set[ModuleName]:
     return modules
 
 
+def _is_type_checking_test(test: ast.expr) -> bool:
+    """
+    Whether `test` is the `TYPE_CHECKING` guard, in any of the spellings in use
+    (`if TYPE_CHECKING:`, `if typing.TYPE_CHECKING:`, `if t.TYPE_CHECKING:`).
+    """
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    if isinstance(test, ast.Attribute):
+        return test.attr == "TYPE_CHECKING"
+    return False
+
+
+def _iter_import_nodes(nodes: Iterable[ast.AST]) -> Iterator[ast.Import | ast.ImportFrom]:
+    """
+    Yields every import statement under `nodes`, skipping the bodies of
+    `if TYPE_CHECKING:` blocks (but not their `else:`, which does run).
+
+    Those imports exist for type checkers and are guaranteed *not* to happen at
+    runtime -- that is the whole point of the guard. Following them is the single
+    largest source of over-collection: one annotation-only import of a large library
+    would otherwise drag that library, and everything it imports, into the
+    distribution.
+    """
+    for node in nodes:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node
+        elif isinstance(node, ast.If) and _is_type_checking_test(node.test):
+            yield from _iter_import_nodes(node.orelse)
+        else:
+            yield from _iter_import_nodes(ast.iter_child_nodes(node))
+
+
 def _iter_raw_imports(source: str) -> Iterator[tuple[str | None, int, tuple[str, ...]]]:
     """
     Yields `(module, level, names)` for every `import`/`from ... import` statement
-    found anywhere in `source`'s AST, `level` being 0 for absolute imports.
+    in `source`, except those a `TYPE_CHECKING` guard keeps from ever running.
 
     `names` holds what a `from ... import a, b` statement pulls out of `module`, and
     matters because the language does not distinguish the two things it can be: a
@@ -85,11 +117,11 @@ def _iter_raw_imports(source: str) -> Iterator[tuple[str | None, int, tuple[str,
     `*` is dropped: a star import pulls in names, never a submodule of its own.
     """
     tree = ast.parse(source)
-    for node in ast.walk(tree):
+    for node in _iter_import_nodes([tree]):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield alias.name, 0, ()
-        elif isinstance(node, ast.ImportFrom):
+        else:
             yield node.module, node.level, tuple(a.name for a in node.names if a.name != "*")
 
 

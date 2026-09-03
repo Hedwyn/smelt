@@ -222,6 +222,11 @@ EntrypointOptions = TypedDict(
         "include-package-data": list[str],
         "extra_flags": list[str],
         "no-zig": bool,
+        # Distribution-folder options (`smelt build-dist`, see `smelt.dist`).
+        # `discovery` is one of "static", "trace" or "both".
+        "discovery": str,
+        "exclude-modules": list[str],
+        "include-distribution-metadata": list[str],
     },
     total=False,
 )
