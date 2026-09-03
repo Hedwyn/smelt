@@ -31,6 +31,16 @@ cli = ["click"]
 # symbol naming), breaking that match. Raise the cap once the patch is updated for it.
 nuitka = ["nuitka<4.2", "patchelf>=0.17.2,<0.18; sys_platform == 'linux'"]
 cython = ["Cython"]
+# metapython: builds smelt's own CPython (static libc/openssl/zlib/libffi) via Zig,
+# for standalone Nuitka builds with no dependency on the host's libc/distro at all --
+# see nuitkaify.py's `assemble_standalone_dist`. Pinned to a commit, not a branch:
+# the vendored `cpython`/`build.zig` bundled in its wheel is exactly what gets built,
+# so a floating ref would make smelt builds non-reproducible across installs.
+# NOTE: this pin predates the build.zig fixes `own_python` now depends on (release
+# builds failing on -Werror=date-time; missing -DPLATFORM/-DABIFLAGS, which produce an
+# interpreter reporting sys.platform == "unknown"). Bump it once those are on master --
+# see roadmap.md. Until then `own_python` needs a local meta-python checkout.
+metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@18b3e4e"]
 build = [
   "Cython",
   "nuitka[onefile]<4.2",
@@ -38,6 +48,7 @@ build = [
   "mypy[mypyc]",
   "hatchling",
   "editables",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@18b3e4e",
 ]
 
 [tool.setuptools]

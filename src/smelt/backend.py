@@ -37,7 +37,10 @@ from smelt.explorer import (
     has_local_source,
 )
 from smelt.nuitkaify import (
+    DEFAULT_OWN_PYTHON_TARGET,
     Stdout,
+    assemble_standalone_dist,
+    compile_nuitka_entrypoint,
     compile_with_nuitka,
     import_path_search_root,
     nuitkaify_module,
@@ -78,6 +81,7 @@ def _mypycify_one(module: MypycModule, path_solver: PathSolver) -> GenericExtens
 def compile_mypyc_extensions(
     modules: Iterable[MypycModule],
     path_solver: PathSolver | None = None,
+    debug: bool = False,
 ) -> list[GenericExtension]:
     """
     Compiles all mypy extensions defined in `mypyc_config` for the project found at `project_root`
@@ -86,8 +90,8 @@ def compile_mypyc_extensions(
     built_extensions: list[GenericExtension] = []
     for module in modules:
         mypyc_ext = _mypycify_one(module, path_solver)
-        module_so_path = compile_extension(mypyc_ext.extension)
-        runtime_so_path = compile_extension(mypyc_ext.runtime)
+        module_so_path = compile_extension(mypyc_ext.extension, debug=debug)
+        runtime_so_path = compile_extension(mypyc_ext.runtime, debug=debug)
         so_dest_path = str(mypyc_ext.get_dest_path())
         runtime_dest_path = str(mypyc_ext.get_runtime_dest_path())
         shutil.move(runtime_so_path, runtime_dest_path)
@@ -142,25 +146,27 @@ def compile_cython_extensions(
     return [_cythonize_one(module, path_solver, options) for module in modules]
 
 
-def _compile_and_place(ext: GenericExtension) -> GenericExtension:
+def _compile_and_place(ext: GenericExtension, debug: bool = False) -> GenericExtension:
     """
     Compiles `ext` and moves its resulting `.so` (and runtime `.so`, if any)
     to their final destination next to the source module.
     """
-    module_so_path = compile_extension(ext.extension)
+    module_so_path = compile_extension(ext.extension, debug=debug)
     shutil.move(module_so_path, str(ext.get_dest_path()))
     if ext.runtime:
-        runtime_so_path = compile_extension(ext.runtime)
+        runtime_so_path = compile_extension(ext.runtime, debug=debug)
         shutil.move(runtime_so_path, str(ext.get_runtime_dest_path()))
     return ext
 
 
 def _generate_with_backend(
-    backend: Backend, import_path: ImportPath, path_solver: PathSolver
+    backend: Backend, import_path: ImportPath, path_solver: PathSolver, debug: bool = False
 ) -> GenericExtension:
     match backend:
         case Backend.NUITKA:
-            return nuitkaify_module(NuitkaModule(import_path), path_solver=path_solver)
+            return nuitkaify_module(
+                NuitkaModule(import_path), path_solver=path_solver, debug=debug
+            )
         case Backend.MYPYC:
             return _mypycify_one(MypycModule(import_path), path_solver)
         case Backend.CYTHON:
@@ -268,6 +274,7 @@ def compile_module_with_fallback(
     import_path: ImportPath,
     backend_priority_order: Iterable[Backend],
     path_solver: PathSolver,
+    debug: bool = False,
 ) -> GenericExtension:
     """
     Compiles `import_path` trying each backend in `backend_priority_order` in turn,
@@ -277,7 +284,10 @@ def compile_module_with_fallback(
     last_exc: Exception | None = None
     for backend in backend_priority_order:
         try:
-            ext = _compile_and_place(_generate_with_backend(backend, import_path, path_solver))
+            ext = _compile_and_place(
+                _generate_with_backend(backend, import_path, path_solver, debug=debug),
+                debug=debug,
+            )
         except (SmeltError, RuntimeError, ImportError) as exc:
             auto_context.record_attempt(import_path, backend, error=str(exc))
             _logger.warning("Backend %s failed to compile %s: %s", backend.value, import_path, exc)
@@ -495,6 +505,10 @@ def run_backend(
         return []
 
     built_artifacts: list[Path] = []
+    # Release build unless the project (or `SMELT_DEBUG`) asks otherwise: debug info
+    # is `zig cc`'s default and dominates artifact size (see
+    # `compiler.build_mode_compile_flags`).
+    debug = config.debug
     path_solver = path_solver or config.get_path_solver()
     # Starting with C extensions
     warnings.warn(
@@ -519,7 +533,7 @@ def run_backend(
         c_extension_path = sources[0]
         parent_folder_path = Path(c_extension_path).parent
         # TODO: we should probably run that logic in temp folder
-        built_so_path = compile_extension(c_extension_path)
+        built_so_path = compile_extension(c_extension_path, debug=debug)
         so_final_path = parent_folder_path / os.path.basename(built_so_path)
         shutil.move(built_so_path, so_final_path)
         built_artifacts.append(so_final_path)
@@ -530,7 +544,7 @@ def run_backend(
     # as it would be invisible otherwise
     shared_runtime_extensions: set[str] = set()
     collected_extensions: list[GenericExtension] = []
-    built_mypyc_extensions = compile_mypyc_extensions(config.mypyc_modules, path_solver)
+    built_mypyc_extensions = compile_mypyc_extensions(config.mypyc_modules, path_solver, debug=debug)
     for ext in built_mypyc_extensions:
         built_artifacts.append(ext.get_dest_path())
         if ext.runtime:
@@ -541,10 +555,12 @@ def run_backend(
         compile_cython_extensions(config.cython_modules, path_solver=path_solver)
     )
     for nuitka_mod in config.nuitka_modules:
-        collected_extensions.append(nuitkaify_module(nuitka_mod, path_solver=path_solver))
+        collected_extensions.append(
+            nuitkaify_module(nuitka_mod, path_solver=path_solver, debug=debug)
+        )
 
     for generic_ext in collected_extensions:
-        _compile_and_place(generic_ext)
+        _compile_and_place(generic_ext, debug=debug)
         built_artifacts.append(generic_ext.get_dest_path())
         if generic_ext.runtime:
             built_artifacts.append(generic_ext.get_runtime_dest_path())
@@ -558,7 +574,7 @@ def run_backend(
     for import_path in sorted(discover_auto_targets(config, path_solver)):
         try:
             auto_ext = compile_module_with_fallback(
-                import_path, config.backend_priority_order, path_solver
+                import_path, config.backend_priority_order, path_solver, debug=debug
             )
         except SmeltError as exc:
             _logger.warning("Skipping auto-discovered module %s: %s", import_path, exc)
@@ -617,19 +633,63 @@ def run_backend(
                     ]
                 else:
                     extra_search_paths = []
-                compile_with_nuitka(
-                    entrypoint_file,
-                    stdout=stdout,
-                    include_modules=shared_runtime_extensions
-                    | set(entrypoint_options.get("include-modules", [])),
-                    include_packages=entrypoint_options.get("include-package", []),
-                    include_package_data=entrypoint_options.get("include-package-data", []),
-                    include_data_files=embed_data_files,
-                    extra_flags=entrypoint_options.get("extra_flags", []),
-                    extra_search_paths=extra_search_paths,
-                    output_name=func_name if sep else None,
-                    no_zig=entrypoint_options.get("no-zig", False),
-                    no_cache=no_cache,
-                )
+                output_name = func_name if sep else None
+                if entrypoint_options.get("standalone", False):
+                    # Self-contained dist dir (exe + every native dependency it needs,
+                    # no leftover system-lib dependency) -- see `assemble_standalone_dist`.
+                    dist_dir = f"{output_name or os.path.basename(entrypoint_file).replace('.py', '')}.dist"
+                    assemble_standalone_dist(
+                        entrypoint_file,
+                        dist_dir,
+                        stdout=stdout,
+                        include_modules=shared_runtime_extensions
+                        | set(entrypoint_options.get("include-modules", [])),
+                        include_packages=entrypoint_options.get("include-package", []),
+                        include_package_data=entrypoint_options.get("include-package-data", []),
+                        include_data_files=embed_data_files,
+                        extra_flags=entrypoint_options.get("extra_flags", []),
+                        extra_search_paths=extra_search_paths,
+                        output_name=output_name,
+                        no_cache=no_cache,
+                        own_python=entrypoint_options.get("own-python", False),
+                        own_python_target=entrypoint_options.get(
+                            "own-python-target", DEFAULT_OWN_PYTHON_TARGET
+                        ),
+                        debug=debug,
+                    )
+                elif entrypoint_options.get("native-link", False):
+                    # smelt links the plain, non-onefile executable itself instead of
+                    # delegating to Nuitka's own Scons/`--onefile` pipeline -- see
+                    # `compile_nuitka_entrypoint`. Kept behind this flag until parity
+                    # with the `--onefile`-delegated path below is proven.
+                    compile_nuitka_entrypoint(
+                        entrypoint_file,
+                        stdout=stdout,
+                        include_modules=shared_runtime_extensions
+                        | set(entrypoint_options.get("include-modules", [])),
+                        include_packages=entrypoint_options.get("include-package", []),
+                        include_package_data=entrypoint_options.get("include-package-data", []),
+                        include_data_files=embed_data_files,
+                        extra_flags=entrypoint_options.get("extra_flags", []),
+                        extra_search_paths=extra_search_paths,
+                        output_name=output_name,
+                        no_cache=no_cache,
+                        debug=debug,
+                    )
+                else:
+                    compile_with_nuitka(
+                        entrypoint_file,
+                        stdout=stdout,
+                        include_modules=shared_runtime_extensions
+                        | set(entrypoint_options.get("include-modules", [])),
+                        include_packages=entrypoint_options.get("include-package", []),
+                        include_package_data=entrypoint_options.get("include-package-data", []),
+                        include_data_files=embed_data_files,
+                        extra_flags=entrypoint_options.get("extra_flags", []),
+                        extra_search_paths=extra_search_paths,
+                        output_name=output_name,
+                        no_zig=entrypoint_options.get("no-zig", False),
+                        no_cache=no_cache,
+                    )
 
     return built_artifacts

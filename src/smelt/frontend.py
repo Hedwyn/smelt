@@ -232,7 +232,13 @@ def show_config(*, path: PathExists) -> None:
     except FileNotFoundError:
         click.echo("No pyproject.toml not found.")
         return
-    pprint(parse_config_from_pyproject(toml_data, project_root=path))
+    config = parse_config_from_pyproject(toml_data, project_root=path)
+    # Apply the environment overrides too (`SMELT_DEBUG`, `SMELT_REPORT`): the point
+    # of this command is showing what a build would actually use, and a config
+    # printed without them misreports exactly the settings that are easiest to
+    # forget are set.
+    config.load_env()
+    pprint(config)
 
 
 @smelt.command()
@@ -267,6 +273,13 @@ def show_config(*, path: PathExists) -> None:
     default=False,
     help="Disable Nuitka's build cache, forcing a full rebuild.",
 )
+@click.option(
+    "--debug",
+    is_flag=True,
+    default=False,
+    help="Build with debug info and symbols kept. Off by default: the release build "
+    "strips both, which is most of the artifact's size.",
+)
 @wrap_smelt_errors()
 def build_standalone_binary(
     package_path: PathExists,
@@ -275,6 +288,7 @@ def build_standalone_binary(
     entrypoint: str | None,
     embed_files: tuple[tuple[PathExists, ImportPath], ...],
     no_cache: bool,
+    debug: bool,
 ) -> None:
     levelno = logging._nameToLevel[logging_level]
     logging.basicConfig(level=levelno)
@@ -286,6 +300,9 @@ def build_standalone_binary(
         return
     config = parse_config_from_pyproject(toml_data, project_root=package_path)
     config.load_env()
+    # CLI flag is additive over the config/env setting: `--debug` turns it on, its
+    # absence doesn't turn off a `debug = true` declared in pyproject.toml.
+    config.debug = config.debug or debug
     path_solver = config.get_path_solver(project_root=package_path)
     try:
         run_backend(

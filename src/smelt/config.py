@@ -222,6 +222,10 @@ EntrypointOptions = TypedDict(
         "include-package-data": list[str],
         "extra_flags": list[str],
         "no-zig": bool,
+        "native-link": bool,
+        "standalone": bool,
+        "own-python": bool,
+        "own-python-target": str,
     },
     total=False,
 )
@@ -244,6 +248,10 @@ class SmeltConfig:
     platforms: Iterable[str] | None = None
     entrypoints: dict[str, EntrypointOptions] = field(default_factory=dict)
     script_names: dict[str, str] = field(default_factory=dict)
+    #: Build with debug info and symbols kept, instead of the default release build.
+    #: Also settable via the `SMELT_DEBUG` environment variable (`load_env`). Off by
+    #: default because `zig cc` emits debug info unless told not to, and it dominates
+    #: artifact size -- see `compiler.build_mode_compile_flags`.
     debug: bool = False
     auto_mode: AutoMode = "off"
     backend_priority_order: list[Backend] = field(default_factory=lambda: [Backend.NUITKA])

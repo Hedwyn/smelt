@@ -18,6 +18,7 @@ import sysconfig
 import tempfile
 import warnings
 from collections.abc import Iterable
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Final
@@ -97,6 +98,38 @@ def sanity_msvc_flags(flags: Iterable[str]) -> list[str]:
         # else: MSVC-only flag (e.g. /DEBUG:*, /wd####, /W3, /MD, /GX) with no
         # zig/clang equivalent needed for a shared-library build: drop it.
     return sanitized
+
+
+#: Compile-time flags distinguishing a release build from a debug one.
+#:
+#: `-g0` is not redundant: unlike gcc/clang, where debug info is opt-in via `-g`,
+#: `zig cc` emits it by *default* (verified: the same source compiled with and
+#: without `-g0` yields 4 debug sections vs 0). Nothing in smelt's own flag set ever
+#: asked for `-g`, yet DWARF accounted for 81% of a real entrypoint binary -- 221 MB
+#: of 277 MB -- because nothing turned it off either. Nuitka's own Scons backend
+#: strips by default; smelt bypasses Scons, so this is where that has to happen.
+_RELEASE_COMPILE_FLAGS: Final[tuple[str, ...]] = ("-g0",)
+_DEBUG_COMPILE_FLAGS: Final[tuple[str, ...]] = ("-g",)
+
+#: Link-time counterpart. `-g0` above stops debug info being generated at all; `-s`
+#: additionally drops the symbol table (`.symtab`), which `-g0` leaves behind -- worth
+#: a few more MB on a large binary, and it also covers any object smelt did not
+#: compile itself.
+_RELEASE_LINK_FLAGS: Final[tuple[str, ...]] = ("-s",)
+
+
+def build_mode_compile_flags(debug: bool) -> list[str]:
+    """Compiler flags selecting a debug (full DWARF) or release (no debug info) build.
+
+    Appended *after* the caller's own flags so they win on conflict: clang-style
+    drivers take the last of `-g`/`-g0`.
+    """
+    return list(_DEBUG_COMPILE_FLAGS if debug else _RELEASE_COMPILE_FLAGS)
+
+
+def build_mode_link_flags(debug: bool) -> list[str]:
+    """Linker flags selecting a debug (symbols kept) or release (stripped) build."""
+    return [] if debug else list(_RELEASE_LINK_FLAGS)
 
 
 def _zig_shared_lib_name(name: str) -> str:
@@ -334,12 +367,42 @@ def python_embed_library_link_args() -> tuple[list[str], list[str]]:
     return ([libdir] if libdir is not None else []), [f"python{ldversion}"]
 
 
+@dataclass(frozen=True, slots=True)
+class PythonToolchain:
+    """
+    Overrides `compile_executable`'s default "link against the running
+    interpreter" behavior: compile/link against a *different* Python install
+    instead (e.g. smelt's own Zig-built CPython -- see
+    `nuitkaify.build_own_python` -- for a fully standalone dist with no
+    dependency on the host's libc/libpython at all).
+
+    `include_dirs` must resolve `Python.h`/`pyconfig.h` for that install;
+    `library_dir`/`library_name` its `libpython<ldversion>.so` (or `.a`).
+
+    `target`, when set, is a Zig target triple (e.g. `"x86_64-linux-musl"`)
+    passed straight through to `zig cc` as `--target=` for both the compile and
+    the link step. It is *not* optional decoration when the toolchain's Python
+    was built for a non-host libc: object code and `libpython` must agree on
+    the libc they are compiled against, or the link fails (missing musl-only
+    symbols) or, worse, succeeds and produces a binary mixing two libcs.
+    Left `None` for a toolchain built natively, where `zig cc`'s own default
+    target is already the right one.
+    """
+
+    include_dirs: list[str]
+    library_dir: str
+    library_name: str
+    target: str | None = None
+
+
 def _compile_extension_sources(
     compiler: Compiler,
     extension_obj: Extension,
     include_dirs: list[str],
     crosscompile: SupportedPlatforms | None,
     build_folder: str,
+    extra_preargs: Iterable[str] = (),
+    extra_postargs: Iterable[str] = (),
 ) -> tuple[list[str], list[str]]:
     """
     Compiles `extension_obj`'s sources into `build_folder`, returning the produced
@@ -347,9 +410,11 @@ def _compile_extension_sources(
     the caller must also pass to its own link step.
 
     Shared by `compile_extension` and `compile_executable`: both compile the same way
-    and only differ in how the resulting objects are linked.
+    and only differ in how the resulting objects are linked. `extra_preargs` are
+    caller-supplied flags prepended to that same list, so they reach the link step
+    too -- `compile_executable` passes its `PythonToolchain`'s `--target=` this way.
     """
-    extra_preargs: list[str] = []
+    extra_preargs = list(extra_preargs)
     if crosscompile is not None:
         # TODO: generate/obtain pyconfig.h for the target platform
         warnings.warn(
@@ -365,7 +430,12 @@ def _compile_extension_sources(
         output_dir=build_folder,
         include_dirs=include_dirs + extension_obj.include_dirs,
         extra_preargs=extra_preargs,
-        extra_postargs=sanity_msvc_flags(extension_obj.extra_compile_args or []),
+        # Caller flags last: `build_mode_compile_flags`'s `-g0`/`-g` must be able to
+        # override anything the extension itself asked for.
+        extra_postargs=[
+            *sanity_msvc_flags(extension_obj.extra_compile_args or []),
+            *extra_postargs,
+        ],
         macros=extension_obj.define_macros,
     )
     return objects, extra_preargs
@@ -377,6 +447,7 @@ def compile_extension(
     dest_folder: PathLike[str] | None = None,
     crosscompile: SupportedPlatforms | None = None,
     use_zig_native_interface: bool = False,
+    debug: bool = False,
 ) -> PathExists:
     """
     Standalone function compiling a low-level extension (C, C++ or Zig)
@@ -439,7 +510,12 @@ def compile_extension(
         # TODO: investigate the pure setuptools alternative
         # as the distutils compiler is deprecated
         objects, extra_preargs = _compile_extension_sources(
-            compiler, extension_obj, include_dirs, crosscompile, build_folder
+            compiler,
+            extension_obj,
+            include_dirs,
+            crosscompile,
+            build_folder,
+            extra_postargs=build_mode_compile_flags(debug),
         )
 
         # Link it into a shared object
@@ -456,6 +532,7 @@ def compile_extension(
                 library_dirs=extension_obj.library_dirs + library_dirs,
                 runtime_library_dirs=extension_obj.runtime_library_dirs,
                 extra_preargs=extra_preargs,
+                extra_postargs=build_mode_link_flags(debug),
             )
         else:
             zig_build_lib(extension.name, objects, crosscompile=crosscompile)
@@ -468,6 +545,8 @@ def compile_executable(
     compiler: Compiler | None = None,
     dest_folder: PathLike[str] | None = None,
     crosscompile: SupportedPlatforms | None = None,
+    python_toolchain: PythonToolchain | None = None,
+    debug: bool = False,
 ) -> PathExists:
     """
     Standalone function compiling a low-level source (C, C++ or Zig) into a native,
@@ -486,10 +565,22 @@ def compile_executable(
     dest_folder: PathLike[str]
         The folder in which to place the built executable.
         Defaults to cwd.
+
+    python_toolchain: PythonToolchain | None
+        Compile/link against this Python install instead of the running
+        interpreter. See `PythonToolchain`.
     """
     compiler = compiler or ZigCompiler()
-    include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
-    embed_library_dirs, embed_libraries = python_embed_library_link_args()
+    target_preargs: list[str] = []
+    if python_toolchain is not None:
+        include_dirs = list(python_toolchain.include_dirs)
+        embed_library_dirs = [python_toolchain.library_dir]
+        embed_libraries = [python_toolchain.library_name]
+        if python_toolchain.target is not None:
+            target_preargs.append(f"--target={python_toolchain.target}")
+    else:
+        include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
+        embed_library_dirs, embed_libraries = python_embed_library_link_args()
 
     if isinstance(extension, (str, Path)):
         if not os.path.exists(extension):
@@ -516,7 +607,13 @@ def compile_executable(
 
     with tempfile.TemporaryDirectory() as build_folder:
         objects, extra_preargs = _compile_extension_sources(
-            compiler, extension_obj, include_dirs, crosscompile, build_folder
+            compiler,
+            extension_obj,
+            include_dirs,
+            crosscompile,
+            build_folder,
+            extra_preargs=target_preargs,
+            extra_postargs=build_mode_compile_flags(debug),
         )
 
         exe_name = extension_obj.name + exe_suffix
@@ -530,6 +627,7 @@ def compile_executable(
             library_dirs=extension_obj.library_dirs + embed_library_dirs,
             runtime_library_dirs=extension_obj.runtime_library_dirs,
             extra_preargs=extra_preargs,
+            extra_postargs=build_mode_link_flags(debug),
         )
     exe_path = os.path.join(output_dir, exe_name)
     return assert_path_exists(exe_path)
