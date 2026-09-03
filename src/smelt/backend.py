@@ -480,31 +480,132 @@ def clean_all_artifacts(
     return deleted
 
 
-def create_entrypoint_script(entrypoint: str, dest_dir: str | os.PathLike[str]) -> Path:
+@dataclass(frozen=True)
+class EntrypointGuard:
+    """
+    A block of code `create_entrypoint_script` puts *before* the entrypoint's own
+    import, along with the imports that block needs.
+
+    Running before that import is the whole point: a guard that checked something
+    after the application's modules were already imported would be checking it too
+    late.
+    """
+
+    code: str
+    imports: tuple[str, ...] = ()
+
+
+def python_version_guard(version: tuple[int, int], magic: bytes) -> EntrypointGuard:
+    """
+    A guard refusing to run under an interpreter the distribution was not built for,
+    with a message that names the version needed.
+
+    Worth having because the failure it replaces is unreadable: bytecode carries a
+    magic number checked before any code runs, so a mismatched interpreter does not
+    report a version problem at all -- it fails to see the modules and reports
+    `can't find '__main__' module`, or `RuntimeError: Bad magic number`.
+
+    This guard can only do its job from *source*: a `.pyc` holding it would itself be
+    rejected by the very check it is meant to explain. That is why the generated
+    entrypoint is the one file a distribution ships as `.py` (see
+    `smelt.dist.write_entrypoint_module`).
+    """
+    major, minor = version
+    return EntrypointGuard(
+        imports=("importlib.util", "sys"),
+        code=(
+            f"_REQUIRED_VERSION = ({major}, {minor})\n"
+            f'_REQUIRED_MAGIC = bytes.fromhex("{magic.hex()}")\n'
+            "\n"
+            "if (\n"
+            "    sys.version_info[:2] != _REQUIRED_VERSION\n"
+            "    or importlib.util.MAGIC_NUMBER != _REQUIRED_MAGIC\n"
+            "):\n"
+            "    sys.exit(\n"
+            '        "This application was built for CPython %d.%d, but is running '
+            'under %d.%d. "\n'
+            '        "Its compiled modules cannot be loaded by this interpreter; '
+            'run it with a "\n'
+            '        "CPython %d.%d instead."\n'
+            "        % (_REQUIRED_VERSION + sys.version_info[:2] + _REQUIRED_VERSION)\n"
+            "    )"
+        ),
+    )
+
+
+def isolation_guard() -> EntrypointGuard:
+    """
+    A guard that re-executes the interpreter with `-I -S -B` when it is not already
+    isolated, so the distribution runs hermetically however it was invoked.
+
+    Without isolation the host's `site-packages` stays on `sys.path` behind the
+    distribution's own directory. A module the distribution is *missing* is then
+    silently satisfied by the host's copy, which is the worst possible failure shape:
+    it works on the machine that built it and fails on a clean target. Enforcing the
+    flags from inside the entrypoint means there is no invocation to get wrong -- and
+    no launcher, shell wrapper or compiled stub needed to enforce them.
+
+    `-B` keeps the isolated run from writing `__pycache__` into the distribution.
+    (The first, non-isolated run still caches this one generated file where the
+    folder is writable; Python skips the write silently where it is not.)
+    """
+    return EntrypointGuard(
+        imports=("os", "sys"),
+        code=(
+            "if not (sys.flags.isolated and sys.flags.no_site):\n"
+            "    os.execv(\n"
+            "        sys.executable,\n"
+            "        [\n"
+            "            sys.executable,\n"
+            '            "-I",\n'
+            '            "-S",\n'
+            '            "-B",\n'
+            "            os.path.dirname(os.path.abspath(__file__)),\n"
+            "            *sys.argv[1:],\n"
+            "        ],\n"
+            "    )"
+        ),
+    )
+
+
+def create_entrypoint_script(
+    entrypoint: str,
+    dest_dir: str | os.PathLike[str],
+    *,
+    guards: Iterable[EntrypointGuard] = (),
+    script_name: str | None = None,
+) -> Path:
     """
     Codegens a standalone script calling `entrypoint` ("module1.module2:func_name"),
-    mirroring what installers generate for `[project.scripts]`. Simpler than those,
-    since the only consumer here is Nuitka: no pythonw, no CLI argument handling.
+    mirroring what installers generate for `[project.scripts]`. Simpler than those:
+    no pythonw, no CLI argument handling.
+
+    `guards` are emitted before the entrypoint's own import (see `EntrypointGuard`).
+    `script_name` overrides the generated file's name, for a caller that needs a
+    specific one (a distribution's `__main__`).
     """
     module_path, sep, func_name = entrypoint.partition(":")
     if not sep or not module_path or not func_name:
         raise SmeltConfigError(
             f"Invalid entrypoint {entrypoint!r}, expected 'module.path:func_name'"
         )
-    script = (
-        "import sys\n"
-        f"from {module_path} import {func_name}\n"
-        "\n"
-        'if __name__ == "__main__":\n'
-        f"    sys.exit({func_name}())\n"
-    )
-    # Nuitka names the compiled entry script after its own filename; if that name
-    # collides with a top-level component of `module_path` (e.g. a CLI function
-    # named after its own package, as in `pkg = "pkg.cli:pkg"`), it shadows the
-    # real package at runtime instead of importing it. Disambiguate in that case.
-    script_name = func_name
-    if script_name in module_path.split("."):
-        script_name = f"_{script_name}_entrypoint"
+    guards = list(guards)
+    imports = sorted({"sys", *(name for guard in guards for name in guard.imports)})
+    blocks = [
+        "\n".join(f"import {name}" for name in imports),
+        *(guard.code for guard in guards),
+        f"from {module_path} import {func_name}",
+        f'if __name__ == "__main__":\n    sys.exit({func_name}())',
+    ]
+    script = "\n\n".join(blocks) + "\n"
+    if script_name is None:
+        # Nuitka names the compiled entry script after its own filename; if that name
+        # collides with a top-level component of `module_path` (e.g. a CLI function
+        # named after its own package, as in `pkg = "pkg.cli:pkg"`), it shadows the
+        # real package at runtime instead of importing it. Disambiguate in that case.
+        script_name = func_name
+        if script_name in module_path.split("."):
+            script_name = f"_{script_name}_entrypoint"
     dest_path = Path(dest_dir) / f"{script_name}.py"
     dest_path.write_text(script)
     return dest_path

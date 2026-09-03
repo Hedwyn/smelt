@@ -355,6 +355,22 @@ def build_standalone_binary(
     "entrypoint's own declaration, then to 'both'.",
 )
 @click.option(
+    "--no-version-guard",
+    is_flag=True,
+    default=False,
+    help="Omit the interpreter-version check from the generated entrypoint. Without "
+    "it, a mismatched interpreter fails with `can't find '__main__' module` instead of "
+    "a readable message, and the entrypoint can be shipped as bytecode.",
+)
+@click.option(
+    "--no-isolate",
+    is_flag=True,
+    default=False,
+    help="Omit the isolation guard from the generated entrypoint. Without it, running "
+    "the distribution without -I -S leaves the host's site-packages on sys.path behind "
+    "it, so a missing module can be silently supplied by the host.",
+)
+@click.option(
     "--exclude-module",
     "exclude_modules",
     multiple=True,
@@ -402,6 +418,8 @@ def build_dist_folder(
     optimize: int | None,
     no_build: bool,
     discovery: Literal["static", "trace", "both"] | None,
+    no_version_guard: bool,
+    no_isolate: bool,
     exclude_modules: tuple[str, ...],
     include_distribution_metadata: tuple[str, ...],
     include_modules: tuple[str, ...],
@@ -437,6 +455,8 @@ def build_dist_folder(
         stdout="stdout",
         build_extensions=not no_build,
         discovery=discovery,
+        guard_version=not no_version_guard,
+        isolate=not no_isolate,
         exclude_modules=exclude_modules,
         include_distribution_metadata=include_distribution_metadata,
         include_modules=include_modules,

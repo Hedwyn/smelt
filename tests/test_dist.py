@@ -405,10 +405,13 @@ def test_build_dist_keeps_the_application_out_of_the_distribution_root(tmp_path:
         MANIFEST_NAME,
     ]
     # the module tree, and `__main__`, are in the payload -- that is the sys.path entry
-    assert (report.payload_root / "__main__.pyc").is_file()
     assert (report.payload_root / "layoutpkg" / "cli.pyc").is_file()
     assert (report.payload_root / "layoutpkg" / "__init__.pyc").is_file()
-    assert not list(report.dist_root.rglob("*.py"))
+    # the generated entrypoint is the one file shipped as source, so its version guard
+    # can run under an interpreter that cannot load the bytecode (see
+    # `write_entrypoint_module`)
+    assert report.entrypoint_file == Path("__main__.py")
+    assert [path.name for path in report.dist_root.rglob("*.py")] == ["__main__.py"]
 
     manifest = json.loads((report.dist_root / MANIFEST_NAME).read_text())
     # recorded, because every path in the manifest is relative to it
@@ -443,5 +446,103 @@ def test_run_instructions_point_at_the_payload_directory(tmp_path: Path) -> None
     )
     instructions = (report.dist_root / INSTRUCTIONS_NAME).read_text()
     # the command a user copies has to include the payload folder, or it fails on
-    # `can't find '__main__' module`
-    assert f"-I -S {report.payload_root}" in instructions
+    # `can't find '__main__' module`. No flags: the entrypoint's isolation guard adds
+    # them by re-executing itself.
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert f"python{version} {report.payload_root}" in instructions
+    assert f"-I -S {report.payload_root}" not in instructions
+
+
+def _guarded_dist(tmp_path: Path, name: str, **kwargs: object) -> Path:
+    """
+    Builds a distribution for a one-module application that reports how it was run.
+    """
+    package = tmp_path / "src" / name
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "cli.py").write_text(
+        "import sys\n"
+        "\n"
+        "def main() -> int:\n"
+        "    print('isolated=%s no_site=%s argv=%r'\n"
+        "          % (bool(sys.flags.isolated), bool(sys.flags.no_site), sys.argv[1:]))\n"
+        "    print('site-packages=%s' % any('site-packages' in p for p in sys.path))\n"
+        "    return 0\n"
+    )
+    config = SmeltConfig(
+        packages_location={name: f"src/{name}"},
+        entrypoints={f"{name}.cli:main": {}},
+    )
+    report = build_dist(
+        config,
+        output_dir=tmp_path / "out",
+        path_solver=config.get_path_solver(project_root=tmp_path),
+        build_extensions=False,
+        discovery="static",
+        **kwargs,  # type: ignore[arg-type]
+    )
+    return report.payload_root
+
+
+def test_entrypoint_is_shipped_as_source_when_guarded(tmp_path: Path) -> None:
+    """
+    A version guard held in a `.pyc` could never run: the magic number is checked
+    before any code is executed, so a mismatched interpreter rejects the guard along
+    with everything it was meant to explain. Source compiles under any version.
+    """
+    payload = _guarded_dist(tmp_path, "srcguard")
+    assert (payload / "__main__.py").is_file()
+    assert not (payload / "__main__.pyc").exists()
+    # and it is the *only* source file: application modules stay bytecode
+    assert [p.name for p in payload.rglob("*.py")] == ["__main__.py"]
+
+
+def test_unguarded_entrypoint_stays_bytecode(tmp_path: Path) -> None:
+    payload = _guarded_dist(tmp_path, "nosrcguard", guard_version=False, isolate=False)
+    assert (payload / "__main__.pyc").is_file()
+    assert not list(payload.rglob("*.py"))
+
+
+def test_isolation_guard_re_execs_when_flags_are_missing(tmp_path: Path) -> None:
+    """
+    Run without `-I -S`, the entrypoint re-executes itself with them -- so the host's
+    site-packages cannot silently supply a module the distribution is missing.
+    """
+    payload = _guarded_dist(tmp_path, "isoguard")
+    completed = subprocess.run(
+        [sys.executable, str(payload), "one", "two"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "isolated=True no_site=True" in completed.stdout
+    assert "argv=['one', 'two']" in completed.stdout
+    assert "site-packages=False" in completed.stdout
+
+
+def test_isolation_guard_does_not_re_exec_when_already_isolated(tmp_path: Path) -> None:
+    """
+    The guard is self-limiting: it checks the flags it would set, so it cannot loop.
+    """
+    payload = _guarded_dist(tmp_path, "isoguard_twice")
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", str(payload)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "isolated=True no_site=True" in completed.stdout
+
+
+def test_isolation_guard_is_omitted_when_not_asked_for(tmp_path: Path) -> None:
+    payload = _guarded_dist(tmp_path, "noiso", isolate=False)
+    completed = subprocess.run(
+        [sys.executable, str(payload)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "isolated=False no_site=False" in completed.stdout
