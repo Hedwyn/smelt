@@ -68,22 +68,11 @@ from smelt.config import NuitkaModule
 from smelt.context import create_context_if_enabled, get_context
 from smelt.utils import GenericExtension, PathSolver
 
-from .process import CommandContext, call_command
+from .native_deps import describe_command_failure as _describe_command_failure
+from .native_deps import patchelf_on_path as _bundled_patchelf_on_path
+from .process import call_command
 
 _logger = logging.getLogger(__name__)
-
-
-def _describe_command_failure(cmd_trace: CommandContext, cmd: Iterable[str]) -> str:
-    """
-    Renders a failed command's exit code alongside its captured stdout/stderr,
-    so callers get the actual compiler/tool output rather than just an exit code.
-    """
-    lines = [f"exitcode {cmd_trace.exit_code}: {' '.join(cmd)}"]
-    if cmd_trace.stdout:
-        lines.append("stdout:\n" + "\n".join(cmd_trace.stdout))
-    if cmd_trace.stderr:
-        lines.append("stderr:\n" + "\n".join(cmd_trace.stderr))
-    return "\n".join(lines)
 
 
 NUITKA_ENTRYPOINT: Final[tuple[str, ...]] = (sys.executable, "-m", "nuitka")
@@ -462,42 +451,6 @@ def _environ_overridden(**overrides: str) -> Iterator[None]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-
-
-def _bundled_patchelf_dir() -> Path | None:
-    """
-    Returns the directory holding the PyPI-provided `patchelf` binary, or None.
-
-    Nuitka needs `patchelf` to rewrite RPATHs in standalone/onefile mode on Linux,
-    and locates it by bare name via PATH. Distributions ship varied (sometimes
-    Nuitka-blacklisted, e.g. 0.18.0) versions, so smelt bundles a known-good one via
-    the `patchelf` PyPI package to stay self-contained. This locates that binary
-    independently of PATH ordering so we can put it first for Nuitka.
-    """
-    import importlib.metadata as md
-
-    try:
-        dist = md.distribution("patchelf")
-    except md.PackageNotFoundError:
-        return None
-    for entry in dist.files or []:
-        if entry.name == "patchelf" or entry.name.startswith("patchelf."):
-            located = Path(entry.locate()).resolve()
-            if located.exists():
-                return located.parent
-    return None
-
-
-@contextmanager
-def _bundled_patchelf_on_path() -> Iterator[None]:
-    """Prepends the bundled `patchelf` directory to PATH, if that package is installed."""
-    bindir = _bundled_patchelf_dir()
-    if bindir is None:
-        yield
-        return
-    path = os.environ.get("PATH", "")
-    with _environ_overridden(PATH=f"{bindir}{os.pathsep}{path}" if path else str(bindir)):
-        yield
 
 
 def _bundled_zig_path() -> Path | None:

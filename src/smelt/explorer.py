@@ -11,8 +11,9 @@ from __future__ import annotations
 import ast
 import importlib.machinery
 import importlib.util
+import logging
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from enum import StrEnum
 from importlib.metadata import Distribution
 from pathlib import Path
@@ -27,6 +28,8 @@ from smelt.utils import (
     is_valid_module_name,
     path_exists,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 class Node(NamedTuple):
@@ -67,18 +70,27 @@ def find_modules_in_distribution(dist: Distribution) -> set[ModuleName]:
     return modules
 
 
-def _iter_raw_imports(source: str) -> Iterator[tuple[str | None, int]]:
+def _iter_raw_imports(source: str) -> Iterator[tuple[str | None, int, tuple[str, ...]]]:
     """
-    Yields `(module, level)` for every `import`/`from ... import` statement
+    Yields `(module, level, names)` for every `import`/`from ... import` statement
     found anywhere in `source`'s AST, `level` being 0 for absolute imports.
+
+    `names` holds what a `from ... import a, b` statement pulls out of `module`, and
+    matters because the language does not distinguish the two things it can be: a
+    plain attribute of `module`, or a submodule of it. `from pkg import mod` is the
+    *only* way to import `pkg.mod` in a single statement, so ignoring these names
+    loses real modules -- `from . import mod` names nothing else at all. Whether each
+    one is a module is decided by resolving it, in `_walk_module`.
+
+    `*` is dropped: a star import pulls in names, never a submodule of its own.
     """
     tree = ast.parse(source)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                yield alias.name, 0
+                yield alias.name, 0, ()
         elif isinstance(node, ast.ImportFrom):
-            yield node.module, node.level
+            yield node.module, node.level, tuple(a.name for a in node.names if a.name != "*")
 
 
 def _resolve_relative_import(
@@ -201,11 +213,15 @@ def resolve_module(import_path: ImportPath) -> ResolvedModule:
     is_stdlib = import_path.partition(".")[0] in sys.stdlib_module_names
     try:
         spec = importlib.util.find_spec(import_path)
-    except (ImportError, ValueError, AttributeError, TypeError):
-        # ImportError/ValueError: unresolvable or invalid name. AttributeError and
-        # TypeError come from third-party packages with an exotic `__path__` or a
-        # custom meta-path finder, and are just as much "cannot resolve this" as the
-        # other two -- letting them out would abort a whole build over one module.
+    except Exception as exc:  # noqa: BLE001 -- see below
+        # Resolving `a.b` *imports* `a`, so this executes arbitrary third-party
+        # module-level code and can raise absolutely anything: an ImportError for a
+        # missing dependency, but also a bare `assert sys.platform == "win32"` in a
+        # platform-specific module, a custom meta-path finder's own errors, or a
+        # package that refuses to be imported outside its own runtime. All of them
+        # mean the same thing here -- this name cannot be resolved in this
+        # environment -- and none of them should abort a whole build.
+        _logger.debug("Could not resolve %s: %r", import_path, exc)
         spec = None
     if spec is None:
         return ResolvedModule(import_path, ModuleKind.MISSING, None, False, is_stdlib)
@@ -241,6 +257,72 @@ def resolve_module(import_path: ImportPath) -> ResolvedModule:
         # from some other file format: nothing this codebase knows how to handle.
         kind = ModuleKind.MISSING
     return ResolvedModule(import_path, kind, path, is_package, is_stdlib)
+
+
+def iter_package_modules(import_path: ImportPath) -> set[ImportPath]:
+    """
+    Every module contained in the package `import_path`, recursively, itself included.
+
+    Unlike `find_modules_under_root`, this walks what the *import machinery* resolves
+    the package to (so it works for an installed third-party package, and covers every
+    root of a namespace package), and it reports native extension modules and
+    subpackages too, not just `.py` files. That is what makes it usable to pull in a
+    whole package whose internals are loaded dynamically -- the case static import
+    discovery cannot see.
+    """
+    modules: set[ImportPath] = set()
+    extension_suffixes = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+    for directory in package_directories(import_path):
+        modules.add(import_path)
+        for entry in directory.rglob("*"):
+            if "__pycache__" in entry.parts:
+                continue
+            relative = entry.relative_to(directory)
+            if entry.is_dir():
+                parts = relative.parts
+            elif entry.name.endswith(extension_suffixes):
+                # `mod.cpython-312-x86_64-linux-gnu.so` -> `mod`
+                parts = (*relative.parts[:-1], entry.name.split(".")[0])
+            elif entry.suffix == ".py":
+                parts = (
+                    relative.parts[:-1]
+                    if entry.stem == "__init__"
+                    else (
+                        *relative.parts[:-1],
+                        entry.stem,
+                    )
+                )
+            else:
+                continue
+            if not all(is_valid_module_name(part) for part in parts):
+                continue
+            candidate = ".".join([import_path, *parts])
+            if is_valid_import_path(candidate):
+                modules.add(assert_is_valid_import_path(candidate))
+    return modules
+
+
+def package_directories(import_path: ImportPath) -> list[PathExists]:
+    """
+    Every directory the package `import_path` occupies, or an empty list if it does not
+    resolve to a package at all.
+
+    Usually one directory, but a PEP 420 namespace package is spread over as many
+    roots as contribute to it -- and a distribution collecting a package's data files
+    has to look in all of them.
+    """
+    try:
+        spec = importlib.util.find_spec(import_path)
+    except Exception as exc:  # noqa: BLE001 -- resolution imports the parent, see `resolve_module`
+        _logger.debug("Could not resolve package %s: %r", import_path, exc)
+        return []
+    if spec is None or spec.submodule_search_locations is None:
+        return []
+    return [
+        directory
+        for location in spec.submodule_search_locations
+        if path_exists(directory := Path(location))
+    ]
 
 
 def _resolve_module_path(import_path: ImportPath) -> tuple[PathExists, bool] | None:
@@ -299,6 +381,38 @@ def _expand_prefixes(import_path: ImportPath) -> Iterator[ImportPath]:
         yield assert_is_valid_import_path(".".join(parts[:i]))
 
 
+def _submodules_among(target: ImportPath, names: Iterable[str]) -> Iterator[ImportPath]:
+    """
+    Of the `names` a `from {target} import ...` statement pulls out, the ones that are
+    actually submodules of `target` rather than plain attributes of it.
+
+    Decided by looking for a matching file in `target`'s own directory, deliberately
+    *not* by resolving `{target}.{name}` through the import machinery: resolving a
+    dotted name imports its parent, so that would execute `target`'s module-level code
+    at build time -- for every candidate name, in every module walked. Beyond being
+    slow, plenty of modules cannot be imported here at all (a platform-specific one
+    guarded by a bare `assert sys.platform == ...` raises outright), and a dependency
+    walk has no business running the code it is reading.
+    """
+    directories = package_directories(target)
+    if not directories:
+        # Not a package: `from module import name` cannot be naming a submodule.
+        return
+    extension_suffixes = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+    for name in names:
+        candidate = f"{target}.{name}"
+        if not is_valid_module_name(name) or not is_valid_import_path(candidate):
+            continue
+        for directory in directories:
+            if (
+                (directory / name).is_dir()
+                or path_exists(directory / f"{name}.py")
+                or any(path_exists(directory / f"{name}{suffix}") for suffix in extension_suffixes)
+            ):
+                yield assert_is_valid_import_path(candidate)
+                break
+
+
 def _get_or_create_node(import_path: ImportPath, registry: dict[ImportPath, Node]) -> Node:
     node = registry.get(import_path)
     if node is None:
@@ -329,7 +443,7 @@ def _walk_module(node: Node, registry: dict[ImportPath, Node], visited: set[Impo
         return
 
     targets: set[ImportPath] = set()
-    for module, level in raw_imports:
+    for module, level, names in raw_imports:
         target: ImportPath | None
         if level:
             target = _resolve_relative_import(node.name, is_package, module, level)
@@ -340,6 +454,7 @@ def _walk_module(node: Node, registry: dict[ImportPath, Node], visited: set[Impo
         if target is None:
             continue
         targets.update(_expand_prefixes(target))
+        targets.update(_submodules_among(target, names))
 
     for target in targets:
         dep_node = _get_or_create_node(target, registry)

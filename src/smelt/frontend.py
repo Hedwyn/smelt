@@ -345,6 +345,29 @@ def build_standalone_binary(
     default=False,
     help="Skip the extension build and reuse whatever artifacts are already on disk.",
 )
+@click.option(
+    "--include-module",
+    "include_modules",
+    multiple=True,
+    help="Force a module into the distribution, on top of what discovery finds. For "
+    "modules imported dynamically, which static analysis cannot see. Repeatable.",
+)
+@click.option(
+    "--include-package",
+    "include_packages",
+    multiple=True,
+    help="Force a whole package (every module it contains, recursively) into the "
+    "distribution. The answer for a package that loads its own internals dynamically. "
+    "Repeatable.",
+)
+@click.option(
+    "--include-package-data",
+    "include_package_data",
+    multiple=True,
+    help="Collect a package's data files into the distribution. Syntax: "
+    "PACKAGE[:PATTERN,...] (e.g. 'mypkg' or 'mypkg:*.json,*.yaml'). Repeatable, and "
+    "additive over the entrypoint's own include-package-data declaration.",
+)
 @add_logging_option
 @click.option("-r", "--report", type=str, default=None, help="Produces a report at the given path")
 @wrap_smelt_errors()
@@ -354,6 +377,9 @@ def build_dist_folder(
     output_dir: Path,
     optimize: int | None,
     no_build: bool,
+    include_modules: tuple[str, ...],
+    include_packages: tuple[str, ...],
+    include_package_data: tuple[str, ...],
     logging_level: str,
     report: str | None,
 ) -> None:
@@ -383,6 +409,9 @@ def build_dist_folder(
         optimize=-1 if optimize is None else optimize,
         stdout="stdout",
         build_extensions=not no_build,
+        include_modules=include_modules,
+        include_packages=include_packages,
+        include_package_data=include_package_data,
     )
     click.echo(dist_report.render())
     click.echo("")
