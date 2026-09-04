@@ -21,6 +21,11 @@ The folder is assembled from two sources:
 * every *other* module the entrypoint needs at runtime, compiled to bytecode by the
   `bytecode` backend (see `smelt.bytecode`), so no `.py` is shipped at all.
 
+The *closure* (= the set of modules an entrypoint needs at runtime, i.e. the
+transitive closure of the "imports" relation starting from it) is what decides the
+contents; the *payload* (= the one subfolder placed on `sys.path`, `PAYLOAD_DIR_NAME`)
+is where they go.
+
 The application itself goes into a single subfolder of the distribution
 (`PAYLOAD_DIR_NAME`), which is a plain `sys.path` entry holding a `__main__` module --
 so `python <folder>/app` is all it takes to run it, with no launcher, no bootstrap and
@@ -88,9 +93,12 @@ from smelt.native_deps import (
 from smelt.nuitkaify import Stdout, import_path_search_root
 from smelt.own_python import (
     DEFAULT_OWN_PYTHON_TARGET,
+    InterpreterRequirements,
     StagedInterpreter,
     build_own_python,
     interpreter_version,
+    plan_disabled_libraries,
+    resolve_requirements,
     stage_interpreter,
 )
 from smelt.process import call_command
@@ -157,6 +165,24 @@ LAUNCHER_RESERVED_NAMES: Final[tuple[str, ...]] = (
 type DiscoveryMode = Literal["static", "trace", "both"]
 
 DEFAULT_DISCOVERY: Final[DiscoveryMode] = "both"
+
+#: Whether a mode `own` interpreter's contents follow the application's dependency
+#: closure (see `own_python.resolve_requirements`) rather than being the whole standard
+#: library and every extension module.
+#:
+#: **On by default**, and the trade-off deserves stating rather than hiding: tailoring
+#: is what makes a mode `own` folder a reasonable size, and the alternative default
+#: would mean nobody ever gets the win without knowing the flag exists. What it risks
+#: is turning a *discovery* gap into a runtime `ImportError` -- a standard library
+#: module imported lazily, on a path not taken at import time, under a name absent from
+#: the source is invisible to both discovery methods, and an untailored interpreter
+#: would have carried it anyway. Three things make that acceptable: the default
+#: discovery mode is the union of both methods (a stdlib module imported anywhere in
+#: any reachable source is kept, whether that import ever runs or not), `ALWAYS_KEEP`
+#: covers the modules that are structurally invisible to a closure, and
+#: `--include-module` forces back anything found missing. `--no-tailor-interpreter`
+#: restores the untailored interpreter wholesale.
+DEFAULT_TAILOR_INTERPRETER: Final[bool] = True
 
 #: How long the tracing subprocess is given before it is given up on. Importing an
 #: entrypoint is normally near-instantaneous; a module that blocks on import (opening
@@ -475,6 +501,28 @@ def resolve_dist_python(
         f"Invalid python mode {declared!r}, expected one of 'byo' (bring your own "
         "interpreter, the default) or 'own' (ship one smelt builds itself)."
     )
+
+
+def resolve_tailor_interpreter(
+    entrypoint_options: EntrypointOptions,
+    tailor_interpreter: bool | None = None,
+) -> bool:
+    """
+    Whether the mode `own` interpreter's contents follow the application's closure:
+    `tailor_interpreter` where the caller decided (the CLI wins over the declaration),
+    then the entrypoint's own `tailor-interpreter` option, then
+    `DEFAULT_TAILOR_INTERPRETER`.
+    """
+    if tailor_interpreter is not None:
+        return tailor_interpreter
+    declared = entrypoint_options.get("tailor-interpreter", DEFAULT_TAILOR_INTERPRETER)
+    if not isinstance(declared, bool):
+        raise DistError(
+            f"Invalid tailor-interpreter {declared!r}, expected a boolean: true (the "
+            "default, ship only what the application needs) or false (ship the whole "
+            "standard library)."
+        )
+    return declared
 
 
 def assert_no_version_skew(tag: PycTargetTag, interpreter_version: tuple[int, int]) -> None:
@@ -963,6 +1011,42 @@ def _discovery_note(report: DistReport) -> str:
     }[report.discovery]
 
 
+def _interpreter_contents_note(interpreter: StagedInterpreter) -> str:
+    """
+    The paragraph saying whether the shipped interpreter is the whole standard library
+    or only the part this application was found to need -- and, when it is the latter,
+    what that means for someone whose code path reaches further than discovery did.
+
+    Two genuinely different answers again, and the tailored one is the answer to a
+    question a reader of a *failing* distribution will have.
+    """
+    if not interpreter.tailored:
+        return (
+            "This is a *vanilla* build: which parts of the interpreter this particular\n"
+            "application needs is not worked out, so it is bigger than it has to be. Build\n"
+            "with `--tailor-interpreter` to ship only what the application was found to need."
+        )
+    disabled = ", ".join(interpreter.disabled_libraries) or "none"
+    trees = len(interpreter.pruned_modules)
+    extensions = len(interpreter.pruned_extensions)
+    before = f"{interpreter.size_before_prune_bytes / 1e6:.0f}"
+    return f"""\
+Its contents are *tailored* to this application: the standard library trees and
+extension modules the build found no import for are not in here, and the interpreter
+itself was compiled without the libraries none of them needed ({disabled}).
+
+{trees} standard library tree(s) and {extensions} extension module(s) were left out.
+The tree measured {before} MB just before that pass, and the shared libraries those
+extension modules would have pulled in behind them are not here either -- which is
+usually the larger half of the difference. The full list is in `{MANIFEST_NAME}`,
+under `interpreter.pruned_modules` and `interpreter.pruned_extensions`.
+
+If the application turns out to import a standard library module on a code path that
+was not taken while it was being analysed, that import fails here where it would have
+worked in an untailored build. `--include-module <name>` puts it back, and
+`--no-tailor-interpreter` ships the whole standard library again."""
+
+
 def _own_python_run_instructions(report: DistReport, interpreter: StagedInterpreter) -> str:
     """
     How to run a mode `own` distribution: nothing to install, with the libc caveat.
@@ -982,6 +1066,7 @@ def _own_python_run_instructions(report: DistReport, interpreter: StagedInterpre
         if interpreter.pruned
         else "Nothing was pruned from it."
     )
+    contents = _interpreter_contents_note(interpreter)
     return f"""\
 How to run this distribution
 ============================
@@ -1020,8 +1105,8 @@ this machine's Python install: `bin/python`, `lib/libpython*.so` and the standar
 library under `lib/python{interpreter.version_string}/`, {size} MB in total.
 
 The standard library ships as bytecode only, with no `.py` alongside. {pruned}
-This is a *vanilla* build: which parts of the interpreter this particular application
-needs is not worked out, so it is bigger than it has to be.
+
+{contents}
 
 What is bundled, and what is not
 --------------------------------
@@ -1151,6 +1236,8 @@ def build_dist(
     discovery: DiscoveryMode | None = None,
     python: DistPython | None = None,
     own_python_target: str | None = None,
+    tailor_interpreter: bool | None = None,
+    drop_stdlib_groups: Iterable[str] = (),
     guard_version: bool = True,
     isolate: bool = True,
     include_modules: Iterable[str] = (),
@@ -1178,6 +1265,16 @@ def build_dist(
     folder runs on a machine with no Python installed. The interpreter shipped must
     agree on `(major, minor)` with the one compiling the bytecode here; a patch
     difference is fine (see `assert_no_version_skew`).
+
+    `tailor_interpreter` makes that interpreter's contents follow the same closure
+    (see `own_python.resolve_requirements` and `DEFAULT_TAILOR_INTERPRETER`), which is
+    why the closure is now collected *before* the interpreter is built: which libraries
+    it need not be compiled against is part of its build options, and changing those
+    means a different build.
+
+    `drop_stdlib_groups` names optional groups of the Minimal Viable Stdlib (see
+    `own_python.MINIMAL_VIABLE_STDLIB`) the caller is willing to ship without, each
+    with a documented consequence. Additive over the entrypoint's own declaration.
 
     `guard_version` and `isolate` put the corresponding guards in the generated
     `__main__` (see `write_entrypoint_module`). Both default on: they are what make
@@ -1211,23 +1308,12 @@ def build_dist(
     resolved_python = resolve_dist_python(entrypoint_options, python)
     tag = PycTargetTag.current(optimize)
 
-    built_interpreter: PathExists | None = None
-    if resolved_python == "own":
-        target = own_python_target or entrypoint_options.get(
-            "own-python-target", DEFAULT_OWN_PYTHON_TARGET
-        )
-        # Built (or, normally, taken from cache) before anything is assembled: the
-        # skew check below can only be made once the interpreter's own version is
-        # known, and failing it after the whole folder has been written would be a
-        # pointless wait for an answer available now.
-        built_interpreter = build_own_python(target=target)
-        assert_no_version_skew(tag, interpreter_version(built_interpreter))
-
     search_paths = project_search_paths(path_solver)
+    forced_modules = [*entrypoint_options.get("include-modules", []), *include_modules]
     closure = collect_closure(
         entrypoint_module,
         search_paths,
-        extra_modules=[*entrypoint_options.get("include-modules", []), *include_modules],
+        extra_modules=forced_modules,
         extra_packages=[*entrypoint_options.get("include-package", []), *include_packages],
         discovery=resolved_discovery,
         exclude_modules=[
@@ -1235,6 +1321,44 @@ def build_dist(
             *exclude_modules,
         ],
     )
+
+    built_interpreter: PathExists | None = None
+    interpreter_requirements: InterpreterRequirements | None = None
+    if resolved_python == "own":
+        target = own_python_target or entrypoint_options.get(
+            "own-python-target", DEFAULT_OWN_PYTHON_TARGET
+        )
+        # The closure's own standard library modules -- what `build_dist` used to
+        # discard as "the target interpreter brings its own", and what decides the
+        # interpreter's contents now.
+        stdlib_modules = sorted(
+            import_path for import_path, resolved in closure.items() if resolved.is_stdlib
+        )
+        tailor = resolve_tailor_interpreter(entrypoint_options, tailor_interpreter)
+        # Which libraries to build without has to be settled *before* the build, while
+        # the rest of the decision (`resolve_requirements`) needs the built prefix to
+        # ask it for its bootstrap module set -- hence the two calls rather than one.
+        disabled_libraries = (
+            plan_disabled_libraries(stdlib_modules, include_modules=forced_modules)
+            if tailor
+            else frozenset[str]()
+        )
+        # Built (or, where the option set has been built before, taken from cache)
+        # before anything is assembled: the skew check below can only be made once the
+        # interpreter's own version is known, and failing it after the whole folder has
+        # been written would be a pointless wait for an answer available now.
+        built_interpreter = build_own_python(target=target, disabled_libraries=disabled_libraries)
+        assert_no_version_skew(tag, interpreter_version(built_interpreter))
+        if tailor:
+            interpreter_requirements = resolve_requirements(
+                stdlib_modules,
+                built_interpreter,
+                include_modules=forced_modules,
+                drop_stdlib_groups=[
+                    *entrypoint_options.get("drop-stdlib-groups", []),
+                    *drop_stdlib_groups,
+                ],
+            )
 
     dist_root = output_dir / dist_folder_name(config, entrypoint_spec)
     if dist_root.exists():
@@ -1369,7 +1493,9 @@ def build_dist(
     report.entrypoint_file = entrypoint_file.relative_to(payload_root)
 
     if built_interpreter is not None:
-        report.interpreter = stage_interpreter(built_interpreter, dist_root)
+        report.interpreter = stage_interpreter(
+            built_interpreter, dist_root, requirements=interpreter_requirements
+        )
         report.launcher = write_launcher_shim(
             launcher_name(config, entrypoint_spec), dist_root, report.interpreter
         )

@@ -126,7 +126,10 @@ def _iter_raw_imports(source: str) -> Iterator[tuple[str | None, int, tuple[str,
 
 
 def _resolve_relative_import(
-    current: ImportPath, is_package: bool, module: str | None, level: int
+    current: ImportPath,
+    is_package: bool,
+    module: str | None,
+    level: int,
 ) -> ImportPath | None:
     """
     Resolves a relative `from . import ...` statement found in `current`
