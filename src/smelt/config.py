@@ -233,6 +233,11 @@ EntrypointOptions = TypedDict(
         # Zig target triple for the `python = "own"` interpreter build; omitted means
         # a native build against the host's own libc.
         "own-python-target": str,
+        # Whether the `python = "own"` interpreter's contents follow this entrypoint's
+        # dependency closure (the default) instead of being the whole standard
+        # library. See `smelt.dist.DEFAULT_TAILOR_INTERPRETER` for the trade-off.
+        "tailor-interpreter": bool,
+        "drop-stdlib-groups": list[str],
     },
     total=False,
 )

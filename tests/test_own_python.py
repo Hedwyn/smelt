@@ -33,6 +33,7 @@ import pytest
 from smelt.bytecode import PycTargetTag, compile_tree
 from smelt.config import EntrypointOptions, SmeltConfig
 from smelt.dist import (
+    DEFAULT_TAILOR_INTERPRETER,
     INSTRUCTIONS_NAME,
     LAUNCHER_RESERVED_NAMES,
     MANIFEST_NAME,
@@ -43,19 +44,28 @@ from smelt.dist import (
     build_dist,
     launcher_name,
     resolve_dist_python,
+    resolve_tailor_interpreter,
     run_instructions,
     write_launcher_shim,
 )
 from smelt.frontend import parse_config_from_pyproject
 from smelt.native_deps import is_supported_platform
 from smelt.own_python import (
+    ALWAYS_KEEP,
+    MINIMAL_VIABLE_STDLIB,
+    OPTIONAL_STDLIB_GROUPS,
+    minimal_viable_stdlib,
     DEFAULT_STDLIB_PRUNE,
     INTERPRETER_HOST_DLL_PREFIXES,
     INTERPRETER_REL_PATH,
+    LIBRARY_MODULES,
     OwnPythonError,
     StagedInterpreter,
+    bootstrap_modules,
     interpreter_version,
     own_python_cache_dir,
+    plan_disabled_libraries,
+    resolve_requirements,
     stage_interpreter,
 )
 from smelt.utils import assert_is_valid_import_path, assert_path_exists
@@ -76,9 +86,9 @@ needs_own_python = pytest.mark.skipif(
 def _fake_interpreter_prefix(root: Path) -> Path:
     """
     An interpreter prefix in the shape `stage_interpreter` walks, cheap enough to
-    build in every test: a `bin/python` that answers the one question
-    `interpreter_version` asks it, and a standard library made of a few files chosen
-    to cover each case the staging has to handle.
+    build in every test: a `bin/python` answering the three questions the staging asks
+    an interpreter about itself, and a standard library made of a few files chosen to
+    cover each case the staging has to handle.
 
     `test/badsyntax.py` is not padding: CPython's own standard library ships
     deliberately-invalid-syntax fixtures under `test/`, and they were the only
@@ -88,7 +98,19 @@ def _fake_interpreter_prefix(root: Path) -> Path:
     prefix = root / "built"
     executable = prefix / INTERPRETER_REL_PATH
     executable.parent.mkdir(parents=True)
-    executable.write_text("#!/bin/sh\necho '3 12'\n")
+    # Dispatching on the probe rather than answering one question, so the tailoring
+    # decision (which asks for the bootstrap set and for the builtin/frozen modules)
+    # is exercisable without a real 63 MB interpreter. The markers are the ones each
+    # probe's own source carries, see `own_python._probe_interpreter`'s callers.
+    executable.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "    *version_info*) echo '3 12' ;;\n"
+        "    *sys.modules*) echo 'builtins marshal sys zipimport' ;;\n"
+        '    *FrozenImporter*) echo \'["builtins", "marshal", "sys", "zipimport"]\' ;;\n'
+        "    *) echo 'unexpected probe' >&2; exit 1 ;;\n"
+        "esac\n"
+    )
     executable.chmod(0o755)
 
     stdlib = prefix / "lib" / "python3.12"
@@ -221,6 +243,174 @@ def test_stage_interpreter_keeps_the_source_landmark_when_not_sourceless(tmp_pat
     assert not staged.sourceless
     assert (stdlib / "os.py").is_file()
     assert not (stdlib / "os.pyc").exists()
+
+
+def test_bootstrap_modules_reports_what_the_interpreter_loaded_itself(tmp_path: Path) -> None:
+    """
+    `__main__` is the probe, not a module the interpreter needs, so it must not come
+    back as one.
+    """
+    prefix = _fake_interpreter_prefix(tmp_path)
+
+    assert bootstrap_modules(assert_path_exists(prefix)) == frozenset(
+        {"builtins", "marshal", "sys", "zipimport"}
+    )
+
+
+def test_plan_disabled_libraries_turns_off_only_what_nothing_needs() -> None:
+    # `_ssl` names the extension module, `sqlite3` only the pure-Python wrapper: both
+    # have to keep their library, or the module they name cannot import.
+    disabled = plan_disabled_libraries(["_ssl", "sqlite3", "json"])
+
+    assert "openssl" not in disabled
+    assert "sqlite" not in disabled
+    assert disabled == frozenset(set(LIBRARY_MODULES) - {"openssl", "sqlite"})
+
+
+def test_plan_disabled_libraries_honors_forced_modules() -> None:
+    assert "lzma" in plan_disabled_libraries(["json"])
+    assert "lzma" not in plan_disabled_libraries(["json"], include_modules=["lzma"])
+
+
+def test_plan_disabled_libraries_never_touches_a_library_always_keep_needs() -> None:
+    """
+    `ALWAYS_KEEP` is unioned in before the decision, so a safety-net module cannot end
+    up in an interpreter built without what it needs.
+    """
+    disabled = plan_disabled_libraries([])
+    for library in disabled:
+        assert not set(LIBRARY_MODULES[library]).intersection(ALWAYS_KEEP)
+
+
+def test_resolve_requirements_widens_the_closure(tmp_path: Path) -> None:
+    prefix = assert_path_exists(_fake_interpreter_prefix(tmp_path))
+
+    requirements = resolve_requirements(["email.parser"], prefix, include_modules=["zoneinfo"])
+
+    # the closure's own names, and every package they live under
+    assert {"email.parser", "email"} <= requirements.keep_modules
+    # the safety net
+    assert set(ALWAYS_KEEP) <= requirements.keep_modules
+    # what the interpreter said it loads by itself
+    assert {"builtins", "zipimport"} <= requirements.keep_modules
+    # and what the caller insisted on, recorded as such
+    assert "zoneinfo" in requirements.keep_modules
+    assert requirements.forced == frozenset({"zoneinfo"})
+    # pruning happens at top-level granularity
+    assert requirements.needs("email")
+    assert not requirements.needs("sqlite3")
+
+
+def test_stage_interpreter_keeps_everything_without_requirements(tmp_path: Path) -> None:
+    """
+    Step 1's behaviour has to stay reachable: no requirements, no closure-driven
+    pruning, and `lib-dynload` copied wholesale.
+    """
+    prefix = _fake_interpreter_prefix(tmp_path)
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+
+    staged = stage_interpreter(assert_path_exists(prefix), dist_root, bundle_dependencies=False)
+
+    stdlib = dist_root / "lib" / "python3.12"
+    assert not staged.tailored
+    assert staged.pruned_modules == []
+    assert staged.pruned_extensions == []
+    assert staged.disabled_libraries == []
+    assert (stdlib / "json" / "__init__.pyc").is_file()
+    assert (stdlib / "lib-dynload" / "_json.cpython-312-x86_64-linux-gnu.so").is_file()
+
+
+def test_stage_interpreter_prunes_what_the_closure_did_not_reach(tmp_path: Path) -> None:
+    prefix = _fake_interpreter_prefix(tmp_path)
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+    # An empty closure: nothing but the safety net and the bootstrap set survives.
+    requirements = resolve_requirements([], assert_path_exists(prefix))
+
+    staged = stage_interpreter(
+        assert_path_exists(prefix),
+        dist_root,
+        bundle_dependencies=False,
+        requirements=requirements,
+    )
+
+    stdlib = dist_root / "lib" / "python3.12"
+    assert staged.tailored
+    assert staged.pruned_modules == ["json"]
+    assert staged.pruned_extensions == ["_json"]
+    assert sorted(staged.disabled_libraries) == sorted(LIBRARY_MODULES)
+    assert not (stdlib / "json").exists()
+    assert not (stdlib / "lib-dynload" / "_json.cpython-312-x86_64-linux-gnu.so").exists()
+    # `os` is in ALWAYS_KEEP, which is also what stops the landmark being prunable
+    assert (stdlib / "os.pyc").is_file()
+    assert staged.size_before_prune_bytes >= staged.size_bytes
+
+
+def test_stage_interpreter_keeps_what_the_closure_reached(tmp_path: Path) -> None:
+    prefix = _fake_interpreter_prefix(tmp_path)
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+    requirements = resolve_requirements(["json", "_json"], assert_path_exists(prefix))
+
+    staged = stage_interpreter(
+        assert_path_exists(prefix),
+        dist_root,
+        bundle_dependencies=False,
+        requirements=requirements,
+    )
+
+    stdlib = dist_root / "lib" / "python3.12"
+    assert staged.pruned_modules == []
+    assert staged.pruned_extensions == []
+    assert (stdlib / "json" / "__init__.pyc").is_file()
+    assert (stdlib / "lib-dynload" / "_json.cpython-312-x86_64-linux-gnu.so").is_file()
+
+
+def test_stage_interpreter_refuses_to_ship_without_a_module_it_needs(tmp_path: Path) -> None:
+    """
+    The safety net: a prune pattern matching a module the application needs has to
+    fail the build, not produce a folder that dies on an import somewhere else.
+    """
+    prefix = _fake_interpreter_prefix(tmp_path)
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+    requirements = resolve_requirements(["json"], assert_path_exists(prefix))
+
+    with pytest.raises(OwnPythonError, match="json"):
+        stage_interpreter(
+            assert_path_exists(prefix),
+            dist_root,
+            bundle_dependencies=False,
+            prune=(*DEFAULT_STDLIB_PRUNE, "json"),
+            requirements=requirements,
+        )
+
+
+def test_own_python_cache_dir_keeps_the_vanilla_name() -> None:
+    """
+    An all-defaults build has to keep hitting the directory it has always used --
+    renaming its key turns every untailored build into a full CPython rebuild.
+    """
+    assert own_python_cache_dir().name == "native"
+    assert own_python_cache_dir("x86_64-linux-musl").name == "x86_64-linux-musl"
+    assert own_python_cache_dir(debug=True).name == "native-debug"
+
+
+def test_own_python_cache_dir_separates_library_option_sets() -> None:
+    keyed = own_python_cache_dir(disabled_libraries=["tk", "sqlite"])
+
+    assert keyed != own_python_cache_dir()
+    # order-independent, so the same option set never builds twice
+    assert keyed == own_python_cache_dir(disabled_libraries=["sqlite", "tk"])
+
+
+def test_resolve_tailor_interpreter_prefers_the_caller_then_the_declaration() -> None:
+    assert resolve_tailor_interpreter(EntrypointOptions()) is DEFAULT_TAILOR_INTERPRETER
+    assert resolve_tailor_interpreter(EntrypointOptions({"tailor-interpreter": False})) is False
+    assert (
+        resolve_tailor_interpreter(EntrypointOptions({"tailor-interpreter": False}), True) is True
+    )
 
 
 def test_compile_tree_reports_both_halves(tmp_path: Path) -> None:
@@ -387,6 +577,13 @@ def hatchdemo_dist(tmp_path_factory: pytest.TempPathFactory) -> Path:
         output_dir=output_dir,
         path_solver=config.get_path_solver(project_root=HATCHDEMO_ROOT),
         python="own",
+        # Untailored on purpose, and not because tailoring is untested (it is, above,
+        # and functionally in `test_a_tailored_interpreter_runs_what_it_kept`): a
+        # tailored interpreter is compiled without the libraries the application does
+        # not need, which is a *different build* under a different cache key. Leaving
+        # this at the default would make this whole tier trigger a ten-minute CPython
+        # build instead of reusing what is already cached.
+        tailor_interpreter=False,
     )
     assert report.interpreter is not None, "--python own must stage an interpreter"
     return report.dist_root
@@ -481,6 +678,47 @@ def test_nothing_in_the_distribution_reaches_outside_it(hatchdemo_dist: Path) ->
 
 
 @needs_own_python
+def test_a_tailored_interpreter_runs_what_it_kept(tmp_path: Path) -> None:
+    """
+    Tailoring against a *real* interpreter, without paying for a build: staging is
+    what does the pruning, and it works on whatever prefix it is handed -- so the
+    cached vanilla build is enough to check that a tailored tree still starts, still
+    finds the modules the safety net keeps, and is meaningfully smaller.
+    """
+    prefix = assert_path_exists(_CACHED_PREFIX)
+    dist_root = tmp_path / "tailored.dist"
+    dist_root.mkdir()
+    reference = tmp_path / "vanilla.dist"
+    reference.mkdir()
+
+    vanilla = stage_interpreter(prefix, reference, bundle_dependencies=False)
+    tailored = stage_interpreter(
+        prefix,
+        dist_root,
+        bundle_dependencies=False,
+        # A closure of one module, so almost everything is up for pruning.
+        requirements=resolve_requirements(["json", "_json"], prefix),
+    )
+
+    assert tailored.tailored
+    assert tailored.size_bytes < vanilla.size_bytes
+    assert "sqlite3" in tailored.pruned_modules
+    assert "nis" in tailored.pruned_extensions
+    # what the closure named, and what the safety net keeps whatever it says
+    probe = (
+        "import encodings.idna, json, linecache, runpy, traceback, warnings, zipimport\n"
+        "print('ok')\n"
+    )
+    completed = subprocess.run(
+        [str(dist_root / INTERPRETER_REL_PATH), "-I", "-c", probe],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/nonexistent"},
+    )
+    assert completed.stdout.strip() == "ok", completed.stderr
+
+
+@needs_own_python
 def test_the_manifest_and_instructions_describe_mode_own(hatchdemo_dist: Path) -> None:
     manifest = json.loads((hatchdemo_dist / MANIFEST_NAME).read_text())
     assert manifest["mode"] == "own"
@@ -511,3 +749,58 @@ def test_run_instructions_fall_back_to_the_interpreter_when_there_is_no_launcher
         interpreter=_a_staged_interpreter(),
     )
     assert f"./bin/python ./{PAYLOAD_DIR_NAME}" in run_instructions(report)
+
+
+def test_every_optional_stdlib_group_states_its_consequence() -> None:
+    """
+    A group is only worth being a group if dropping it can be chosen, and a choice
+    whose cost cannot be stated is a trap rather than an option -- so `StdlibGroup`
+    enforces it and this pins the invariant.
+    """
+    for group in MINIMAL_VIABLE_STDLIB:
+        assert group.rationale, group.name
+        if group.optional:
+            assert group.consequence, group.name
+    assert OPTIONAL_STDLIB_GROUPS, "a split with nothing droppable would be pointless"
+
+
+def test_minimal_viable_stdlib_defaults_to_every_group() -> None:
+    assert minimal_viable_stdlib() == frozenset(ALWAYS_KEEP)
+    assert frozenset(ALWAYS_KEEP) == frozenset(
+        module for group in MINIMAL_VIABLE_STDLIB for module in group.modules
+    )
+
+
+def test_dropping_a_group_removes_exactly_its_modules() -> None:
+    for name in OPTIONAL_STDLIB_GROUPS:
+        (group,) = [g for g in MINIMAL_VIABLE_STDLIB if g.name == name]
+        assert frozenset(ALWAYS_KEEP) - minimal_viable_stdlib([name]) == frozenset(group.modules)
+
+
+def test_a_mandatory_group_cannot_be_dropped() -> None:
+    """
+    Dropping the import system would produce a folder that cannot start, so this is
+    refused rather than honoured -- and the error names what can be dropped instead.
+    """
+    mandatory = next(g.name for g in MINIMAL_VIABLE_STDLIB if not g.optional)
+    with pytest.raises(OwnPythonError) as excinfo:
+        minimal_viable_stdlib([mandatory])
+    assert mandatory in str(excinfo.value)
+    assert str(list(OPTIONAL_STDLIB_GROUPS)) in str(excinfo.value)
+
+
+def test_an_unknown_group_is_refused() -> None:
+    with pytest.raises(OwnPythonError, match="Unknown standard library group"):
+        minimal_viable_stdlib(["no_such_group"])
+
+
+@needs_own_python
+def test_dropping_a_group_narrows_the_keep_set() -> None:
+    prefix = assert_path_exists(own_python_cache_dir())
+    kept = resolve_requirements([], prefix)
+    narrowed = resolve_requirements(
+        [], prefix, drop_stdlib_groups=["international_hostnames"]
+    )
+    assert narrowed.dropped_stdlib_groups == frozenset({"international_hostnames"})
+    assert narrowed.keep_modules < kept.keep_modules
+    assert "unicodedata" in kept.keep_modules - narrowed.keep_modules

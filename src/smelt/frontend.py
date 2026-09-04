@@ -375,6 +375,30 @@ def build_standalone_binary(
     "which is the only shape verified so far.",
 )
 @click.option(
+    "--tailor-interpreter/--no-tailor-interpreter",
+    "tailor_interpreter",
+    default=None,
+    help="Whether the --python own interpreter ships only the standard library "
+    "modules, extension modules and libraries this application was found to need "
+    "(tailored, the default) or all of them. Tailoring is what keeps a mode 'own' "
+    "folder a reasonable size, and what can turn a discovery gap into a runtime "
+    "ImportError -- a stdlib module reached only on an untaken code path, under a name "
+    "absent from the source, is invisible to discovery and would have been carried "
+    "anyway by an untailored build. Put such a module back with --include-module. "
+    "Note each distinct set of disabled libraries needs its own interpreter build "
+    "(minutes), cached separately. Defaults to the entrypoint's own declaration, then "
+    "to tailored.",
+)
+@click.option(
+    "--drop-stdlib-group",
+    "drop_stdlib_groups",
+    multiple=True,
+    help="Ship a mode-'own' interpreter without one of the optional groups of the "
+    "Minimal Viable Stdlib (currently: international_hostnames, 1.1 MB, which costs "
+    "support for non-ASCII hostnames). Repeatable. Refused for the groups nothing can "
+    "run without.",
+)
+@click.option(
     "--no-version-guard",
     is_flag=True,
     default=False,
@@ -440,6 +464,8 @@ def build_dist_folder(
     discovery: Literal["static", "trace", "both"] | None,
     dist_python: Literal["byo", "own"] | None,
     own_python_target: str | None,
+    tailor_interpreter: bool | None,
+    drop_stdlib_groups: tuple[str, ...],
     no_version_guard: bool,
     no_isolate: bool,
     exclude_modules: tuple[str, ...],
@@ -480,6 +506,8 @@ def build_dist_folder(
         discovery=discovery,
         python=dist_python,
         own_python_target=own_python_target,
+        tailor_interpreter=tailor_interpreter,
+        drop_stdlib_groups=drop_stdlib_groups,
         guard_version=not no_version_guard,
         isolate=not no_isolate,
         exclude_modules=exclude_modules,
