@@ -227,6 +227,12 @@ EntrypointOptions = TypedDict(
         "discovery": str,
         "exclude-modules": list[str],
         "include-distribution-metadata": list[str],
+        # `python` is one of "byo" (bring your own interpreter, the default) or "own"
+        # (ship one smelt builds itself, so the folder needs no Python installed).
+        "python": str,
+        # Zig target triple for the `python = "own"` interpreter build; omitted means
+        # a native build against the host's own libc.
+        "own-python-target": str,
     },
     total=False,
 )

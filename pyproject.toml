@@ -31,6 +31,15 @@ cli = ["click"]
 # symbol naming), breaking that match. Raise the cap once the patch is updated for it.
 nuitka = ["nuitka<4.2", "patchelf>=0.17.2,<0.18; sys_platform == 'linux'"]
 cython = ["Cython"]
+# metapython: builds smelt's own CPython through Zig (`smelt build-dist --python own`,
+# see smelt.own_python). Pinned to a commit rather than a version, like the pins above,
+# because it is not on PyPI and its build.zig options are what smelt codes against:
+# 5ebc889 is the first commit carrying the `pyconfig-header` and `strip` options
+# own_python.py passes -- an older one silently builds an unstripped interpreter and
+# cannot cross-configure for musl at all.
+metapython = [
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@5ebc889",
+]
 build = [
   "Cython",
   "nuitka[onefile]<4.2",
@@ -38,6 +47,7 @@ build = [
   "mypy[mypyc]",
   "hatchling",
   "editables",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@5ebc889",
 ]
 
 [tool.setuptools]

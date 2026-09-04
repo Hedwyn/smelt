@@ -355,6 +355,26 @@ def build_standalone_binary(
     "entrypoint's own declaration, then to 'both'.",
 )
 @click.option(
+    "--python",
+    "dist_python",
+    type=click.Choice(["byo", "own"]),
+    default=None,
+    help="Which interpreter the distribution runs on. 'byo' (bring your own) ships "
+    "the application only, and needs a matching CPython installed on the target. "
+    "'own' additionally builds an interpreter and ships it inside the folder, so the "
+    "folder runs where no Python is installed at all -- the first such build takes "
+    "several minutes and is then cached per target. Defaults to the entrypoint's own "
+    "declaration, then to 'byo'.",
+)
+@click.option(
+    "--own-python-target",
+    type=str,
+    default=None,
+    help="Zig target triple to build the --python own interpreter for (e.g. "
+    "'x86_64-linux-musl'). Defaults to a native build against the host's own libc, "
+    "which is the only shape verified so far.",
+)
+@click.option(
     "--no-version-guard",
     is_flag=True,
     default=False,
@@ -418,6 +438,8 @@ def build_dist_folder(
     optimize: int | None,
     no_build: bool,
     discovery: Literal["static", "trace", "both"] | None,
+    dist_python: Literal["byo", "own"] | None,
+    own_python_target: str | None,
     no_version_guard: bool,
     no_isolate: bool,
     exclude_modules: tuple[str, ...],
@@ -432,9 +454,10 @@ def build_dist_folder(
     Assembles a distribution folder for an entrypoint: smelt-built extensions plus
     every other module it imports, shipped as bytecode.
 
-    The result runs on any machine with a matching CPython already installed -- the
-    interpreter itself is not bundled. Instructions are printed at the end of the run
-    and written into the folder.
+    With `--python byo` (the default) the result runs on any machine with a matching
+    CPython already installed. With `--python own` the interpreter is built and
+    shipped inside the folder too, which then runs on a machine with no Python at all.
+    Instructions are printed at the end of the run and written into the folder.
     """
     levelno = logging._nameToLevel[logging_level]
     logging.basicConfig(level=levelno)
@@ -455,6 +478,8 @@ def build_dist_folder(
         stdout="stdout",
         build_extensions=not no_build,
         discovery=discovery,
+        python=dist_python,
+        own_python_target=own_python_target,
         guard_version=not no_version_guard,
         isolate=not no_isolate,
         exclude_modules=exclude_modules,
