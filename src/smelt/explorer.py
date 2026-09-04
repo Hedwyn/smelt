@@ -82,30 +82,80 @@ def _is_type_checking_test(test: ast.expr) -> bool:
     return False
 
 
-def _iter_import_nodes(nodes: Iterable[ast.AST]) -> Iterator[ast.Import | ast.ImportFrom]:
+def _is_main_guard_test(test: ast.expr) -> bool:
     """
-    Yields every import statement under `nodes`, skipping the bodies of
-    `if TYPE_CHECKING:` blocks (but not their `else:`, which does run).
+    Whether `test` is the `if __name__ == "__main__":` guard, in either operand order.
 
-    Those imports exist for type checkers and are guaranteed *not* to happen at
-    runtime -- that is the whole point of the guard. Following them is the single
-    largest source of over-collection: one annotation-only import of a large library
-    would otherwise drag that library, and everything it imports, into the
-    distribution.
+    Only the `==` spelling is recognised. `!=` inverts which branch runs, and letting
+    it fall through to the ordinary handling -- following both branches -- errs towards
+    over-collection, which costs size rather than correctness.
+    """
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+        return False
+    if not isinstance(test.ops[0], ast.Eq):
+        return False
+    left, right = test.left, test.comparators[0]
+    return _names_main_module(left, right) or _names_main_module(right, left)
+
+
+def _names_main_module(name: ast.expr, literal: ast.expr) -> bool:
+    """
+    Whether `name` is `__name__` and `literal` the string `"__main__"`.
+    """
+    return (
+        isinstance(name, ast.Name)
+        and name.id == "__name__"
+        and isinstance(literal, ast.Constant)
+        and literal.value == "__main__"
+    )
+
+
+def _iter_import_nodes(
+    nodes: Iterable[ast.AST], *, follow_deferred: bool
+) -> Iterator[ast.Import | ast.ImportFrom]:
+    """
+    Yields every import statement under `nodes` that a plain `import` of the module
+    would actually execute.
+
+    Three kinds of import are skipped, all of them for the same reason: they cannot
+    run, or will not run, when the module is imported rather than executed.
+
+    * `if TYPE_CHECKING:` bodies (but not their `else:`, which does run). Those
+      imports exist for type checkers and are guaranteed *not* to happen at runtime --
+      that is the whole point of the guard. Following them is the single largest
+      source of over-collection: one annotation-only import of a large library would
+      otherwise drag that library, and everything it imports, into the distribution.
+    * `if __name__ == "__main__":` bodies. A module reached by an import never has
+      `__name__ == "__main__"`, so this is a certainty rather than a heuristic --
+      and it is how `heapq` reaches `doctest`.
+    * function bodies, when `follow_deferred` is false. These are deferred to call
+      time, so following them assumes every function is called. The caller decides
+      where that assumption is worth making (see `_walk_module`).
+
+    Class bodies are always followed: they execute on import, like module level.
     """
     for node in nodes:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             yield node
-        elif isinstance(node, ast.If) and _is_type_checking_test(node.test):
-            yield from _iter_import_nodes(node.orelse)
+        elif isinstance(node, ast.If) and (
+            _is_type_checking_test(node.test) or _is_main_guard_test(node.test)
+        ):
+            yield from _iter_import_nodes(node.orelse, follow_deferred=follow_deferred)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not follow_deferred:
+            continue
         else:
-            yield from _iter_import_nodes(ast.iter_child_nodes(node))
+            yield from _iter_import_nodes(
+                ast.iter_child_nodes(node), follow_deferred=follow_deferred
+            )
 
 
-def _iter_raw_imports(source: str) -> Iterator[tuple[str | None, int, tuple[str, ...]]]:
+def _iter_raw_imports(
+    source: str, *, follow_deferred: bool = True
+) -> Iterator[tuple[str | None, int, tuple[str, ...]]]:
     """
     Yields `(module, level, names)` for every `import`/`from ... import` statement
-    in `source`, except those a `TYPE_CHECKING` guard keeps from ever running.
+    in `source` that importing it would actually run (see `_iter_import_nodes`, which
+    `follow_deferred` is passed straight through to).
 
     `names` holds what a `from ... import a, b` statement pulls out of `module`, and
     matters because the language does not distinguish the two things it can be: a
@@ -117,7 +167,7 @@ def _iter_raw_imports(source: str) -> Iterator[tuple[str | None, int, tuple[str,
     `*` is dropped: a star import pulls in names, never a submodule of its own.
     """
     tree = ast.parse(source)
-    for node in _iter_import_nodes([tree]):
+    for node in _iter_import_nodes([tree], follow_deferred=follow_deferred):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield alias.name, 0, ()
@@ -470,20 +520,32 @@ def _walk_module(node: Node, registry: dict[ImportPath, Node], visited: set[Impo
         return
     is_package = module.is_package
 
+    # A function-body import is deferred to call time, so following it assumes the
+    # function gets called. In the standard library that assumption is wrong far more
+    # often than it is right: the imports there are overwhelmingly self-test, CLI and
+    # diagnostic paths that a shipped application never enters, and they are what makes
+    # the closure explode. `difflib._test()` alone is what pulls in
+    # `doctest -> unittest -> asyncio -> multiprocessing`, and `pdb` inside
+    # `bdb.set_trace()` is what pulls in `pydoc -> http.server -> ssl`. Application and
+    # third-party code gets the opposite treatment: there a lazy import is usually
+    # load-bearing (deferred to break a cycle, or to keep start-up cheap), and dropping
+    # it would ship a distribution that fails on the first call.
     try:
-        raw_imports = list(_iter_raw_imports(path.read_text()))
+        raw_imports = list(
+            _iter_raw_imports(path.read_text(), follow_deferred=not module.is_stdlib)
+        )
     except (SyntaxError, UnicodeDecodeError):
         # Unparseable source (e.g. a work-in-progress file): treat as a leaf,
         # same as a module we can't resolve at all.
         return
 
     targets: set[ImportPath] = set()
-    for module, level, names in raw_imports:
+    for imported, level, names in raw_imports:
         target: ImportPath | None
         if level:
-            target = _resolve_relative_import(node.name, is_package, module, level)
-        elif module is not None and is_valid_import_path(module):
-            target = assert_is_valid_import_path(module)
+            target = _resolve_relative_import(node.name, is_package, imported, level)
+        elif imported is not None and is_valid_import_path(imported):
+            target = assert_is_valid_import_path(imported)
         else:
             target = None
         if target is None:
