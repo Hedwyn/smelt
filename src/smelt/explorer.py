@@ -19,6 +19,13 @@ from importlib.metadata import Distribution
 from pathlib import Path
 from typing import NamedTuple
 
+from smelt.static_eval import (
+    DEFAULT_TARGET,
+    StaticNames,
+    TargetEnvironment,
+    condition_value,
+    static_names,
+)
 from smelt.utils import (
     ImportPath,
     ModuleName,
@@ -110,52 +117,125 @@ def _names_main_module(name: ast.expr, literal: ast.expr) -> bool:
     )
 
 
+def _branch_taken(test: ast.expr, names: StaticNames) -> bool | None:
+    """
+    Which branch of `if test:` a plain import of the module takes: True for the body,
+    False for the `else:`, None when it depends on something only running the module
+    could reveal.
+
+    Two guards are decided here rather than by `static_eval`, because neither is about
+    the target at all -- both are false by construction for a module that is *imported*:
+
+    * `if TYPE_CHECKING:` exists for type checkers and is guaranteed not to run.
+      Following it is the single largest source of over-collection: one annotation-only
+      import of a large library would otherwise drag that library, and everything it
+      imports, into the distribution;
+    * `if __name__ == "__main__":` cannot hold for a module reached by an import, which
+      is how `heapq` would otherwise reach `doctest`.
+    """
+    if _is_type_checking_test(test) or _is_main_guard_test(test):
+        return False
+    return condition_value(test, names)
+
+
+def _catches_import_error(handler: ast.ExceptHandler) -> bool:
+    """
+    Whether `handler` catches a failed import: `except ImportError:`,
+    `except ModuleNotFoundError:`, either of them in a tuple, or a bare `except:`.
+    """
+    if handler.type is None:
+        return True
+    caught = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    named = {
+        node.attr if isinstance(node, ast.Attribute) else node.id
+        for node in caught
+        if isinstance(node, (ast.Name, ast.Attribute))
+    }
+    return bool(named.intersection({"ImportError", "ModuleNotFoundError"}))
+
+
+def _is_optional_import(node: ast.Try) -> bool:
+    """
+    Whether `node` is the "optional import" idiom: a `try` whose failure to import is
+    caught and handled, with no `raise` in the handler.
+
+    That shape is a promise the module makes about itself -- it works without what it
+    just tried to import -- which is what makes the import droppable at all. A handler
+    that re-raises is making the opposite promise, and its import is mandatory however
+    it is spelled.
+    """
+    for handler in node.handlers:
+        if not _catches_import_error(handler):
+            continue
+        return not any(isinstance(statement, ast.Raise) for statement in ast.walk(handler))
+    return False
+
+
 def _iter_import_nodes(
-    nodes: Iterable[ast.AST], *, follow_deferred: bool
+    nodes: Iterable[ast.AST],
+    *,
+    follow_deferred: bool,
+    follow_optional: bool,
+    names: StaticNames,
 ) -> Iterator[ast.Import | ast.ImportFrom]:
     """
     Yields every import statement under `nodes` that a plain `import` of the module
-    would actually execute.
+    would actually execute, given the values `names` holds on the target.
 
-    Three kinds of import are skipped, all of them for the same reason: they cannot
-    run, or will not run, when the module is imported rather than executed.
+    Three things are skipped, because the import cannot run, will not run, or need not:
 
-    * `if TYPE_CHECKING:` bodies (but not their `else:`, which does run). Those
-      imports exist for type checkers and are guaranteed *not* to happen at runtime --
-      that is the whole point of the guard. Following them is the single largest
-      source of over-collection: one annotation-only import of a large library would
-      otherwise drag that library, and everything it imports, into the distribution.
-    * `if __name__ == "__main__":` bodies. A module reached by an import never has
-      `__name__ == "__main__"`, so this is a certainty rather than a heuristic --
-      and it is how `heapq` reaches `doctest`.
+    * the branch of a conditional that is not taken (`_branch_taken`) -- a
+      `TYPE_CHECKING` or `__main__` guard, or a platform/version guard decided against
+      the target. An undecidable condition keeps both branches;
     * function bodies, when `follow_deferred` is false. These are deferred to call
       time, so following them assumes every function is called. The caller decides
-      where that assumption is worth making (see `_walk_module`).
+      where that assumption is worth making (see `_walk_module`);
+    * the `try` and `else` blocks of an optional import (`_is_optional_import`), when
+      `follow_optional` is false. The handlers are followed instead, since they are
+      what runs when the import fails -- often importing the fallback the module
+      settles for. The `else` goes with the body because it only runs when the body
+      succeeded.
 
     Class bodies are always followed: they execute on import, like module level.
     """
     for node in nodes:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             yield node
-        elif isinstance(node, ast.If) and (
-            _is_type_checking_test(node.test) or _is_main_guard_test(node.test)
-        ):
-            yield from _iter_import_nodes(node.orelse, follow_deferred=follow_deferred)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not follow_deferred:
             continue
-        else:
-            yield from _iter_import_nodes(
-                ast.iter_child_nodes(node), follow_deferred=follow_deferred
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not follow_deferred:
+            continue
+        reachable: Iterable[ast.AST]
+        if isinstance(node, ast.If):
+            taken = _branch_taken(node.test, names)
+            reachable = (
+                ast.iter_child_nodes(node)
+                if taken is None
+                else (node.body if taken else node.orelse)
             )
+        elif isinstance(node, ast.Try) and not follow_optional and _is_optional_import(node):
+            reachable = [*node.handlers, *node.finalbody]
+        else:
+            reachable = ast.iter_child_nodes(node)
+        yield from _iter_import_nodes(
+            reachable,
+            follow_deferred=follow_deferred,
+            follow_optional=follow_optional,
+            names=names,
+        )
 
 
 def _iter_raw_imports(
-    source: str, *, follow_deferred: bool = True
+    source: str,
+    *,
+    follow_deferred: bool = True,
+    follow_optional: bool = True,
+    target: TargetEnvironment = DEFAULT_TARGET,
 ) -> Iterator[tuple[str | None, int, tuple[str, ...]]]:
     """
     Yields `(module, level, names)` for every `import`/`from ... import` statement
-    in `source` that importing it would actually run (see `_iter_import_nodes`, which
-    `follow_deferred` is passed straight through to).
+    in `source` that importing it would actually run: `follow_deferred` and
+    `follow_optional` go straight through to `_iter_import_nodes`, and `target` is what
+    the conditionals guarding those statements are decided against.
 
     `names` holds what a `from ... import a, b` statement pulls out of `module`, and
     matters because the language does not distinguish the two things it can be: a
@@ -167,7 +247,10 @@ def _iter_raw_imports(
     `*` is dropped: a star import pulls in names, never a submodule of its own.
     """
     tree = ast.parse(source)
-    for node in _iter_import_nodes([tree], follow_deferred=follow_deferred):
+    names = static_names(tree, target)
+    for node in _iter_import_nodes(
+        [tree], follow_deferred=follow_deferred, follow_optional=follow_optional, names=names
+    ):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield alias.name, 0, ()
@@ -506,7 +589,13 @@ def _get_or_create_node(import_path: ImportPath, registry: dict[ImportPath, Node
     return node
 
 
-def _walk_module(node: Node, registry: dict[ImportPath, Node], visited: set[ImportPath]) -> None:
+def _walk_module(
+    node: Node,
+    registry: dict[ImportPath, Node],
+    visited: set[ImportPath],
+    target: TargetEnvironment,
+    follow_optional: bool,
+) -> None:
     if node.name in visited:
         return
     visited.add(node.name)
@@ -532,42 +621,89 @@ def _walk_module(node: Node, registry: dict[ImportPath, Node], visited: set[Impo
     # it would ship a distribution that fails on the first call.
     try:
         raw_imports = list(
-            _iter_raw_imports(path.read_text(), follow_deferred=not module.is_stdlib)
+            _iter_raw_imports(
+                path.read_text(),
+                follow_deferred=not module.is_stdlib,
+                follow_optional=follow_optional,
+                target=target,
+            )
         )
     except (SyntaxError, UnicodeDecodeError):
         # Unparseable source (e.g. a work-in-progress file): treat as a leaf,
         # same as a module we can't resolve at all.
         return
 
-    targets: set[ImportPath] = set()
+    dependencies: set[ImportPath] = set()
     for imported, level, names in raw_imports:
-        target: ImportPath | None
+        resolved: ImportPath | None
         if level:
-            target = _resolve_relative_import(node.name, is_package, imported, level)
+            resolved = _resolve_relative_import(node.name, is_package, imported, level)
         elif imported is not None and is_valid_import_path(imported):
-            target = assert_is_valid_import_path(imported)
+            resolved = assert_is_valid_import_path(imported)
         else:
-            target = None
-        if target is None:
+            resolved = None
+        if resolved is None:
             continue
-        targets.update(_expand_prefixes(target))
-        targets.update(_submodules_among(target, names))
+        dependencies.update(_expand_prefixes(resolved))
+        dependencies.update(_submodules_among(resolved, names))
 
-    for target in targets:
-        dep_node = _get_or_create_node(target, registry)
+    for dependency in dependencies:
+        dep_node = _get_or_create_node(dependency, registry)
         node.deps.add(dep_node)
-        _walk_module(dep_node, registry, visited)
+        _walk_module(dep_node, registry, visited, target, follow_optional)
 
 
-def build_dependency_graph(entrypoint: ImportPath) -> Node:
+def build_dependency_graph(
+    entrypoint: ImportPath,
+    target: TargetEnvironment = DEFAULT_TARGET,
+    *,
+    follow_optional: bool = True,
+) -> Node:
     """
     Recursively parses `entrypoint` and every module it imports,
     building the module dependency graph reachable from it.
+
+    Only what an import actually executes is followed, and `target` is what the
+    platform and version guards in the source are decided against -- the host by
+    default, which is the only machine smelt can currently assemble a distribution for
+    (see `TargetEnvironment.host`).
+
+    `follow_optional` decides what to do with an import a module already handles the
+    failure of (`_is_optional_import`). Default on, because "optional" is not
+    "unwanted": the fallback behind one is often slower, or narrower, than what it
+    replaces. Turning it off gives the smallest closure a module's own promises allow,
+    and the difference between the two graphs is exactly the set of modules a
+    distribution could leave out (see `optional_modules`).
     """
     registry: dict[ImportPath, Node] = {}
     root = _get_or_create_node(entrypoint, registry)
-    _walk_module(root, registry, set())
+    _walk_module(root, registry, set(), target, follow_optional)
     return root
+
+
+def optional_modules(
+    entrypoint: ImportPath, target: TargetEnvironment = DEFAULT_TARGET
+) -> set[ImportPath]:
+    """
+    The modules reachable from `entrypoint` *only* through imports it, or something it
+    imports, already handles the failure of.
+
+    Every one of them can be left out of a distribution without an `ImportError`: the
+    module that wanted it says so itself, in its own `except ImportError:` handler. What
+    that costs is not visible from here -- `hashlib` falls back to the builtin hashes
+    and nobody notices, while `urllib.request` without `ssl` quietly stops speaking
+    HTTPS -- which is why this reports rather than prunes.
+    """
+    required = {
+        node.name
+        for node in flatten_dependency_graph(
+            build_dependency_graph(entrypoint, target, follow_optional=False)
+        )
+    }
+    reachable = {
+        node.name for node in flatten_dependency_graph(build_dependency_graph(entrypoint, target))
+    }
+    return reachable - required
 
 
 def flatten_dependency_graph(root: Node) -> set[Node]:

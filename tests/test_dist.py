@@ -17,6 +17,7 @@ from smelt.dist import (
     build_dist,
     collect_closure,
     collect_distribution_metadata,
+    collect_optional_modules,
     collect_package_data,
     dist_folder_name,
     project_search_paths,
@@ -339,6 +340,43 @@ def test_exclude_modules_drops_a_whole_subtree(tmp_path: Path) -> None:
         discovery="static",
         exclude_modules=["exclpkg"],
     )
+
+
+def test_collect_optional_modules_names_what_the_closure_need_not_ship(
+    tmp_path: Path,
+) -> None:
+    """
+    A module that handles the failure of its own import is telling the bundler it works
+    without it. `collect_optional_modules` names those, and the entrypoint's own hard
+    imports are never among them.
+    """
+    package = tmp_path / "src" / "optpkg"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "accelerator.py").write_text("")
+    (package / "required.py").write_text("")
+    (package / "cli.py").write_text(
+        "from optpkg import required\n"
+        "\n"
+        "try:\n"
+        "    from optpkg import accelerator\n"
+        "except ImportError:\n"
+        "    accelerator = None\n"
+    )
+
+    optional = collect_optional_modules(
+        assert_is_valid_import_path("optpkg.cli"), [str(tmp_path / "src")]
+    )
+    assert "optpkg.accelerator" in optional
+    assert "optpkg.required" not in optional
+    assert "optpkg.cli" not in optional
+    # ... and it is shipped all the same unless the caller says otherwise
+    closure = collect_closure(
+        assert_is_valid_import_path("optpkg.cli"),
+        [str(tmp_path / "src")],
+        discovery="static",
+    )
+    assert "optpkg.accelerator" in closure
 
 
 def test_collect_distribution_metadata_ships_dist_info(tmp_path: Path) -> None:

@@ -52,17 +52,17 @@ from smelt.frontend import parse_config_from_pyproject
 from smelt.native_deps import is_supported_platform
 from smelt.own_python import (
     ALWAYS_KEEP,
-    MINIMAL_VIABLE_STDLIB,
-    OPTIONAL_STDLIB_GROUPS,
-    minimal_viable_stdlib,
     DEFAULT_STDLIB_PRUNE,
     INTERPRETER_HOST_DLL_PREFIXES,
     INTERPRETER_REL_PATH,
     LIBRARY_MODULES,
+    MINIMAL_VIABLE_STDLIB,
+    OPTIONAL_STDLIB_GROUPS,
     OwnPythonError,
     StagedInterpreter,
     bootstrap_modules,
     interpreter_version,
+    minimal_viable_stdlib,
     own_python_cache_dir,
     plan_disabled_libraries,
     resolve_requirements,
@@ -798,9 +798,7 @@ def test_an_unknown_group_is_refused() -> None:
 def test_dropping_a_group_narrows_the_keep_set() -> None:
     prefix = assert_path_exists(own_python_cache_dir())
     kept = resolve_requirements([], prefix)
-    narrowed = resolve_requirements(
-        [], prefix, drop_stdlib_groups=["international_hostnames"]
-    )
+    narrowed = resolve_requirements([], prefix, drop_stdlib_groups=["international_hostnames"])
     assert narrowed.dropped_stdlib_groups == frozenset({"international_hostnames"})
     assert narrowed.keep_modules < kept.keep_modules
     assert "unicodedata" in kept.keep_modules - narrowed.keep_modules

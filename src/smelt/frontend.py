@@ -422,6 +422,19 @@ def build_standalone_binary(
     "discovery reached but that are not needed at runtime. Repeatable.",
 )
 @click.option(
+    "--drop-optional-imports/--keep-optional-imports",
+    "drop_optional_imports",
+    default=None,
+    help="Whether to leave out the modules only reachable through an import their own "
+    "importer already handles the failure of (`try: import x` / `except ImportError`). "
+    "None of them can raise an ImportError by being absent -- the module that wanted "
+    "them says so itself -- but what the fallback costs varies: dropping hashlib's "
+    "_hashlib saves 5 MB of statically linked OpenSSL and changes nothing observable, "
+    "while dropping ssl leaves urllib unable to speak HTTPS. Kept by default, and "
+    "listed in the build output either way, so the size on offer is visible before "
+    "the flag is used.",
+)
+@click.option(
     "--include-distribution-metadata",
     "include_distribution_metadata",
     multiple=True,
@@ -469,6 +482,7 @@ def build_dist_folder(
     no_version_guard: bool,
     no_isolate: bool,
     exclude_modules: tuple[str, ...],
+    drop_optional_imports: bool | None,
     include_distribution_metadata: tuple[str, ...],
     include_modules: tuple[str, ...],
     include_packages: tuple[str, ...],
@@ -511,6 +525,7 @@ def build_dist_folder(
         guard_version=not no_version_guard,
         isolate=not no_isolate,
         exclude_modules=exclude_modules,
+        drop_optional_imports=drop_optional_imports,
         include_distribution_metadata=include_distribution_metadata,
         include_modules=include_modules,
         include_packages=include_packages,

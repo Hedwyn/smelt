@@ -54,6 +54,7 @@ import shutil
 import sys
 import sysconfig
 import tempfile
+import textwrap
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
@@ -85,6 +86,7 @@ from smelt.explorer import (
     package_directories,
     resolve_module,
 )
+from smelt.explorer import optional_modules as explorer_optional_modules
 from smelt.native_deps import (
     BundledNatives,
     bundle_native_dependencies,
@@ -184,6 +186,18 @@ DEFAULT_DISCOVERY: Final[DiscoveryMode] = "both"
 #: restores the untailored interpreter wholesale.
 DEFAULT_TAILOR_INTERPRETER: Final[bool] = True
 
+#: Whether the distribution leaves out the modules reachable only through an import
+#: the importing module already handles the failure of (`collect_optional_modules`).
+#:
+#: **Off by default**, and unlike tailoring the conservative choice is the right one
+#: here, because "optional" is a claim about imports and not about behaviour. Every
+#: such module is droppable without an `ImportError` -- its own importer says so -- but
+#: the fallback behind one is sometimes invisible (`hashlib` losing OpenSSL still
+#: hashes) and sometimes a feature quietly disappearing (`urllib.request` without
+#: `ssl` stops speaking HTTPS). Nothing in the source distinguishes those two, so the
+#: build reports what is on the table and leaves the decision where the knowledge is.
+DEFAULT_DROP_OPTIONAL_IMPORTS: Final[bool] = False
+
 #: How long the tracing subprocess is given before it is given up on. Importing an
 #: entrypoint is normally near-instantaneous; a module that blocks on import (opening
 #: a socket, waiting on a lock) would otherwise hang the build indefinitely.
@@ -239,6 +253,11 @@ class DistReport:
     entrypoint_module: ImportPath
     tag: PycTargetTag
     discovery: DiscoveryMode = DEFAULT_DISCOVERY
+    #: Modules the closure reaches only through an import their importer handles the
+    #: failure of (`collect_optional_modules`), whether they were shipped or not.
+    optional: set[ImportPath] = field(default_factory=set)
+    #: Whether those modules were left out (`DEFAULT_DROP_OPTIONAL_IMPORTS`).
+    dropped_optional: bool = DEFAULT_DROP_OPTIONAL_IMPORTS
     entrypoint_file: Path = Path(f"{MAIN_MODULE_NAME}{PYC_SUFFIX}")
     bytecode: list[PycArtifact] = field(default_factory=list)
     natives: list[NativeArtifact] = field(default_factory=list)
@@ -273,6 +292,8 @@ class DistReport:
             f"Python:       {self.tag.version_string} "
             f"(optimize={self.tag.optimize}, magic={self.tag.magic_number.hex()})",
             f"Discovery:    {self.discovery}",
+            f"Optional modules:     {len(self.optional)} "
+            f"({'dropped' if self.dropped_optional else 'shipped'})",
             f"Bytecode modules:     {len(self.bytecode)}",
             f"Native artifacts:     {len(self.natives)}",
             f"Bundled libraries:    {len(self.native_deps.dependencies)}"
@@ -308,6 +329,8 @@ class DistReport:
             "entrypoint_module": self.entrypoint_module,
             "entrypoint_file": str(self.entrypoint_file),
             "discovery": self.discovery,
+            "optional_modules": sorted(self.optional),
+            "optional_imports": "dropped" if self.dropped_optional else "shipped",
             "python": {
                 **self.tag.serialize(),
                 "implementation": platform.python_implementation(),
@@ -525,6 +548,27 @@ def resolve_tailor_interpreter(
     return declared
 
 
+def resolve_drop_optional_imports(
+    entrypoint_options: EntrypointOptions,
+    drop_optional_imports: bool | None = None,
+) -> bool:
+    """
+    Whether to leave the optional modules out: `drop_optional_imports` where the caller
+    decided (the CLI wins over the declaration), then the entrypoint's own
+    `drop-optional-imports` option, then `DEFAULT_DROP_OPTIONAL_IMPORTS`.
+    """
+    if drop_optional_imports is not None:
+        return drop_optional_imports
+    declared = entrypoint_options.get("drop-optional-imports", DEFAULT_DROP_OPTIONAL_IMPORTS)
+    if not isinstance(declared, bool):
+        raise DistError(
+            f"Invalid drop-optional-imports {declared!r}, expected a boolean: false "
+            "(the default, ship what the closure reached) or true (leave out every "
+            "module its own importer handles the absence of)."
+        )
+    return declared
+
+
 def assert_no_version_skew(tag: PycTargetTag, interpreter_version: tuple[int, int]) -> None:
     """
     Refuses a shipped interpreter whose minor version differs from the one that
@@ -694,6 +738,22 @@ def _is_excluded(import_path: ImportPath, excluded: Iterable[str]) -> bool:
     )
 
 
+def _closure_roots(
+    entrypoint_module: ImportPath,
+    extra_modules: Iterable[str] = (),
+    extra_packages: Iterable[str] = (),
+) -> set[ImportPath]:
+    """
+    The modules a closure is walked from: the entrypoint, plus everything the caller
+    named by hand. Assumes `search_paths` are already importable.
+    """
+    roots = {entrypoint_module}
+    roots.update(assert_is_valid_import_path(module) for module in extra_modules)
+    for package in extra_packages:
+        roots.update(iter_package_modules(assert_is_valid_import_path(package)))
+    return roots
+
+
 def collect_closure(
     entrypoint_module: ImportPath,
     search_paths: Iterable[str] = (),
@@ -719,10 +779,7 @@ def collect_closure(
     them) back out, for trees that were reached but are not needed at runtime.
     """
     with _search_paths_prepended(search_paths):
-        roots = {entrypoint_module}
-        roots.update(assert_is_valid_import_path(module) for module in extra_modules)
-        for package in extra_packages:
-            roots.update(iter_package_modules(assert_is_valid_import_path(package)))
+        roots = _closure_roots(entrypoint_module, extra_modules, extra_packages)
 
         reachable: set[ImportPath] = set(roots)
         if discovery in ("static", "both"):
@@ -744,6 +801,41 @@ def collect_closure(
             if import_path == entrypoint_module or not _is_excluded(import_path, excluded)
         }
         return {import_path: resolve_module(import_path) for import_path in sorted(kept)}
+
+
+def collect_optional_modules(
+    entrypoint_module: ImportPath,
+    search_paths: Iterable[str] = (),
+    extra_modules: Iterable[str] = (),
+    extra_packages: Iterable[str] = (),
+) -> set[ImportPath]:
+    """
+    The modules the closure reaches *only* through imports whose failure the importing
+    module already handles -- `try: import x` / `except ImportError:` with no re-raise.
+
+    Every one of them can be left out without an `ImportError`, on the authority of
+    the module that wanted it. What that costs varies and is not visible from here:
+    `hashlib` falls back to the builtin hash implementations and nobody notices (5.1 MB
+    of statically linked OpenSSL saved), while `zipfile` without `bz2` quietly stops
+    reading bzip2-compressed archives. So this is what `drop_optional_imports` acts on
+    and what the report names, rather than something pruned by default.
+
+    Decided from the source alone: a runtime trace records the accelerator its own
+    fully equipped interpreter happened to load, which says nothing about whether the
+    application needs it.
+    """
+    with _search_paths_prepended(search_paths):
+        roots = _closure_roots(entrypoint_module, extra_modules, extra_packages)
+        optional: set[ImportPath] = set()
+        for root in roots:
+            optional.update(explorer_optional_modules(root))
+        required: set[ImportPath] = set()
+        for root in roots:
+            graph = build_dependency_graph(root, follow_optional=False)
+            required.update(node.name for node in flatten_dependency_graph(graph))
+        # A module another root needs outright is not optional, however this one got
+        # to it.
+        return optional - required - roots
 
 
 def _native_dest_rel_path(import_path: ImportPath, artifact: Path) -> Path:
@@ -1011,6 +1103,50 @@ def _discovery_note(report: DistReport) -> str:
     }[report.discovery]
 
 
+def _optional_imports_note(report: DistReport) -> str:
+    """
+    The paragraph about the modules whose absence their own importer already handles:
+    what was dropped, or what is on offer.
+
+    Worth a paragraph rather than a line in either direction. Shipped, it is the one
+    size reduction available without guessing anything. Dropped, it is the first thing
+    to suspect when a distribution that runs turns out to have lost a feature.
+    """
+    if not report.optional:
+        return ""
+    # Public names first: `bz2` says more to a reader than `_bz2`, and the accelerator
+    # modules are mostly the same decision as the module wrapping them.
+    shown = sorted(report.optional, key=lambda name: (name.startswith("_"), name))[:8]
+    names = ", ".join(shown) + ("" if len(report.optional) == len(shown) else ", ...")
+    if report.dropped_optional:
+        body = (
+            f"{len(report.optional)} module(s) whose absence their own importer already "
+            f"handles were left OUT of this folder ({names}). None of them can raise an "
+            "ImportError by being missing, but each one had a fallback that is now the "
+            "only path, so expect a slower or narrower version of whatever used it. "
+            "Build with `--keep-optional-imports` to ship them."
+        )
+    else:
+        body = (
+            f"{len(report.optional)} module(s) here are only reached through an import "
+            f"their own importer handles the failure of ({names}), so they can be left "
+            "out without an ImportError -- at the cost of whatever their fallback path "
+            "does instead. Build with `--drop-optional-imports` to leave them out."
+        )
+    return (
+        textwrap.fill(
+            body,
+            width=79,
+            initial_indent="* ",
+            subsequent_indent="  ",
+            # or `--drop-optional-imports` gets broken across two lines at a hyphen.
+            break_on_hyphens=False,
+            break_long_words=False,
+        )
+        + "\n"
+    )
+
+
 def _interpreter_contents_note(interpreter: StagedInterpreter) -> str:
     """
     The paragraph saying whether the shipped interpreter is the whole standard library
@@ -1128,7 +1264,7 @@ Current limitations
 * Package data files are only collected when asked for, through
   `include-package-data` -- a package folder can hold anything at all, so nothing is
   guessed. {len(report.data_files)} file(s) were collected here.
-{_discovery_note(report)}"""
+{_discovery_note(report)}{_optional_imports_note(report)}"""
 
 
 def _byo_run_instructions(report: DistReport) -> str:
@@ -1141,6 +1277,7 @@ def _byo_run_instructions(report: DistReport) -> str:
     libraries = len(report.native_deps.dependencies)
     data_files = len(report.data_files)
     discovery_note = _discovery_note(report)
+    optional_note = _optional_imports_note(report)
     native_deps_note = (
         ""
         if report.native_deps.resolved
@@ -1221,7 +1358,7 @@ Current limitations
 * Package data files are only collected when asked for, through
   `include-package-data` -- a package folder can hold anything at all, so nothing is
   guessed. {data_files} file(s) were collected here.
-{discovery_note}{native_deps_note}"""
+{discovery_note}{optional_note}{native_deps_note}"""
 
 
 def build_dist(
@@ -1245,6 +1382,7 @@ def build_dist(
     include_package_data: Iterable[str] = (),
     include_distribution_metadata: Iterable[str] = (),
     exclude_modules: Iterable[str] = (),
+    drop_optional_imports: bool | None = None,
 ) -> DistReport:
     """
     Assembles the distribution folder for one of `config`'s entrypoints under
@@ -1280,6 +1418,10 @@ def build_dist(
     `__main__` (see `write_entrypoint_module`). Both default on: they are what make
     `python <folder>/app` correct on a machine other than the one that built it.
 
+    `drop_optional_imports` leaves out the modules only reachable through an import
+    their own importer handles the failure of (`collect_optional_modules` and
+    `DEFAULT_DROP_OPTIONAL_IMPORTS`). They are listed in the report either way.
+
     `include_modules`, `include_packages`, `include_package_data`,
     `include_distribution_metadata` and `exclude_modules` are each additive over what
     the entrypoint declares under the same name in its own options.
@@ -1306,21 +1448,40 @@ def build_dist(
         )
     resolved_discovery: DiscoveryMode = declared_discovery
     resolved_python = resolve_dist_python(entrypoint_options, python)
+    drop_optional = resolve_drop_optional_imports(entrypoint_options, drop_optional_imports)
     tag = PycTargetTag.current(optimize)
 
     search_paths = project_search_paths(path_solver)
     forced_modules = [*entrypoint_options.get("include-modules", []), *include_modules]
+    forced_packages = [*entrypoint_options.get("include-package", []), *include_packages]
     closure = collect_closure(
         entrypoint_module,
         search_paths,
         extra_modules=forced_modules,
-        extra_packages=[*entrypoint_options.get("include-package", []), *include_packages],
+        extra_packages=forced_packages,
         discovery=resolved_discovery,
         exclude_modules=[
             *entrypoint_options.get("exclude-modules", []),
             *exclude_modules,
         ],
     )
+    # Reported whether or not they are dropped: an optional module is the one kind of
+    # over-collection the closure can name precisely, so leaving it unsaid would hide
+    # the only lever that needs no guesswork to pull. Kept whole rather than filtered
+    # down to the modules that look expensive *here*: half of these resolve to builtins
+    # on the machine running the build and to `lib-dynload` shared objects in the
+    # interpreter a mode `own` folder ships -- `_hashlib` is 5.1 MB there and a builtin
+    # here -- so a `ModuleKind` from this interpreter says nothing about the cost in the
+    # folder.
+    optional = collect_optional_modules(
+        entrypoint_module, search_paths, forced_modules, forced_packages
+    ).intersection(closure)
+    if drop_optional:
+        closure = {
+            import_path: module
+            for import_path, module in closure.items()
+            if import_path not in optional
+        }
 
     built_interpreter: PathExists | None = None
     interpreter_requirements: InterpreterRequirements | None = None
@@ -1374,6 +1535,8 @@ def build_dist(
         entrypoint_module=entrypoint_module,
         tag=tag,
         discovery=resolved_discovery,
+        optional=optional,
+        dropped_optional=drop_optional,
     )
 
     # Native artifacts first: whatever smelt built for a module is what that module

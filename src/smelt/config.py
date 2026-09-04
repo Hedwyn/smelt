@@ -238,6 +238,11 @@ EntrypointOptions = TypedDict(
         # library. See `smelt.dist.DEFAULT_TAILOR_INTERPRETER` for the trade-off.
         "tailor-interpreter": bool,
         "drop-stdlib-groups": list[str],
+        # Whether to leave out the modules only reachable through an import their own
+        # importer already handles the failure of. Off by default: every one of them is
+        # droppable without an `ImportError`, but what the fallback costs is not
+        # knowable from here. See `smelt.dist.DEFAULT_DROP_OPTIONAL_IMPORTS`.
+        "drop-optional-imports": bool,
     },
     total=False,
 )
