@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="description" content="Binary orchestrator for Python packages" /><link rel="canonical" href="https://hedwyn.github.io/smelt/" />
+      <link rel="shortcut icon" href="img/favicon.ico" />
+    <title>Smelt</title>
+    <link rel="stylesheet" href="css/theme.css" />
+    <link rel="stylesheet" href="css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Home";
+        var mkdocs_page_input_path = "index.md";
+        var mkdocs_page_url = "/smelt/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href="." class="icon icon-home"> Smelt
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="./search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Home</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#goals">Goals</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#standalone-binary-builds-ship-your-source-confidently">Standalone binary builds - ship your source confidently</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#unified-modern-pyprojecttoml-based-interface-over-several-binary-backends">Unified, modern pyproject.toml-based interface over several binary backends</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#building-standalone-binaries-out-of-your-package">Building standalone binaries out of your package</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#where-to-go-next">Where to go next</a>
+    </li>
+        </ul>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="get-started/">Get Started</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="manifesto/">Manifesto</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="build-hook/">Build Hook</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="cli/">CLI</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="advanced/">Advanced Use Cases</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="glossary/">Glossary</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href=".">Smelt</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Home</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Hedwyn/smelt/edit/master/docs/index.md">Edit on Hedwyn/smelt</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="smelt">Smelt<a class="headerlink" href="#smelt" title="Permanent link">&para;</a></h1>
+<p>Smelt is a Python tool that aims to greatly simplify shipping native code from Python projects. This notably covers:</p>
+<ul>
+<li>Providing a fully standalone way to compile native code in Python projects without any system dependency.</li>
+<li>Cross-compiling Python C extensions.</li>
+<li>Combining multiple tools building or providing native code in Python projects (e.g., mypyc, Nuitka, local C/Zig extensions).</li>
+<li>Providing a single high-level interface to automate binary builds, either for platform-specific wheels or even for standalone fully compiled binary Python projects.</li>
+</ul>
+<p>Head to <a href="get-started/">Get Started</a> for a minimal working setup - a single mypyc extension declared in a couple of lines of <code>pyproject.toml</code>.</p>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<h3 id="standalone-binary-builds-ship-your-source-confidently">Standalone binary builds - ship your source confidently<a class="headerlink" href="#standalone-binary-builds-ship-your-source-confidently" title="Permanent link">&para;</a></h3>
+<p>The main annoyance when shipping native code is that either you pre-build and host binary wheels for all possible platforms yourself
+(expensive, and it induces a maintenance load on the infrastructure side), or you ship the source and require users to install
+the toolchain for your native code themselves - a toolchain that isn't bundled with the interpreter. <br>
+Native extensions typically require at least a C compiler, and often CMake and/or other build tools.<br>
+The consequence is that calling <code>pip install</code> on these projects will fail if the toolchain is not installed
+on the system, breaking the (usual) simplicity of Python package management. <br><br>
+Smelt leverages the Zig compiler, which is fully standalone (unlike most C toolchains) and is available as a PyPI package.
+Smelt implements a Zig-based toolchain to build native extensions (as opposed to most existing solutions which use gcc or clang).
+This allows shipping your package together with the toolchain to build it, using only standard <code>pyproject.toml</code> config entries. <code>pip install</code> will just work.
+It also enables some interesting cross-compilation capabilities (for wheels and standalone binaries), although this is still experimental and comes with limitations.</p>
+<h3 id="unified-modern-pyprojecttoml-based-interface-over-several-binary-backends">Unified, modern <code>pyproject.toml</code>-based interface over several binary backends<a class="headerlink" href="#unified-modern-pyprojecttoml-based-interface-over-several-binary-backends" title="Permanent link">&para;</a></h3>
+<p>Besides hand-crafting native extensions in C, C++, Rust or Zig, there are existing tools in the Python ecosystem to convert Python code to native code.<br>
+The main issue with them is that they often lack a proper, modern interface in <code>pyproject.toml</code> to use them. They also do not have a unified API.<br>
+Another issue is that their "public" interface is usually built around a Python -&gt; binary conversion, while internally they are actually Python -&gt; transpiled C -&gt; binary. Smelt provides the following features:</p>
+<ul>
+<li>Supports Cython, mypyc, Nuitka, and vanilla C/Zig native extensions under one unified <code>pyproject.toml</code>-based API.</li>
+<li>Isolates the C transpilation from the actual compilation in all of these, and injects Smelt's own Zig-based toolchain, to get truly standalone building (and enable <em>some</em> cross-compilation support).</li>
+<li>Provides a CLI frontend for developers to easily manipulate them (e.g. toggle native code on and off).</li>
+<li>Specifically for Nuitka, provides a way to build native extensions module-per-module and have them share a common runtime.</li>
+</ul>
+<h3 id="building-standalone-binaries-out-of-your-package">Building standalone binaries out of your package<a class="headerlink" href="#building-standalone-binaries-out-of-your-package" title="Permanent link">&para;</a></h3>
+<p>Smelt uses <a href="https://nuitka.net/">Nuitka</a> to build standalone binaries from Python entrypoints.
+While Nuitka is designed for that purpose and already capable by itself of doing that, <code>smelt</code> enables the following on top of it:</p>
+<ul>
+<li>Plugging the pipeline for the other supported binary backends (Cython/mypyc) into Nuitka. Smelt will pre-build the native extensions, and hand the built files to Nuitka (some backends like mypyc generate additional runtime files that are not discovered by Nuitka automatically).</li>
+<li>Using the Zig compiler with Nuitka (<strong>Note: Nuitka &gt;=4.0.0 now supports the Zig compiler natively, but it was not the case before</strong>) - and thus benefits from its standalone nature.</li>
+<li>Defining the flags for Nuitka from <code>pyproject.toml</code>, so that the build command is as simple as <code>smelt build-standalone-binary</code>.</li>
+</ul>
+<h3 id="where-to-go-next">Where to go next<a class="headerlink" href="#where-to-go-next" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong><a href="get-started/">Get Started</a></strong> - a minimal working setup, one mypyc extension declared in <code>pyproject.toml</code>.</li>
+<li><strong><a href="manifesto/">Manifesto</a></strong> - the full story behind the problems Smelt addresses, and the reasoning behind its approach.</li>
+<li><strong><a href="build-hook/">Build Hook</a></strong> - the primary way of using Smelt: plugging it into your <code>pyproject.toml</code> as a Hatchling build hook so native extensions are built automatically whenever your project is built.</li>
+<li><strong><a href="cli/">CLI</a></strong> - the <code>smelt</code> command-line tool, for driving builds manually, producing standalone binaries, and cleaning up build artifacts.</li>
+<li><strong><a href="advanced/">Advanced Use Cases</a></strong> - cross-compilation support and its current limitations, plus a deep dive into how Smelt makes Nuitka behave as a per-module backend.</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="get-started/" class="btn btn-neutral float-right" title="Get Started">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Hedwyn/smelt" class="fa fa-code-fork" style="color: #fcfcfc"> Hedwyn/smelt</a>
+        </span>
+    
+    
+    
+      <span><a href="get-started/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = ".";</script>
+    <script src="js/theme_extra.js"></script>
+    <script src="js/theme.js"></script>
+      <script src="search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
+
+<!--
+MkDocs version : 1.6.1
+Build Date UTC : 2026-09-04 15:29:20.310774+00:00
+-->

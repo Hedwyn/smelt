@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://hedwyn.github.io/smelt/advanced/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Advanced Use Cases - Smelt</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Advanced Use Cases";
+        var mkdocs_page_input_path = "advanced.md";
+        var mkdocs_page_url = "/smelt/advanced/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> Smelt
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../get-started/">Get Started</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../manifesto/">Manifesto</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../build-hook/">Build Hook</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../cli/">CLI</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Advanced Use Cases</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#cross-compilation">Cross-compilation</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#building-for-another-platform">Building for another platform</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#current-limitations">Current limitations</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#nuitka-internals">Nuitka internals</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#the-problem-nuitka-is-whole-program-not-per-module">The problem: Nuitka is whole-program, not per-module</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#the-constants-blob-and-why-it-complicates-sharing">The constants blob, and why it complicates sharing</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#how-smelt-handles-it">How Smelt handles it</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#current-limitation-packages-themselves-are-not-auto-compiled">Current limitation: packages themselves are not auto-compiled</a>
+    </li>
+        </ul>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../glossary/">Glossary</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">Smelt</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Advanced Use Cases</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Hedwyn/smelt/edit/master/docs/advanced.md">Edit on Hedwyn/smelt</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="advanced-use-cases">Advanced Use Cases<a class="headerlink" href="#advanced-use-cases" title="Permanent link">&para;</a></h1>
+<h2 id="cross-compilation">Cross-compilation<a class="headerlink" href="#cross-compilation" title="Permanent link">&para;</a></h2>
+<p>Smelt provides experimental support for cross-compiling native extensions, leveraging the fact that <a href="https://ziglang.org/">Zig</a> ships as a single, fully standalone toolchain capable of targeting other platforms without a separate sysroot - unlike a traditional C toolchain, which typically needs a matching cross-compiler and sysroot per target.</p>
+<h3 id="building-for-another-platform">Building for another platform<a class="headerlink" href="#building-for-another-platform" title="Permanent link">&para;</a></h3>
+<p>Cross-compilation is driven by the <code>-cp/--crosscompile</code> option of <a href="../cli/#other-commands"><code>smelt compile-module</code></a>:</p>
+<pre class="codehilite"><code>smelt compile-module my_project.hello --backend nuitka --crosscompile aarch64-linux
+</code></pre>
+
+<p>Under the hood this passes <code>-target &lt;triple&gt;</code> to <code>zig cc</code>/<code>zig build-lib</code>, the same mechanism Zig itself uses for cross-compiling C/C++ code.</p>
+<h3 id="current-limitations">Current limitations<a class="headerlink" href="#current-limitations" title="Permanent link">&para;</a></h3>
+<p>Cross-compilation in Smelt is still an experimental, narrow feature - keep the following in mind before relying on it:</p>
+<ul>
+<li><strong>Only the handwritten C/Zig extension path cross-compiles today.</strong> <code>c_extensions</code> and <code>zig_modules</code> are cross-compiled correctly. The <code>mypyc</code>, <code>cython</code> and <code>nuitka</code> backends don't participate in cross-compilation yet: passing <code>--crosscompile</code> alongside <code>--backend mypyc|cython|nuitka</code> on <code>compile-module</code> is currently a no-op for those backends.</li>
+<li><strong>Linux-only targets, for now.</strong> Only three target triples are currently supported: <code>aarch64-linux</code>, <code>arm-linux-gnueabihf</code> (armv7l) and <code>x86_64-linux</code>. There is no cross-compiling target for Windows or macOS yet.</li>
+<li><strong>A matching <code>pyconfig.h</code> is required for the target.</strong> Building a Python C extension needs a <code>pyconfig.h</code> matching the target platform's Python ABI. Smelt bundles pre-generated ones for the triples above, but currently only for Python 3.12 - cross-compiling against a different interpreter version isn't supported out of the box.</li>
+<li><strong>Stability isn't guaranteed.</strong> Smelt emits a runtime warning whenever cross-compilation is used; treat produced artifacts as experimental rather than production-ready until this matures.</li>
+</ul>
+<h2 id="nuitka-internals">Nuitka internals<a class="headerlink" href="#nuitka-internals" title="Permanent link">&para;</a></h2>
+<p>Nuitka is one of the binary backends Smelt orchestrates, but it fits the model differently from the others, and that difference drives a fair amount of machinery worth understanding if you rely on <code>nuitka_modules</code> heavily.</p>
+<h3 id="the-problem-nuitka-is-whole-program-not-per-module">The problem: Nuitka is whole-program, not per-module<a class="headerlink" href="#the-problem-nuitka-is-whole-program-not-per-module" title="Permanent link">&para;</a></h3>
+<p><code>mypyc</code> and <code>cython</code> treat each module as an independent compilation unit: every module becomes its own extension <code>.so</code>, and any code they all need is factored into a single small shared runtime library (e.g. mypyc ships a <code>…__mypyc</code> runtime the modules link against). Compiling ten modules produces ten thin <code>.so</code>s plus one shared runtime.</p>
+<p>Nuitka's primary mode of operation is the opposite: it is a <em>whole-program</em> compiler. You point it at an entrypoint and it produces a single artifact (one binary, or one extension module) that embeds everything it needs, including Nuitka's own C "static runtime" - the large body of C code that implements compiled functions, generators, calling conventions, the constants system, and so on.</p>
+<p>Smelt also exposes Nuitka at the <em>module</em> level, so it can act like the other backends (one native <code>.so</code> per Python module). But because Nuitka has no notion of a shared runtime, naively compiling N modules this way re-embeds that entire static runtime N times - N copies of several megabytes of identical C code. The result is bloated binaries and much longer build times. To be a good per-module backend, Smelt has to build that runtime <strong>once</strong> and have every module <code>.so</code> link against it - the shared runtime library <code>lib__nuitka_runtime.so</code>.</p>
+<h3 id="the-constants-blob-and-why-it-complicates-sharing">The constants blob, and why it complicates sharing<a class="headerlink" href="#the-constants-blob-and-why-it-complicates-sharing" title="Permanent link">&para;</a></h3>
+<p>The one thing that stops the static runtime from being trivially shareable is how Nuitka handles <strong>constants</strong>.</p>
+<p>A Python constant - a string literal, a number, a tuple, an interned name like <code>__name__</code> - is a live <code>PyObject</code> on the heap; it cannot be written as a C static literal, because it only exists relative to a running interpreter. So Nuitka <em>serializes</em> every constant a program uses into a compact binary <strong>blob</strong> that is embedded in the artifact, and materializes those objects at startup by decoding the blob through the CPython C-API. This is a deliberate optimization over emitting C code that builds each constant: the blob is far smaller, costs nothing to C-compile, and decodes in bulk at import for fast startup.</p>
+<p>Crucially, this blob is a <em>whole-program</em> structure. It is a set of named sections: one universal section holding the constants every compiled module shares (empty tuple/dict, small integers, common interned names…), plus one section per module holding that module's own literals. At startup each module asks the runtime loader for its own section by name, while the universal constants are decoded once and shared. In a normal Nuitka build there is exactly one blob for the whole artifact, so a single loader that reaches for "the" blob is all that is needed.</p>
+<p>That single-blob assumption is what breaks when modules become independent units. Each module <code>.so</code> must remain independently importable, so each carries <strong>its own</strong> blob (its own literals plus a copy of the universal constants). But the runtime code that <em>reads</em> the blob is written around one global accessor - so a single shared runtime would bind to whichever module happened to load first, and every other module would then be handed the wrong module's constants. Merging all modules into one blob is not an option either: that would fuse the modules back into a single unit and defeat the whole point of having independently-importable <code>.so</code>s.</p>
+<h3 id="how-smelt-handles-it">How Smelt handles it<a class="headerlink" href="#how-smelt-handles-it" title="Permanent link">&para;</a></h3>
+<p>The insight is that the coupling is only about <em>data</em>, not code: what must stay per-module is each module's blob and <em>which blob a module reads</em>; what can be shared is the (large) body of code that reads and uses constants.</p>
+<p>So Smelt splits the build in two:</p>
+<ul>
+<li><strong>The shared runtime (<code>lib__nuitka_runtime.so</code>)</strong> holds the generic static runtime and the universal constants that are identical across all modules. It is compiled once per build and every module links against it (found at load time via an <code>$ORIGIN</code> rpath, so it sits next to the modules in the package).</li>
+<li><strong>Each module <code>.so</code></strong> keeps its own constants blob and its own generated code, and simply <em>passes its blob</em> into the shared runtime's constants loader. The loader is made blob-agnostic - instead of pulling a single global blob, it receives the caller's blob - so every module reads its own constants while sharing all the surrounding machinery.</li>
+</ul>
+<p>Concretely this touches only Nuitka's constants entrypoints: the loader (<code>loadConstantsBlob</code>) is given the blob pointer as an argument rather than fetching it from the per-module <code>getConstantBlobData</code>, and the module's generated call sites are rewritten to pass their own blob. Everything else - the bulk of the runtime - is compiled once and shared. The net effect matches the other backends: N thin module <code>.so</code>s plus one shared runtime, with the constants of each module kept private to it.</p>
+<h3 id="current-limitation-packages-themselves-are-not-auto-compiled">Current limitation: packages themselves are not auto-compiled<a class="headerlink" href="#current-limitation-packages-themselves-are-not-auto-compiled" title="Permanent link">&para;</a></h3>
+<p><code>auto_mode</code> (<code>"package"</code>/<code>"all"</code>) walks a package's filesystem tree and proposes every <code>.py</code> file it finds as a compile target - except a package's own <code>__init__.py</code>, at any depth. This isn't a discovery oversight; Nuitka has no way to do it that fits Smelt's model.</p>
+<p>Nuitka draws a hard line between compiling a <em>module</em> (point it at a <code>.py</code> file, get a <code>.so</code>) and compiling a <em>package</em> (point it at the package's <em>directory</em>, which transpiles the whole package - <code>__init__.py</code> and everything Nuitka can see under it - into a single artifact meant to <em>replace</em> that directory as the importable module). Smelt's per-module model, described above, keeps every original source file in place and drops a same-named <code>.so</code> next to it - there is no step where the source is removed. Applying that same model to a package's <code>__init__.py</code> would produce an <code>automode.cpython-*.so</code> sitting right next to the still-present <code>automode/</code> directory. Python's import system always resolves a name to a package directory before it considers a same-named extension module in that directory, so the freshly compiled <code>.so</code> would simply never be imported - dead weight, silently never taking effect.</p>
+<p>Until Nuitka's whole-package compilation mode gets its own place in Smelt's model (package in, single replacement artifact out - a different shape from the shared-runtime scheme above), <code>auto_mode</code> skips packages entirely and only ever proposes their concrete submodules.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../cli/" class="btn btn-neutral float-left" title="CLI"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../glossary/" class="btn btn-neutral float-right" title="Glossary">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Hedwyn/smelt" class="fa fa-code-fork" style="color: #fcfcfc"> Hedwyn/smelt</a>
+        </span>
+    
+    
+      <span><a href="../cli/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../glossary/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

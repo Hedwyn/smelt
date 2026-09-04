@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://hedwyn.github.io/smelt/glossary/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Glossary - Smelt</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Glossary";
+        var mkdocs_page_input_path = "glossary.md";
+        var mkdocs_page_url = "/smelt/glossary/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> Smelt
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../get-started/">Get Started</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../manifesto/">Manifesto</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../build-hook/">Build Hook</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../cli/">CLI</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../advanced/">Advanced Use Cases</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Glossary</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#closure">Closure</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#a-closure-is-an-estimate-in-both-directions">A closure is an estimate, in both directions</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#two-consumers-one-closure">Two consumers, one closure</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#discovery">Discovery</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#distribution-folder-payload">Distribution folder, payload</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#mode-byo-mode-own">Mode byo / mode own</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#tailoring">Tailoring</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#keep-set-bootstrap-set-minimal-viable-stdlib">Keep-set, bootstrap set, Minimal Viable Stdlib</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#minimal-viable-stdlib">Minimal Viable Stdlib</a>
+    </li>
+        </ul>
+    </li>
+    </ul>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">Smelt</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Glossary</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Hedwyn/smelt/edit/master/docs/glossary.md">Edit on Hedwyn/smelt</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="glossary">Glossary<a class="headerlink" href="#glossary" title="Permanent link">&para;</a></h1>
+<p>The vocabulary used by Smelt's application bundler (<code>smelt build-dist</code>) and by the
+code that implements it. Defined here once; the modules involved point back at this
+page rather than re-explaining the terms.</p>
+<h2 id="closure">Closure<a class="headerlink" href="#closure" title="Permanent link">&para;</a></h2>
+<p><strong>The set of Python modules an entrypoint needs at runtime, computed as the transitive
+closure of the "imports" relation starting from that entrypoint.</strong></p>
+<p>That is the mathematical sense of the word: start with the entrypoint module, add
+everything it imports, then everything <em>those</em> import, and repeat until nothing new
+appears. Implemented by <code>smelt.dist.collect_closure</code>, which returns
+<code>{import_path: ResolvedModule}</code>.</p>
+<p>What it contains:</p>
+<ul>
+<li><strong>every module, not every distribution.</strong> A closure is a set of import paths
+  (<code>click.core</code>, <code>json.decoder</code>, <code>_ssl</code>), not a list of packages from
+  <code>pyproject.toml</code>. A dependency list says what to install; a closure says what is
+  imported. The two differ a lot: a distribution with no dependencies of its own still
+  reaches deep into the standard library.</li>
+<li><strong>the standard library and third-party code alike</strong>, each entry classified by
+  <code>smelt.explorer.ResolvedModule</code> — its kind (source, extension module, namespace
+  package, builtin, frozen, unresolvable), its file on disk, and whether it belongs to
+  the standard library.</li>
+<li><strong>the packages its members live under.</strong> Importing <code>a.b.c</code> also imports <code>a</code> and
+  <code>a.b</code>, so those are in the closure even when nothing names them directly.</li>
+</ul>
+<p>How it is computed — <code>DiscoveryMode</code>, one of:</p>
+<ul>
+<li><code>static</code>: parse each module and follow the import statements found anywhere in its
+  AST, including inside functions and conditional branches;</li>
+<li><code>trace</code>: import the entrypoint in a subprocess and record what actually landed in
+  <code>sys.modules</code>;</li>
+<li><code>both</code> (the default): the union of the two.</li>
+</ul>
+<h3 id="a-closure-is-an-estimate-in-both-directions">A closure is an estimate, in both directions<a class="headerlink" href="#a-closure-is-an-estimate-in-both-directions" title="Permanent link">&para;</a></h3>
+<p>This matters more than the definition, and it is why <code>include-modules</code> and
+<code>exclude-modules</code> exist:</p>
+<ul>
+<li><strong>it can miss modules.</strong> An import performed on a computed name
+  (<code>importlib.import_module("plugins." + name)</code>), from a plugin registry, or lazily on
+  a code path not taken during tracing, is invisible. Name those with
+  <code>include-modules</code> / <code>include-package</code>, exactly as Nuitka requires for the same
+  reason.</li>
+<li><strong>it can include modules that are never used.</strong> The static walk follows imports
+  written inside functions, which is correct for application code (a lazy import is a
+  real dependency) but pulls in far too much from the standard library, whose modules
+  reference each other from rarely-taken helpers. One import statement inside
+  <code>difflib._test()</code> is enough to drag <code>doctest</code>, <code>unittest</code>, <code>asyncio</code> and <code>ssl</code> into
+  the closure of an application that uses none of them.</li>
+</ul>
+<p>So a closure is neither sound nor complete: it is a best-effort estimate with manual
+corrections available on both sides.</p>
+<h3 id="two-consumers-one-closure">Two consumers, one closure<a class="headerlink" href="#two-consumers-one-closure" title="Permanent link">&para;</a></h3>
+<p>The same closure is used for two different purposes, which is worth keeping straight:</p>
+<ol>
+<li><strong>assembling the payload</strong> — its non-standard-library members become the <code>.pyc</code>
+   files and native artifacts shipped in the distribution's <code>app/</code> directory;</li>
+<li><strong>tailoring the interpreter</strong> (mode <code>own</code> only) — its <em>standard-library</em> members
+   decide which parts of the shipped CPython to keep. See <strong>keep-set</strong> below.</li>
+</ol>
+<h2 id="discovery">Discovery<a class="headerlink" href="#discovery" title="Permanent link">&para;</a></h2>
+<p>The act of computing a closure, and the <code>discovery</code> option that selects how (see
+<code>DiscoveryMode</code> above). "Discovery reached X" means "X is in the closure".</p>
+<h2 id="distribution-folder-payload">Distribution folder, payload<a class="headerlink" href="#distribution-folder-payload" title="Permanent link">&para;</a></h2>
+<p>The folder <code>smelt build-dist</code> produces. Its layout:</p>
+<pre class="codehilite"><code>myapp.dist/
+  smelt-dist.json        manifest: what went in, and which interpreter it needs
+  HOW_TO_RUN.txt
+  app/                   the payload
+  bin/  lib/             the interpreter, in mode `own` only
+  myapp  myapp.cmd       launcher shim, in mode `own` only
+</code></pre>
+
+<p>The <strong>payload</strong> is the <code>app/</code> subdirectory: the application's own modules, its
+dependencies, native artifacts and their bundled shared libraries. It is the only
+directory placed on <code>sys.path</code>, which is why it is kept out of the distribution root —
+a top-level module named <code>lib</code> or <code>bin</code> would otherwise collide with the interpreter's
+own directories.</p>
+<h2 id="mode-byo-mode-own">Mode <code>byo</code> / mode <code>own</code><a class="headerlink" href="#mode-byo-mode-own" title="Permanent link">&para;</a></h2>
+<p>Which interpreter a distribution runs on, selected by <code>--python</code>:</p>
+<ul>
+<li><strong><code>byo</code></strong> ("bring your own python", the default): the application only. Running it
+  needs a CPython of the same minor version already installed on the target.</li>
+<li><strong><code>own</code></strong>: the same folder plus an interpreter Smelt built itself (through
+  <code>meta-python</code>), so nothing needs to be installed on the target.</li>
+</ul>
+<h2 id="tailoring">Tailoring<a class="headerlink" href="#tailoring" title="Permanent link">&para;</a></h2>
+<p>Mode <code>own</code> only: choosing the <em>contents</em> of the shipped interpreter from the closure,
+rather than shipping all of it. Two levers, both driven by the same closure:</p>
+<ul>
+<li>standard-library trees and extension modules the closure does not reach are pruned
+  when the interpreter is staged into the distribution;</li>
+<li>third-party libraries no kept extension module needs (OpenSSL, SQLite, libffi, bz2,
+  lzma, Tk) are turned off at build time, so the interpreter is compiled without them.</li>
+</ul>
+<p>Controlled by <code>--tailor-interpreter</code> / <code>--no-tailor-interpreter</code>.</p>
+<h2 id="keep-set-bootstrap-set-minimal-viable-stdlib">Keep-set, bootstrap set, Minimal Viable Stdlib<a class="headerlink" href="#keep-set-bootstrap-set-minimal-viable-stdlib" title="Permanent link">&para;</a></h2>
+<p>When tailoring, the <strong>keep-set</strong> is what the staged interpreter is allowed to contain.
+It is the union of three sources:</p>
+<ol>
+<li>the <strong>closure</strong>'s standard-library members — what the application was found to need;</li>
+<li>the <strong>bootstrap set</strong> — what the interpreter itself imports before any application
+   code runs, measured by asking it (<code>bin/python -I -S -c "import sys;
+   print(sorted(sys.modules))"</code>) rather than hardcoded, since it is version-dependent;</li>
+<li>the <strong>Minimal Viable Stdlib</strong> — see below.</li>
+</ol>
+<p>Anything outside the keep-set is pruned. After pruning, every member of the keep-set
+must still resolve in the staged interpreter, or the build fails: shipping a folder
+that raises <code>ImportError</code> on the target is worse than not shipping one.</p>
+<h3 id="minimal-viable-stdlib">Minimal Viable Stdlib<a class="headerlink" href="#minimal-viable-stdlib" title="Permanent link">&para;</a></h3>
+<p>What a shipped interpreter keeps whatever the closure says, because <strong>a closure is a
+lower bound on what a running Python needs</strong>. Two kinds of import can never appear in
+one: those resolved by name at runtime, and those made only after something has
+already failed. Both are needed exactly when they are missing.</p>
+<p>It is a module-level constant — <code>MINIMAL_VIABLE_STDLIB</code> in
+<code>src/smelt/own_python.py</code>, a tuple of <code>StdlibGroup</code> — <strong>not</strong> an environment variable
+and not a configuration key. Changing its membership is a code change, deliberately:
+it encodes a correctness invariant, not a preference. Each group's members include
+their own transitive imports, measured by importing the group's seeds in a built
+interpreter and reading <code>sys.modules</code> (keeping <code>traceback</code> while pruning <code>textwrap</code>
+would leave the safety net raising on its way to reporting an error).</p>
+<table>
+<thead>
+<tr>
+<th>group</th>
+<th>holds</th>
+<th>droppable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>interpreter_core</code></td>
+<td>the import system, path handling, <code>runpy</code>, <code>zipimport</code>+<code>zlib</code> and their transitive imports</td>
+<td>no — nothing would start</td>
+</tr>
+<tr>
+<td><code>exception_handling</code></td>
+<td><code>traceback</code>, <code>linecache</code>, <code>warnings</code>, <code>tokenize</code>, <code>token</code>, <code>textwrap</code></td>
+<td>no — 110 KB does not justify the footgun</td>
+</tr>
+<tr>
+<td><code>text_codecs</code></td>
+<td><code>encodings</code>, as a whole package</td>
+<td>no — codecs are looked up by name at runtime</td>
+</tr>
+<tr>
+<td><code>international_hostnames</code></td>
+<td><code>stringprep</code>, <code>unicodedata</code></td>
+<td><strong>yes</strong> — 28 KB today, 1.1 MB later (see below)</td>
+</tr>
+</tbody>
+</table>
+<p>Groups exist so the reasoning is legible, and so the one boundary worth choosing can
+be chosen. A group is only offered as a knob when dropping it saves something real
+<em>and</em> the loss can be stated in a sentence; <code>StdlibGroup.__post_init__</code> refuses an
+optional group with no stated consequence.</p>
+<p>Dropping <code>international_hostnames</code> is measured, and the number is smaller than it
+looks: <strong>28 KB today</strong>, not the 1128 KB <code>unicodedata</code> weighs. The reason is worth
+knowing, because it is the same one behind the over-collection described under
+<em>Closure</em>: <code>traceback</code> imports <code>unicodedata</code> from inside <code>_display_width()</code>, and the
+static walk follows imports written in function bodies — so the closure asks for
+<code>unicodedata</code> on its own account and this group cannot decide to drop it. The full
+1128 KB becomes available once deferred imports inside the standard library stop being
+followed.</p>
+<p>The consequence, verified either way: every other codec and <code>socket</code>/<code>urllib</code>/<code>email</code>
+are unaffected, and the single loss is that <code>"héllo.example".encode("idna")</code> — and
+anything resolving an internationalised hostname — raises
+<code>LookupError: unknown encoding: idna</code>. Where <code>unicodedata</code> goes too, a traceback
+quoting a source line with wide characters also loses its caret alignment.</p>
+<pre class="codehilite"><code>smelt build-dist --python own --drop-stdlib-group international_hostnames
+</code></pre>
+
+<p>or per entrypoint:</p>
+<pre class="codehilite"><code class="language-toml">[tool.smelt.entrypoints.&quot;pkg.cli:main&quot;]
+python = &quot;own&quot;
+drop-stdlib-groups = [&quot;international_hostnames&quot;]
+</code></pre>
+
+<p>Naming a group that is not droppable, or one that does not exist, is an error that
+names the droppable ones. To <em>add</em> to the keep-set instead, use <code>include-modules</code> /
+<code>--include-module</code>; to skip tailoring altogether, <code>--no-tailor-interpreter</code>.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../advanced/" class="btn btn-neutral float-left" title="Advanced Use Cases"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Hedwyn/smelt" class="fa fa-code-fork" style="color: #fcfcfc"> Hedwyn/smelt</a>
+        </span>
+    
+    
+      <span><a href="../advanced/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

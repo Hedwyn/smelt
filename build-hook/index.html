@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://hedwyn.github.io/smelt/build-hook/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Build Hook - Smelt</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Build Hook";
+        var mkdocs_page_input_path = "build-hook.md";
+        var mkdocs_page_url = "/smelt/build-hook/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> Smelt
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../get-started/">Get Started</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../manifesto/">Manifesto</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Build Hook</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#minimal-setup">Minimal setup</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configuration-reference">Configuration reference</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#extras-gated-modules">extras-gated modules</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#auto_mode-and-packages">auto_mode and packages</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#standalone-toolsmelt-config">Standalone [tool.smelt] config</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../cli/">CLI</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../advanced/">Advanced Use Cases</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../glossary/">Glossary</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">Smelt</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Build Hook</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Hedwyn/smelt/edit/master/docs/build-hook.md">Edit on Hedwyn/smelt</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="build-hook">Build Hook<a class="headerlink" href="#build-hook" title="Permanent link">&para;</a></h1>
+<p>The primary way to use Smelt is as a <a href="https://hatch.pypa.io/">Hatchling</a> build hook. Once configured, every <code>pip install</code> / <code>build</code> of your project automatically compiles the native extensions and entrypoints you declared - no manual step required, and no extra system dependency (Smelt uses Zig as its compiler, which ships as a standalone toolchain through the <code>ziglang</code> PyPI package).</p>
+<h2 id="minimal-setup">Minimal setup<a class="headerlink" href="#minimal-setup" title="Permanent link">&para;</a></h2>
+<p>Add <code>smelt</code> to your build requirements, select <code>hatchling</code> as the build backend, and declare the <code>smelt</code> build hook:</p>
+<pre class="codehilite"><code class="language-toml">[build-system]
+requires = [&quot;hatchling&quot;, &quot;smelt&quot;]
+build-backend = &quot;hatchling.build&quot;
+
+[project]
+name = &quot;my-project&quot;
+version = &quot;0.1.0&quot;
+dependencies = [&quot;click&quot;]
+
+[project.scripts]
+my-cli = &quot;my_project.cli:main&quot;
+
+[tool.hatch.build.targets.wheel]
+packages = [&quot;src/my_project&quot;]
+
+[tool.hatch.build.hooks.smelt]
+packages_location = { &quot;my_project&quot; = &quot;src/my_project&quot; }
+
+[[tool.hatch.build.hooks.smelt.mypyc_modules]]
+import_path = &quot;my_project.fib&quot;
+
+[[tool.hatch.build.hooks.smelt.nuitka_modules]]
+import_path = &quot;my_project.cli&quot;
+
+[[tool.hatch.build.hooks.smelt.c_extensions]]
+import_path = &quot;my_project.hello&quot;
+sources = [&quot;src/my_project/hello.c&quot;]
+
+[[tool.hatch.build.hooks.smelt.zig_modules]]
+import_path = &quot;my_project.zighello&quot;
+name = &quot;zighello&quot;
+folder = &quot;src/my_project/zighello&quot;
+
+[[tool.hatch.build.hooks.smelt.cython_modules]]
+import_path = &quot;my_project.fib_cython&quot;
+source = &quot;src/my_project/fib_cython.pyx&quot;
+</code></pre>
+
+<p>Every module is compiled to a native <code>.so</code>/<code>.pyd</code> sitting right next to its pure-Python counterpart, which it then shadows - so the rest of your codebase, tooling, and imports don't need to change.</p>
+<h2 id="configuration-reference">Configuration reference<a class="headerlink" href="#configuration-reference" title="Permanent link">&para;</a></h2>
+<p>All of the following keys live under <code>[tool.hatch.build.hooks.smelt]</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>packages_location</code></td>
+<td><code>dict[str, str]</code></td>
+<td>Maps a package's top-level import name to the folder it lives in (e.g. <code>{"my_project" = "src/my_project"}</code>). Used to resolve <code>import_path</code>s declared below to actual files on disk.</td>
+</tr>
+<tr>
+<td><code>mypyc_modules</code></td>
+<td>list of tables</td>
+<td>Modules to compile with <a href="https://mypyc.readthedocs.io/">mypyc</a>. Each entry has an <code>import_path</code> and an optional <code>source</code> (path override) and <code>extras</code>.</td>
+</tr>
+<tr>
+<td><code>cython_modules</code></td>
+<td>list of tables</td>
+<td>Modules to compile with <a href="https://cython.org/">Cython</a>. Each entry has an <code>import_path</code>, an optional <code>source</code> (defaults to a <code>.py</code>/<code>.pyx</code> file matching the import path) and <code>extras</code>.</td>
+</tr>
+<tr>
+<td><code>nuitka_modules</code></td>
+<td>list of tables</td>
+<td>Modules to compile with <a href="https://nuitka.net/">Nuitka</a>, as thin per-module extensions sharing one runtime library. See <a href="../advanced/#nuitka-internals">Nuitka internals</a> for why this needs special handling. Each entry has an <code>import_path</code>, an optional <code>source</code>, and <code>extras</code>.</td>
+</tr>
+<tr>
+<td><code>c_extensions</code></td>
+<td>list of tables</td>
+<td>Handwritten C/C++ extensions, compiled with Zig's C compiler (<code>zig cc</code>). Each entry has an <code>import_path</code>, a <code>sources</code> list, and <code>extras</code>.</td>
+</tr>
+<tr>
+<td><code>zig_modules</code></td>
+<td>list of tables</td>
+<td>Handwritten Zig extensions, built with <code>zig build</code>. Each entry has an <code>import_path</code>, a <code>name</code> (the library name Zig produces), a <code>folder</code> (containing a <code>build.zig</code>), optional <code>flags</code> passed to <code>zig build</code>, and <code>extras</code>.</td>
+</tr>
+<tr>
+<td><code>entrypoints</code></td>
+<td>table of tables</td>
+<td>Customizes the standalone-binary build for one entrypoint (see <a href="../cli/#build-standalone-binary">CLI</a>). Keyed by the script name from <code>[project.scripts]</code>, or by an explicit <code>module.path</code>/<code>module.path:func</code>. Every <code>[project.scripts]</code> entry is picked up automatically with default options; declaring it here only lets you override those options (<code>include-modules</code>, <code>include-package</code>, <code>include-package-data</code>, <code>extra_flags</code>) or declare an additional entrypoint that isn't in <code>[project.scripts]</code>.</td>
+</tr>
+<tr>
+<td><code>auto_mode</code></td>
+<td><code>"off"</code> | <code>"package"</code> | <code>"all"</code></td>
+<td>Instead of listing modules by hand, walk the package tree and propose every <code>.py</code> file as a compile target (see limitation below).</td>
+</tr>
+<tr>
+<td><code>backend_priority_order</code></td>
+<td>list of <code>"nuitka"</code>/<code>"mypyc"</code>/<code>"cython"</code></td>
+<td>Fallback order used to pick a backend for modules discovered by <code>auto_mode</code>. Defaults to <code>["nuitka"]</code>.</td>
+</tr>
+<tr>
+<td><code>platforms</code></td>
+<td>list of str</td>
+<td>Restricts the hook to run only on the listed host platforms; the build is skipped (not failed) on any other platform.</td>
+</tr>
+<tr>
+<td><code>debug</code></td>
+<td>bool</td>
+<td>Enables verbose logging from the build hook. Also settable via the <code>SMELT_DEBUG</code> environment variable.</td>
+</tr>
+<tr>
+<td><code>report_path</code></td>
+<td>str</td>
+<td>If set, writes a build report to this path once the hook completes. Also settable via the <code>SMELT_REPORT</code> environment variable.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="extras-gated-modules"><code>extras</code>-gated modules<a class="headerlink" href="#extras-gated-modules" title="Permanent link">&para;</a></h3>
+<p>Any of the module tables above (<code>mypyc_modules</code>, <code>cython_modules</code>, <code>nuitka_modules</code>, <code>c_extensions</code>, <code>zig_modules</code>) accepts an <code>extras</code> list. If any of the listed <code>[project.optional-dependencies]</code> extras isn't installed in the current environment, the build hook silently skips that module instead of failing - handy for optional native acceleration that shouldn't block a plain install:</p>
+<pre class="codehilite"><code class="language-toml">[[tool.hatch.build.hooks.smelt.mypyc_modules]]
+import_path = &quot;my_project.fast_path&quot;
+extras = [&quot;speedups&quot;]
+</code></pre>
+
+<h3 id="auto_mode-and-packages"><code>auto_mode</code> and packages<a class="headerlink" href="#auto_mode-and-packages" title="Permanent link">&para;</a></h3>
+<p><code>auto_mode</code> (<code>"package"</code>/<code>"all"</code>) currently never proposes a package's own <code>__init__.py</code>, at any depth - only its concrete submodules. This isn't an oversight: see <a href="../advanced/#nuitka-internals">Nuitka internals</a> for why whole-package compilation doesn't fit Smelt's per-module model yet.</p>
+<h2 id="standalone-toolsmelt-config">Standalone <code>[tool.smelt]</code> config<a class="headerlink" href="#standalone-toolsmelt-config" title="Permanent link">&para;</a></h2>
+<p>If you don't use Hatchling, the same schema can be declared under <code>[tool.smelt]</code> instead of <code>[tool.hatch.build.hooks.smelt]</code>. This form isn't wired into any build backend automatically - it's read by the <a href="../cli/">CLI</a> (<code>smelt build-extensions</code>, <code>smelt build-standalone-binary</code>, ...) so you can drive the build yourself, e.g. from a <code>Makefile</code> or CI step. The two forms are mutually exclusive: Smelt raises an error if both are present in the same <code>pyproject.toml</code>.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../manifesto/" class="btn btn-neutral float-left" title="Manifesto"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../cli/" class="btn btn-neutral float-right" title="CLI">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Hedwyn/smelt" class="fa fa-code-fork" style="color: #fcfcfc"> Hedwyn/smelt</a>
+        </span>
+    
+    
+      <span><a href="../manifesto/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../cli/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://hedwyn.github.io/smelt/</loc>
+         <lastmod>2026-09-04</lastmod>
+    </url>
+    <url>
+         <loc>https://hedwyn.github.io/smelt/advanced/</loc>
+         <lastmod>2026-09-04</lastmod>
+    </url>
+    <url>
+         <loc>https://hedwyn.github.io/smelt/build-hook/</loc>
+         <lastmod>2026-09-04</lastmod>
+    </url>
+    <url>
+         <loc>https://hedwyn.github.io/smelt/cli/</loc>
+         <lastmod>2026-09-04</lastmod>
+    </url>
+    <url>
+         <loc>https://hedwyn.github.io/smelt/get-started/</loc>
+         <lastmod>2026-09-04</lastmod>
+    </url>
+    <url>
+         <loc>https://hedwyn.github.io/smelt/glossary/</loc>
+         <lastmod>2026-09-04</lastmod>
+    </url>
+    <url>
+         <loc>https://hedwyn.github.io/smelt/manifesto/</loc>
+         <lastmod>2026-09-04</lastmod>
+    </url>
+</urlset>
