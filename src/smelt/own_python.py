@@ -46,13 +46,20 @@ import platform
 import re
 import shutil
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Iterable
+from typing import TYPE_CHECKING, Final, Iterable, Iterator
 
 from smelt.bytecode import compile_tree
-from smelt.explorer import package_closure, package_directories
+from smelt.explorer import (
+    iter_package_modules,
+    package_closure,
+    package_directories,
+    reachable_from,
+)
+from smelt.hooks import hidden_imports
 from smelt.native_deps import (
     ALWAYS_HOST_DLL_PREFIXES,
     LINUX_BASE_LIBC_DLL_PREFIXES,
@@ -359,55 +366,80 @@ def minimal_viable_stdlib(drop_groups: Iterable[str] = ()) -> frozenset[str]:
 #: against it.
 ALWAYS_KEEP: Final[tuple[str, ...]] = tuple(sorted(minimal_viable_stdlib()))
 
+
 #: Entries of a `lib/pythonX.Y` directory that are not importable modules, so the
 #: closure has nothing to say about them and they are never pruned as one.
 #: `lib-dynload` is pruned per-`.so` instead, and `site-packages` is where a
 #: distribution's own payload would land if it were not kept in `app/`.
+@dataclass(frozen=True)
+class AtomicPackage:
+    """
+    One entry of `ATOMIC_PACKAGES`: a package a tailored interpreter keeps whole, and
+    why.
+
+    `collect_interior_imports` decides whether the modules that interior imports from
+    *outside* the package are pulled into the keep set too. On by default, because a
+    package shipped whole whose other half cannot import is a folder that fails on the
+    first `logging.config.dictConfig()` rather than at build time. Turning it off is a
+    deliberate size decision and has to say so (`exception`).
+    """
+
+    reason: str
+    collect_interior_imports: bool = True
+    exception: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.collect_interior_imports and not self.exception:
+            raise ValueError(
+                "An atomic package that ships whole but does not collect what its "
+                "interior imports is shipping modules that cannot import. That may be "
+                "the right trade, but it has to be stated."
+            )
+
+
 #: Standard library packages a tailored interpreter keeps **whole**, never dropping
-#: individual submodules out of them, mapped to the reason.
+#: individual submodules out of them.
+#:
+#: Deliberately down to two entries, and the trimming is the point. A package belongs
+#: here only when the set of submodules it may load is *open* -- built from a codec name
+#: or a backend list at runtime, so that no list written here could be right. Where the
+#: set is closed, however dynamically it is reached, naming those submodules in
+#: `smelt.hooks` says the same thing precisely: `unittest` loads exactly
+#: `unittest.async_case` through its `__getattr__`, `xml.sax` exactly
+#: `xml.sax.expatreader` from its parser list. Shipping the whole package for that pays
+#: for one module's habit with all of its siblings, and -- since a package that ships
+#: whole needs everything its interior imports (`expand_interpreter_modules`) -- with
+#: their dependencies too. `importlib` was the case that made this visible: kept whole,
+#: it dragged `zipfile`, `bz2`, `lzma` and `json` in behind `importlib.metadata`, for the
+#: sake of one `importlib.readers` that a hook now names outright.
 #:
 #: The counterpart to `MINIMAL_VIABLE_STDLIB` one level down: that names the modules a
-#: closure structurally cannot contain, this names the *packages* whose interior a
-#: closure cannot describe. Every entry resolves at least one of its own submodules
-#: from a name computed at runtime -- a dotted string in a config file, a registry
-#: keyed by codec or backend, a module-level `__getattr__` -- so no import statement
-#: anywhere points at it and pruning by closure removes it.
-#:
-#: Named at whatever depth the dynamic behaviour actually lives at: `xml.sax` picks its
-#: parser by name, while `xml.dom` and `xml.etree` are ordinary packages and together
-#: are most of `xml`'s 1.5 MB, so making the whole of `xml` atomic would pay for one
-#: module's habit with the other two.
-ATOMIC_PACKAGES: Final[dict[str, str]] = {
-    "encodings": (
-        "codecs are looked up by name -- `encodings.cp1252` for a locale, never "
-        "spelled out in any source (see the `text_codecs` group of "
-        "MINIMAL_VIABLE_STDLIB)"
+#: closure structurally cannot contain, this names the packages whose interior a closure
+#: cannot describe at all.
+ATOMIC_PACKAGES: Final[dict[str, AtomicPackage]] = {
+    "encodings": AtomicPackage(
+        reason=(
+            "`search_function` does `__import__('encodings.' + name)` for whatever codec "
+            "name is asked for, so the set is open: `encodings.cp1252` for a locale, "
+            "never spelled out in any source (see the `text_codecs` group of "
+            "MINIMAL_VIABLE_STDLIB)"
+        ),
+        collect_interior_imports=False,
+        exception=(
+            "the 26 CJK codec modules need the `_codecs_cn`/`_hk`/`_iso2022`/`_jp`/"
+            "`_kr`/`_tw` and `_multibytecodec` extension modules, 864 KB of them, and "
+            "the `text_codecs` group already states that those are dropped like any "
+            "other unused `.so`. So `encodings.big5` and its 25 siblings ship as files "
+            "that cannot import -- deliberately, and the only place in the standard "
+            "library where that is the accepted answer"
+        ),
     ),
-    "importlib": (
-        "`importlib.readers` is imported by a function of `_bootstrap_external`, which "
-        "is *frozen* into the interpreter and so has no source to read the import from "
-        "at all -- the one blind spot no AST pass can cover"
-    ),
-    "logging": (
-        "`logging.config.dictConfig`/`fileConfig` resolve handler classes from dotted "
-        "strings in a config file (`logging.handlers.RotatingFileHandler`)"
-    ),
-    "multiprocessing": (
-        "`multiprocessing.context` selects a `popen_*` module by start-method name, and "
-        "a spawned child imports `spawn` and `resource_tracker` by name in a fresh "
-        "interpreter"
-    ),
-    "xml.sax": "`make_parser()` imports each candidate parser module by name",
-    "dbm": "`dbm.open`/`whichdb` import `dbm.gnu`, `dbm.ndbm` or `dbm.dumb` by name",
-    "ctypes": "`ctypes.util` resolves its platform helpers dynamically",
-    "unittest": "a module-level `__getattr__` loads `unittest.async_case` on first use",
-    "concurrent": (
-        "`concurrent.futures`' module-level `__getattr__` loads `.process`/`.thread` on first use"
-    ),
-    "sqlite3": "a module-level `__getattr__` loads `sqlite3.dbapi2` on first use",
-    "zoneinfo": (
-        "a module-level `__getattr__` picks the C or Python implementation, and the "
-        "data comes from a `tzdata` package imported by name"
+    "dbm": AtomicPackage(
+        reason=(
+            "`dbm.whichdb`/`open` walk `_names` -- a list of module *strings* -- and "
+            "`__import__` each in turn until one works, so which backend a target ends "
+            "up using is decided on that machine and not on this one"
+        ),
     ),
 }
 
@@ -545,6 +577,66 @@ def own_python_cache_dir(
     return _METAPYTHON_CACHE_DIR / name
 
 
+#: Name of the lock file serialising interpreter builds, inside
+#: `_METAPYTHON_CACHE_DIR`. A plain file rather than a directory, so that the kernel
+#: releases it when the holder exits -- a build interrupted with Ctrl-C must not wedge
+#: every later one.
+BUILD_LOCK_NAME: Final[str] = ".build.lock"
+
+
+@contextmanager
+def interpreter_build_lock() -> Iterator[None]:
+    """
+    Serialises interpreter builds across processes, for the duration of the block.
+
+    One lock for *all* builds, not one per target or option set, because what needs
+    protecting is not the destination: it is meta-python's own checkout, which lives in
+    site-packages and is shared by every build this installation runs. `build_own_python`
+    deletes `cpython/Makefile`, `cpython/pyconfig.h` and `.zig-cache` from it before
+    each run -- it has to, or `zig build` reuses a step graph configured for a different
+    target -- so two builds overlapping there is not a slow path but a corrupt one, and
+    the symptom is a rename error out of Zig rather than anything naming the cause.
+
+    Held on a file in the cache directory rather than in the checkout, since a
+    site-packages tree can be read-only, and never deleted: unlinking a locked file
+    leaves a waiter holding the old inode, which is mutual exclusion with the mutual
+    exclusion removed.
+
+    **Waits indefinitely.** How long a CPython build takes is not something this can
+    put a number on -- it depends on the machine, the target and how much of Zig's
+    cache survived -- and a deadline guessed here would abort a perfectly healthy build
+    on a slow machine, which is worse than the hang it would be guarding against. The
+    wait says once, at INFO, what it is waiting for; a holder that dies releases the
+    lock whatever way it dies.
+
+    Degrades to no locking where `fcntl` is unavailable (Windows). Nothing else on the
+    mode `own` path works there yet, so this is the one place it would be perverse to
+    raise.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover -- POSIX-only path, see the docstring
+        _logger.debug("No fcntl on this platform: interpreter builds are not serialised.")
+        yield
+        return
+
+    _METAPYTHON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = _METAPYTHON_CACHE_DIR / BUILD_LOCK_NAME
+    with open(lock_path, "a+") as lock_file:
+        try:
+            # Non-blocking first, purely so that a wait can be announced: going
+            # straight to the blocking call would leave the terminal silent for however
+            # long the other build takes.
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            _logger.info("Waiting for another smelt interpreter build to finish (%s).", lock_path)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def build_own_python(
     dest_dir: str | os.PathLike[str] | None = None,
     *,
@@ -562,6 +654,13 @@ def build_own_python(
     A build takes minutes, so the cache is the normal path: it hits on
     `<dest>/bin/python` already existing. Pass `no_cache` to force a rebuild, e.g.
     after meta-python's pinned CPython version changes.
+
+    Builds are serialised across processes (`interpreter_build_lock`), and the cache is
+    consulted twice: once before taking the lock, and once after, since what a build
+    queues behind is often a build of the very thing it wanted. The lock is not an
+    optimisation -- meta-python's checkout is shared by every build on the machine and
+    is reset at the start of each one, so overlapping builds corrupt each other rather
+    than merely duplicating work.
 
     Linkage: `python-linkage=dynamic` + `libc-linkage=dynamic`, i.e. a real
     `libpythonX.Y.so` that both `bin/python` and the stdlib's extension modules link
@@ -628,15 +727,6 @@ def build_own_python(
       glibc-linked, so it will not load under a musl interpreter.
     """
     _ensure_metapython_installed()
-    from metapython.compile import (
-        VENDORED_PROJECT_DIR,
-        BuildOptions,
-        LibCLinkage,
-        Linkage,
-        OptimizeMode,
-        zig_build,
-    )
-
     disabled = set(disabled_libraries)
     unknown = disabled - set(LIBRARY_MODULES)
     if unknown:
@@ -653,6 +743,43 @@ def build_own_python(
     if not no_cache and bin_path.exists():
         _logger.info("Reusing the interpreter already built at %s", dest)
         return assert_path_exists(dest)
+
+    with interpreter_build_lock():
+        # Asked again, on the other side of the wait: if what we were queueing behind
+        # was a build of *this* configuration, it is now sitting in the cache and there
+        # is nothing left to do. Without this, two processes asked for the same
+        # interpreter at the same time would build it twice, the second one over the
+        # first one's output.
+        if not no_cache and bin_path.exists():
+            _logger.info("Reusing the interpreter built at %s while waiting", dest)
+            return assert_path_exists(dest)
+        return _build_interpreter(dest, bin_path, target=target, debug=debug, disabled=disabled)
+
+
+def _build_interpreter(
+    dest: Path,
+    bin_path: Path,
+    *,
+    target: str | None,
+    debug: bool,
+    disabled: set[str],
+) -> PathExists:
+    """
+    Runs the actual meta-python build into `dest`, assuming the caller holds
+    `interpreter_build_lock` and has already settled the cache question.
+
+    Split from `build_own_python` for exactly that reason: everything here mutates
+    state shared with every other build on this machine -- meta-python's checkout, its
+    `.zig-cache`, `cpython/Makefile` -- and none of the option resolution above does.
+    """
+    from metapython.compile import (
+        VENDORED_PROJECT_DIR,
+        BuildOptions,
+        LibCLinkage,
+        Linkage,
+        OptimizeMode,
+        zig_build,
+    )
 
     options = BuildOptions(
         target=target,
@@ -910,6 +1037,7 @@ def plan_disabled_libraries(
     stdlib_modules: Iterable[str],
     *,
     include_modules: Iterable[str] = (),
+    follow_optional: bool = True,
 ) -> frozenset[str]:
     """
     Which of `LIBRARY_MODULES`' libraries no module in the closure needs, i.e. which
@@ -922,51 +1050,109 @@ def plan_disabled_libraries(
     imported at startup), and `resolve_requirements` asserts as much rather than
     trusting it.
     """
-    named = {
-        prefix
-        for module in (*stdlib_modules, *include_modules, *ALWAYS_KEEP)
-        for prefix in _import_prefixes(module)
-    }
+    named = expand_interpreter_modules(
+        (*stdlib_modules, *include_modules, *ALWAYS_KEEP), follow_optional=follow_optional
+    )
     return frozenset(
         library for library, modules in LIBRARY_MODULES.items() if not named.intersection(modules)
     )
 
 
-def _widen_kept_packages(keep: frozenset[str]) -> frozenset[str]:
+def _shipped_members(package: str, keep: frozenset[str], follow_optional: bool) -> set[str]:
     """
-    Adds, for every package `keep` reaches into, the submodules that package can reach
-    from the members already kept -- following deferred imports, which the closure
-    itself does not (see `explorer.package_closure`).
+    The submodules of `package` that end up in the interpreter, given what `keep`
+    already names.
 
-    Pruning inside a package is where that difference bites. Dropping `asyncio` because
-    only a function body imports it saves 600 KB and is the whole point; dropping
-    `email.parser` because only `email.message_from_string()` imports it saves 20 KB and
-    breaks `email.message_from_string()`. So the closure decides which packages ship,
-    and this decides what a shipped package keeps.
-
-    `ATOMIC_PACKAGES` are skipped: nothing is pruned inside them, so there is nothing to
-    widen for.
+    Two answers, because pruning has two modes. An `ATOMIC_PACKAGES` entry is not pruned
+    inside at all, so *every* member ships. Any other package keeps what it can reach
+    from the members already named, following even the imports the closure rules skip
+    (`explorer.package_closure`) -- that difference is worth a whole tree at top level
+    and is simply wrong one level down, where it would drop `email.parser` while keeping
+    the `email.message` whose `message_from_string()` is the only thing that imports it.
     """
-    packages = {
-        name
-        for name in keep
-        if name not in ATOMIC_PACKAGES
-        and is_valid_import_path(name)
-        and package_directories(assert_is_valid_import_path(name))
-    }
-    widened = set(keep)
-    for package in sorted(packages):
-        # Only the outermost packages need walking: `package_closure` is transitive, so
-        # walking `xml` already covers `xml.etree`.
-        if any(package.startswith(f"{parent}.") for parent in packages if parent != package):
-            continue
-        seeds = [
-            assert_is_valid_import_path(name)
-            for name in keep
-            if name == package or name.startswith(f"{package}.")
-        ]
-        widened.update(package_closure(assert_is_valid_import_path(package), seeds))
-    return frozenset(widened)
+    if not is_valid_import_path(package):
+        return set()
+    name = assert_is_valid_import_path(package)
+    if not package_directories(name):
+        return set()
+    if package in ATOMIC_PACKAGES:
+        return set(iter_package_modules(name))
+    seeds = [
+        assert_is_valid_import_path(member)
+        for member in keep
+        if member == package or member.startswith(f"{package}.")
+    ]
+    return set(package_closure(name, seeds, follow_optional=follow_optional))
+
+
+def expand_interpreter_modules(
+    modules: Iterable[str], *, follow_optional: bool = True
+) -> frozenset[str]:
+    """
+    Everything a tailored interpreter ends up holding, given the modules something asked
+    for: those names, the package members that ship alongside them (`_shipped_members`),
+    and what all of that imports.
+
+    The third part is the one that is easy to forget and expensive to discover. A
+    package can arrive in the interpreter through a route the closure never walked --
+    shipped whole because it is atomic, or widened because a sibling submodule reached
+    it -- and its imports of things *outside* itself then belong to nobody. That is how
+    a distribution ends up with a `logging` whose `handlers` cannot import `queue`, and
+    an `xml.sax` whose `saxutils` cannot import `urllib.request`: both files present,
+    both unusable, and neither visible until someone calls the right function.
+
+    `smelt.hooks` is applied here as well as in the closure, and has to be: half of what
+    a tailored interpreter keeps never appears in a closure at all -- `ALWAYS_KEEP` and
+    the interpreter's own bootstrap set arrive later -- so `importlib` would otherwise
+    reach the keep set without the `importlib.readers` its frozen loader needs.
+
+    Run to a fixed point, since a module pulled in this way can itself be a package
+    needing the same treatment. `encodings` is the one package excluded from the third
+    step, deliberately and by its own `AtomicPackage.exception`.
+
+    `follow_optional` is the caller's answer to `--drop-optional-imports`, and has to
+    reach here or the lever does not work: the closure would drop `_hashlib` while this
+    walked straight back to it, and the interpreter would be built with the OpenSSL
+    nobody asked for.
+
+    Shared by `plan_disabled_libraries` and `resolve_requirements` so that the two
+    cannot disagree: which libraries the interpreter is built without and which modules
+    it keeps are the same question asked twice, and answering them from different sets
+    is how a folder ends up naming a module its own interpreter has no `.so` for.
+    """
+    current = frozenset(prefix for module in modules for prefix in _import_prefixes(module))
+    # Carried across rounds, so no module's imports are read twice however many rounds
+    # the fixed point takes.
+    walked: set[str] = set()
+    while True:
+        grown = set(current)
+        grown.update(hidden_imports(frozenset(current)))
+        for package in sorted(current):
+            members = _shipped_members(package, current, follow_optional)
+            grown.update(members)
+            entry = ATOMIC_PACKAGES.get(package)
+            if entry is not None and not entry.collect_interior_imports:
+                # Marked as done without ever being read: these ship as files that
+                # cannot import, which for `encodings` is the documented answer.
+                walked.update(members - {package})
+        unwalked = sorted(grown - walked)
+        walked.update(unwalked)
+        grown.update(_imported_by(unwalked, follow_optional))
+        expanded = frozenset(prefix for module in grown for prefix in _import_prefixes(module))
+        if expanded == current:
+            return current
+        current = expanded
+
+
+def _imported_by(modules: Iterable[str], follow_optional: bool) -> set[str]:
+    """
+    Everything `modules` import, transitively, under the ordinary closure rules.
+
+    Batched rather than asked one module at a time: the walk shares a visited set, so a
+    module several of them reach is read once (see `explorer.reachable_from`).
+    """
+    roots = [assert_is_valid_import_path(name) for name in modules if is_valid_import_path(name)]
+    return set(reachable_from(roots, follow_optional=follow_optional))
 
 
 def resolve_requirements(
@@ -975,6 +1161,7 @@ def resolve_requirements(
     *,
     include_modules: Iterable[str] = (),
     drop_stdlib_groups: Iterable[str] = (),
+    follow_optional: bool = True,
 ) -> InterpreterRequirements:
     """
     Turns the standard library modules `smelt.dist`'s closure reached into a decision
@@ -1012,8 +1199,10 @@ def resolve_requirements(
         for module in (*stdlib_modules, *forced, *mandatory, *bootstrap)
         for prefix_name in _import_prefixes(module)
     )
-    keep = _widen_kept_packages(keep)
-    disabled = plan_disabled_libraries(stdlib_modules, include_modules=forced)
+    keep = expand_interpreter_modules(keep, follow_optional=follow_optional)
+    disabled = plan_disabled_libraries(
+        stdlib_modules, include_modules=forced, follow_optional=follow_optional
+    )
     # Cannot happen with any CPython this supports -- nothing in `LIBRARY_MODULES` is
     # imported at startup -- but by the time this runs the interpreter is already
     # built, so a silent disagreement would ship a distribution whose `keep_modules`

@@ -87,6 +87,7 @@ from smelt.explorer import (
     resolve_module,
 )
 from smelt.explorer import optional_modules as explorer_optional_modules
+from smelt.hooks import hidden_imports
 from smelt.native_deps import (
     BundledNatives,
     bundle_native_dependencies,
@@ -777,6 +778,12 @@ def collect_closure(
     like the entrypoint itself, and `extra_packages` additionally sweeps in every
     module its package contains. `exclude_modules` cuts names (and everything under
     them) back out, for trees that were reached but are not needed at runtime.
+
+    Whatever the two methods find, `smelt.hooks` then adds what neither can see: a
+    module resolved from a name no source spells out (`xml.sax`'s parser list,
+    `logging.config`'s dotted strings). Those additions are walked like any other root
+    -- a hook that added a module without its dependencies would be adding a module
+    that cannot import.
     """
     with _search_paths_prepended(search_paths):
         roots = _closure_roots(entrypoint_module, extra_modules, extra_packages)
@@ -788,6 +795,7 @@ def collect_closure(
                 reachable.update(node.name for node in flatten_dependency_graph(graph))
         if discovery in ("trace", "both"):
             reachable.update(trace_imported_modules(entrypoint_module, search_paths))
+        reachable.update(_hooked_modules(reachable))
 
         with_parents = set(reachable)
         for import_path in reachable:
@@ -801,6 +809,26 @@ def collect_closure(
             if import_path == entrypoint_module or not _is_excluded(import_path, excluded)
         }
         return {import_path: resolve_module(import_path) for import_path in sorted(kept)}
+
+
+def _hooked_modules(reachable: set[ImportPath]) -> set[ImportPath]:
+    """
+    What `smelt.hooks` adds for the modules in `reachable`, together with everything
+    those additions themselves import.
+
+    Walked statically whatever the discovery mode is, and deliberately: a hook exists
+    because no *runtime* observation was going to find the module either -- the code
+    path that would have imported it is precisely the one nobody took. So there is
+    nothing for a trace to contribute here, while reading the added module's own
+    imports is what makes it usable once it arrives (`logging.handlers` without `queue`
+    is a file in the folder, not a module that imports).
+    """
+    added = hidden_imports(frozenset(reachable))
+    walked = set(added)
+    for module in added:
+        graph = build_dependency_graph(module)
+        walked.update(node.name for node in flatten_dependency_graph(graph))
+    return walked
 
 
 def collect_optional_modules(
@@ -1500,7 +1528,11 @@ def build_dist(
         # the rest of the decision (`resolve_requirements`) needs the built prefix to
         # ask it for its bootstrap module set -- hence the two calls rather than one.
         disabled_libraries = (
-            plan_disabled_libraries(stdlib_modules, include_modules=forced_modules)
+            plan_disabled_libraries(
+                stdlib_modules,
+                include_modules=forced_modules,
+                follow_optional=not drop_optional,
+            )
             if tailor
             else frozenset[str]()
         )
@@ -1519,6 +1551,7 @@ def build_dist(
                     *entrypoint_options.get("drop-stdlib-groups", []),
                     *drop_stdlib_groups,
                 ],
+                follow_optional=not drop_optional,
             )
 
     dist_root = output_dir / dist_folder_name(config, entrypoint_spec)

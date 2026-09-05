@@ -696,6 +696,29 @@ def build_dependency_graph(
     return root
 
 
+def reachable_from(
+    roots: Iterable[ImportPath],
+    target: TargetEnvironment = DEFAULT_TARGET,
+    *,
+    follow_optional: bool = True,
+) -> set[ImportPath]:
+    """
+    Every module reachable from any of `roots`, the roots included.
+
+    One walk with one shared visited set, rather than a graph per root: a module reached
+    from twenty roots is parsed once here and twenty times by twenty calls to
+    `build_dependency_graph`. That is the whole difference, and over a set of roots the
+    size of the standard library it is the difference between seconds and minutes.
+    """
+    registry: dict[ImportPath, Node] = {}
+    visited: set[ImportPath] = set()
+    for root in roots:
+        _walk_module(
+            _get_or_create_node(root, registry), registry, visited, target, follow_optional
+        )
+    return set(registry)
+
+
 def optional_modules(
     entrypoint: ImportPath, target: TargetEnvironment = DEFAULT_TARGET
 ) -> set[ImportPath]:
@@ -732,6 +755,8 @@ def package_closure(
     package: ImportPath,
     seeds: Iterable[ImportPath] = (),
     target: TargetEnvironment = DEFAULT_TARGET,
+    *,
+    follow_optional: bool = True,
 ) -> set[ImportPath]:
     """
     The submodules of `package` reachable from `seeds` (and from the package's own
@@ -763,7 +788,12 @@ def package_closure(
             continue
         try:
             raw_imports = list(
-                _iter_raw_imports(source.read_text(), follow_deferred=True, target=target)
+                _iter_raw_imports(
+                    source.read_text(),
+                    follow_deferred=True,
+                    follow_optional=follow_optional,
+                    target=target,
+                )
             )
         except (SyntaxError, UnicodeDecodeError):
             continue

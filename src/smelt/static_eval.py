@@ -106,7 +106,7 @@ _STRING_METHODS: Final[frozenset[str]] = frozenset(
 )
 
 
-def static_names(tree: ast.Module, target: TargetEnvironment = DEFAULT_TARGET) -> StaticNames:
+class static_names(Mapping[str, StaticValue]):  # noqa: N801 -- reads as the function it replaced
     """
     Everything a condition in `tree` can be decided from: `target`'s own names, plus the
     module's top-level constants that follow from them.
@@ -116,23 +116,55 @@ def static_names(tree: ast.Module, target: TargetEnvironment = DEFAULT_TARGET) -
     `subprocess`, `WIN = sys.platform.startswith("win")` in `click._compat` -- and guard
     on that. Without resolving them, the interesting guards are all undecidable and the
     Windows-only imports behind them get followed anyway.
+
+    Resolved **lazily**, on the first question about a name that is not one of
+    `target`'s own, and that is not a micro-optimisation: working the constants out
+    means an `ast.walk` of the whole module to count every binding in it, and the
+    overwhelming majority of modules never ask, because the overwhelming majority of
+    guards name `sys.platform` or `os.name` directly. Doing it eagerly made a dependency
+    walk of the standard library roughly three times slower, all of it spent counting
+    bindings nothing went on to look up.
     """
-    names = target.known_names
-    bindings = Counter(_iter_bound_names(tree))
-    for statement in tree.body:
-        binding = _constant_binding(statement)
-        if binding is None:
-            continue
-        name, value_node = binding
-        if bindings[name] != 1:
-            # Bound more than once, anywhere in the module and at any depth: which
-            # binding a given condition sees would depend on control flow.
-            continue
-        try:
-            names[name] = _static_value(value_node, names)
-        except NotStaticError:
-            continue
-    return names
+
+    def __init__(self, tree: ast.Module, target: TargetEnvironment = DEFAULT_TARGET) -> None:
+        self._tree = tree
+        self._target = target
+        self._names = target.known_names
+        self._resolved = False
+
+    def _resolve(self) -> dict[str, StaticValue]:
+        """
+        Works out the module's top-level constants, once.
+        """
+        if self._resolved:
+            return self._names
+        self._resolved = True
+        bindings = Counter(_iter_bound_names(self._tree))
+        for statement in self._tree.body:
+            binding = _constant_binding(statement)
+            if binding is None:
+                continue
+            name, value_node = binding
+            if bindings[name] != 1:
+                # Bound more than once, anywhere in the module and at any depth: which
+                # binding a given condition sees would depend on control flow.
+                continue
+            try:
+                self._names[name] = _static_value(value_node, self._names)
+            except NotStaticError:
+                continue
+        return self._names
+
+    def __getitem__(self, key: str) -> StaticValue:
+        if not self._resolved and key in self._names:
+            return self._names[key]
+        return self._resolve()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._resolve())
+
+    def __len__(self) -> int:
+        return len(self._resolve())
 
 
 def _constant_binding(statement: ast.stmt) -> tuple[str, ast.expr] | None:

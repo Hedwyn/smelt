@@ -379,6 +379,44 @@ def test_collect_optional_modules_names_what_the_closure_need_not_ship(
     assert "optpkg.accelerator" in closure
 
 
+def test_collect_closure_applies_the_module_hooks(tmp_path: Path) -> None:
+    """
+    A hook is only useful if what it adds is *walked* like anything else: `logging`
+    brings in `logging.handlers`, and `logging.handlers` is what needs `queue` -- a name
+    that appears nowhere in the application's source, nor in `logging/__init__.py`.
+    """
+    package = tmp_path / "src" / "hookpkg"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "cli.py").write_text("import logging\n")
+
+    closure = collect_closure(
+        assert_is_valid_import_path("hookpkg.cli"),
+        [str(tmp_path / "src")],
+        discovery="static",
+    )
+    assert "logging.handlers" in closure
+    assert "queue" in closure
+
+
+def test_collect_closure_leaves_an_unhooked_project_alone(tmp_path: Path) -> None:
+    """
+    The registry is exact-match: nothing is added for a module nobody wrote a hook for.
+    """
+    package = tmp_path / "src" / "plainpkg"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "cli.py").write_text("import json\n")
+
+    closure = collect_closure(
+        assert_is_valid_import_path("plainpkg.cli"),
+        [str(tmp_path / "src")],
+        discovery="static",
+    )
+    assert "queue" not in closure
+    assert "logging.handlers" not in closure
+
+
 def test_collect_distribution_metadata_ships_dist_info(tmp_path: Path) -> None:
     """
     Against a real installed distribution: `importlib.metadata` resolves against

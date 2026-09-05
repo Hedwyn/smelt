@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -53,6 +54,7 @@ from smelt.native_deps import is_supported_platform
 from smelt.own_python import (
     ALWAYS_KEEP,
     ATOMIC_PACKAGES,
+    BUILD_LOCK_NAME,
     DEFAULT_STDLIB_PRUNE,
     INTERPRETER_HOST_DLL_PREFIXES,
     INTERPRETER_REL_PATH,
@@ -62,6 +64,8 @@ from smelt.own_python import (
     OwnPythonError,
     StagedInterpreter,
     bootstrap_modules,
+    expand_interpreter_modules,
+    interpreter_build_lock,
     interpreter_version,
     minimal_viable_stdlib,
     own_python_cache_dir,
@@ -259,18 +263,25 @@ def test_bootstrap_modules_reports_what_the_interpreter_loaded_itself(tmp_path: 
 
 
 def test_plan_disabled_libraries_turns_off_only_what_nothing_needs() -> None:
-    # `_ssl` names the extension module, `sqlite3` only the pure-Python wrapper: both
-    # have to keep their library, or the module they name cannot import.
+    """
+    `_ssl` names the extension module, `sqlite3` only the pure-Python wrapper: both have
+    to keep their library, or the module they name cannot import.
+
+    Asserted on the two libraries the closure names rather than on the whole set,
+    because what else survives depends on what every interpreter carries anyway --
+    `bz2` and `lzma` reach `zipfile`, which every interpreter has behind
+    `importlib.readers` (see `expand_interpreter_modules`).
+    """
     disabled = plan_disabled_libraries(["_ssl", "sqlite3", "json"])
 
     assert "openssl" not in disabled
     assert "sqlite" not in disabled
-    assert disabled == frozenset(set(LIBRARY_MODULES) - {"openssl", "sqlite"})
+    assert {"tk", "libffi"} <= disabled
 
 
 def test_plan_disabled_libraries_honors_forced_modules() -> None:
-    assert "lzma" in plan_disabled_libraries(["json"])
-    assert "lzma" not in plan_disabled_libraries(["json"], include_modules=["lzma"])
+    assert "tk" in plan_disabled_libraries(["json"])
+    assert "tk" not in plan_disabled_libraries(["json"], include_modules=["tkinter"])
 
 
 def test_plan_disabled_libraries_never_touches_a_library_always_keep_needs() -> None:
@@ -340,7 +351,10 @@ def test_stage_interpreter_prunes_what_the_closure_did_not_reach(tmp_path: Path)
     assert staged.tailored
     assert staged.pruned_modules == ["json"]
     assert staged.pruned_extensions == ["_json"]
-    assert sorted(staged.disabled_libraries) == sorted(LIBRARY_MODULES)
+    # Not every library: `bz2` and `lzma` are reachable from the `zipfile` that every
+    # interpreter carries behind `importlib.readers`, so nothing can turn them off
+    # without `--drop-optional-imports`.
+    assert {"openssl", "sqlite", "libffi", "tk"} <= set(staged.disabled_libraries)
     assert not (stdlib / "json").exists()
     assert not (stdlib / "lib-dynload" / "_json.cpython-312-x86_64-linux-gnu.so").exists()
     # `os` is in ALWAYS_KEEP, which is also what stops the landmark being prunable
@@ -366,6 +380,106 @@ def test_stage_interpreter_keeps_what_the_closure_reached(tmp_path: Path) -> Non
     assert staged.pruned_extensions == []
     assert (stdlib / "json" / "__init__.pyc").is_file()
     assert (stdlib / "lib-dynload" / "_json.cpython-312-x86_64-linux-gnu.so").is_file()
+
+
+#: A child process that takes the build lock and reports whether it got it, optionally
+#: holding it until killed. Pointed at a cache directory the test controls, so it
+#: cannot collide with a real build on the developer's machine.
+#:
+#: `LOCK_NB` rather than `interpreter_build_lock` for the "did someone else have it"
+#: question: the real thing waits indefinitely, on purpose (a CPython build's duration
+#: is not something to guess at), so a test cannot ask it that question and get an
+#: answer back.
+_LOCK_PROBE = """
+import fcntl, sys, time
+from pathlib import Path
+import smelt.own_python as own_python
+
+own_python._METAPYTHON_CACHE_DIR = Path(sys.argv[1])
+hold = len(sys.argv) > 2
+
+if hold:
+    with own_python.interpreter_build_lock():
+        print("acquired", flush=True)
+        while True:
+            time.sleep(0.05)
+
+lock_path = Path(sys.argv[1]) / own_python.BUILD_LOCK_NAME
+with open(lock_path, "a+") as lock_file:
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("blocked", flush=True)
+    else:
+        print("acquired", flush=True)
+"""
+
+
+def _run_lock_probe(cache_dir: Path) -> str:
+    """
+    Asks, from a separate *process*, whether the build lock is free. Separate process
+    because `flock` is held per open file description: two acquisitions inside one
+    process would not contend at all.
+    """
+    done = subprocess.run(
+        [sys.executable, "-c", _LOCK_PROBE, str(cache_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout.strip()
+
+
+def test_the_build_lock_excludes_a_second_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    What the lock exists for. meta-python's checkout is shared by every build on the
+    machine and each build resets it, so two overlapping builds do not duplicate work,
+    they corrupt each other.
+    """
+    monkeypatch.setattr("smelt.own_python._METAPYTHON_CACHE_DIR", tmp_path)
+
+    with interpreter_build_lock():
+        assert (tmp_path / BUILD_LOCK_NAME).is_file()
+        assert _run_lock_probe(tmp_path) == "blocked"
+
+    # ... and released on the way out, without the file being removed: unlinking a
+    # locked file leaves a waiter holding the old inode, which is mutual exclusion with
+    # the mutual exclusion taken out.
+    assert (tmp_path / BUILD_LOCK_NAME).is_file()
+    assert _run_lock_probe(tmp_path) == "acquired"
+
+
+def test_the_build_lock_dies_with_its_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The reason it is a file lock rather than a lock directory: a build interrupted with
+    Ctrl-C, or killed outright, must not wedge every later build on the machine. The
+    kernel drops the lock when the process exits, however it exits -- which is exactly
+    what a lock directory would need cleanup code to imitate, and would get wrong.
+
+    It matters more now that the wait is unbounded: a lock nothing releases would be a
+    hang with no way out of it.
+    """
+    monkeypatch.setattr("smelt.own_python._METAPYTHON_CACHE_DIR", tmp_path)
+
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _LOCK_PROBE, str(tmp_path), "hold"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "acquired"
+        assert _run_lock_probe(tmp_path) == "blocked"
+    finally:
+        holder.kill()
+        holder.wait()
+
+    with interpreter_build_lock():
+        pass
 
 
 def _with_nested_packages(prefix: Path) -> Path:
@@ -418,11 +532,12 @@ def test_stage_interpreter_prunes_inside_a_kept_package(tmp_path: Path) -> None:
         assert (stdlib / "json" / f"{name}.pyc").is_file()
 
 
-def test_stage_interpreter_keeps_an_atomic_package_whole(tmp_path: Path) -> None:
+def test_a_hooked_package_keeps_what_the_hook_names(tmp_path: Path) -> None:
     """
     `logging.config` resolves handler classes from dotted strings in a config file, so
     no import statement anywhere points at `logging.handlers` and pruning by closure
-    would take it. `ATOMIC_PACKAGES` is what stops that.
+    would take it -- and shipping the whole package for that would pay for one module's
+    habit with all its siblings. `smelt.hooks` names the two instead.
     """
     prefix = _with_nested_packages(_fake_interpreter_prefix(tmp_path))
     dist_root = tmp_path / "myapp.dist"
@@ -444,6 +559,32 @@ def test_stage_interpreter_keeps_an_atomic_package_whole(tmp_path: Path) -> None
         assert (stdlib / "logging" / f"{name}.pyc").is_file()
 
 
+def test_an_atomic_package_ships_whole_with_what_its_interior_imports() -> None:
+    """
+    The rule item 9 exists for: a package nothing pruned inside still has to be able to
+    import. `dbm` is atomic because `whichdb` `__import__`s its backends from a list of
+    strings, so its interior is never walked by a closure -- and `dbm.dumb` imports
+    `collections.abc` and `os`, neither of which any application source names.
+    """
+    expanded = expand_interpreter_modules(["dbm"])
+
+    assert {"dbm", "dbm.dumb"} <= expanded
+    assert {"collections.abc", "os"} <= expanded
+
+
+def test_the_encodings_exception_ships_whole_without_its_interior_imports() -> None:
+    """
+    The one place a package ships whole and knowingly does *not* get what its interior
+    needs: the CJK codecs' `_codecs_*` extension modules are 864 KB and the
+    `text_codecs` group already states they go. `AtomicPackage.exception` is where that
+    is recorded, and this is the assertion that it is still what happens.
+    """
+    expanded = expand_interpreter_modules(["encodings"])
+
+    assert "encodings.big5" in expanded
+    assert not {name for name in expanded if name.startswith("_codecs_")}
+
+
 def test_a_deferred_import_inside_a_package_still_keeps_its_target(tmp_path: Path) -> None:
     """
     The one assumption pruning inside a package must not make. Dropping `asyncio`
@@ -463,11 +604,19 @@ def test_every_atomic_package_says_why_it_is_atomic() -> None:
     """
     Same rule as `StdlibGroup`: an exception to pruning that cannot state its reason is
     a place for dead weight to accumulate unchallenged.
+
+    And the list stays short on purpose -- a package belongs here only when the set of
+    submodules it may load is open, built from a codec name or a backend list at
+    runtime. Where the set is closed, `smelt.hooks` names those submodules instead and
+    the rest of the package prunes normally.
     """
     assert ATOMIC_PACKAGES
-    for package, reason in ATOMIC_PACKAGES.items():
+    assert len(ATOMIC_PACKAGES) <= 4, sorted(ATOMIC_PACKAGES)
+    for package, entry in ATOMIC_PACKAGES.items():
         assert package.replace(".", "").isidentifier(), package
-        assert len(reason) > 20, package
+        assert len(entry.reason) > 20, package
+        if not entry.collect_interior_imports:
+            assert len(entry.exception) > 20, package
 
 
 def test_stage_interpreter_refuses_to_ship_without_a_module_it_needs(tmp_path: Path) -> None:
