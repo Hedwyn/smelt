@@ -52,6 +52,7 @@ from smelt.frontend import parse_config_from_pyproject
 from smelt.native_deps import is_supported_platform
 from smelt.own_python import (
     ALWAYS_KEEP,
+    ATOMIC_PACKAGES,
     DEFAULT_STDLIB_PRUNE,
     INTERPRETER_HOST_DLL_PREFIXES,
     INTERPRETER_REL_PATH,
@@ -365,6 +366,108 @@ def test_stage_interpreter_keeps_what_the_closure_reached(tmp_path: Path) -> Non
     assert staged.pruned_extensions == []
     assert (stdlib / "json" / "__init__.pyc").is_file()
     assert (stdlib / "lib-dynload" / "_json.cpython-312-x86_64-linux-gnu.so").is_file()
+
+
+def _with_nested_packages(prefix: Path) -> Path:
+    """
+    Adds submodules to a fake prefix's packages, so that pruning *inside* a package has
+    something to work on.
+
+    The names mirror the host's real `json` and `logging`, because that is what
+    `_widen_kept_packages` reads: the decision about a package's interior is made from
+    the package's own source on this machine, while the pruning happens in the staged
+    tree.
+    """
+    stdlib = prefix / "lib" / "python3.12"
+    for name in ("decoder", "encoder", "scanner", "tool"):
+        (stdlib / "json" / f"{name}.py").write_text("VALUE = 1\n")
+    package = stdlib / "logging"
+    package.mkdir()
+    (package / "__init__.py").write_text("VALUE = 1\n")
+    for name in ("config", "handlers"):
+        (package / f"{name}.py").write_text("VALUE = 1\n")
+    return prefix
+
+
+def test_stage_interpreter_prunes_inside_a_kept_package(tmp_path: Path) -> None:
+    """
+    A package the closure reached ships the submodules it can reach, not all of them.
+    `json.tool` is `json`'s command line interface: nothing in the package imports it,
+    so nothing that imports `json` can need it.
+    """
+    prefix = _with_nested_packages(_fake_interpreter_prefix(tmp_path))
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+    requirements = resolve_requirements(["json"], assert_path_exists(prefix))
+
+    staged = stage_interpreter(
+        assert_path_exists(prefix),
+        dist_root,
+        bundle_dependencies=False,
+        requirements=requirements,
+    )
+
+    stdlib = dist_root / "lib" / "python3.12"
+    # `logging` goes whole, the closure not having reached it at all
+    assert staged.pruned_modules == ["logging"]
+    assert staged.pruned_submodules == ["json.tool"]
+    assert not (stdlib / "json" / "tool.pyc").exists()
+    # what `json/__init__.py` itself imports stays, `__init__` included
+    assert (stdlib / "json" / "__init__.pyc").is_file()
+    for name in ("decoder", "encoder", "scanner"):
+        assert (stdlib / "json" / f"{name}.pyc").is_file()
+
+
+def test_stage_interpreter_keeps_an_atomic_package_whole(tmp_path: Path) -> None:
+    """
+    `logging.config` resolves handler classes from dotted strings in a config file, so
+    no import statement anywhere points at `logging.handlers` and pruning by closure
+    would take it. `ATOMIC_PACKAGES` is what stops that.
+    """
+    prefix = _with_nested_packages(_fake_interpreter_prefix(tmp_path))
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+    requirements = resolve_requirements(["logging"], assert_path_exists(prefix))
+
+    staged = stage_interpreter(
+        assert_path_exists(prefix),
+        dist_root,
+        bundle_dependencies=False,
+        requirements=requirements,
+    )
+
+    stdlib = dist_root / "lib" / "python3.12"
+    # nothing was cut from inside `logging`, though `json` went whole
+    assert staged.pruned_modules == ["json"]
+    assert staged.pruned_submodules == []
+    for name in ("config", "handlers"):
+        assert (stdlib / "logging" / f"{name}.pyc").is_file()
+
+
+def test_a_deferred_import_inside_a_package_still_keeps_its_target(tmp_path: Path) -> None:
+    """
+    The one assumption pruning inside a package must not make. Dropping `asyncio`
+    because only a function body imports it is the whole point of the closure rules;
+    dropping `email.parser` for the same reason breaks `email.message_from_string()`,
+    whose import of it is exactly such a function body.
+    """
+    prefix = _fake_interpreter_prefix(tmp_path)
+    requirements = resolve_requirements(["email.message"], assert_path_exists(prefix))
+
+    assert {"email", "email.message", "email.parser"} <= requirements.keep_modules
+    # ... and the widening stays inside the package it was asked about
+    assert not any(name.startswith("http") for name in requirements.keep_modules)
+
+
+def test_every_atomic_package_says_why_it_is_atomic() -> None:
+    """
+    Same rule as `StdlibGroup`: an exception to pruning that cannot state its reason is
+    a place for dead weight to accumulate unchallenged.
+    """
+    assert ATOMIC_PACKAGES
+    for package, reason in ATOMIC_PACKAGES.items():
+        assert package.replace(".", "").isidentifier(), package
+        assert len(reason) > 20, package
 
 
 def test_stage_interpreter_refuses_to_ship_without_a_module_it_needs(tmp_path: Path) -> None:

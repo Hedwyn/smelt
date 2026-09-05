@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Iterable
 
 from smelt.bytecode import compile_tree
+from smelt.explorer import package_closure, package_directories
 from smelt.native_deps import (
     ALWAYS_HOST_DLL_PREFIXES,
     LINUX_BASE_LIBC_DLL_PREFIXES,
@@ -61,7 +62,14 @@ from smelt.native_deps import (
     set_rpath,
 )
 from smelt.process import call_command
-from smelt.utils import PathExists, SmeltError, assert_path_exists, path_exists
+from smelt.utils import (
+    PathExists,
+    SmeltError,
+    assert_is_valid_import_path,
+    assert_path_exists,
+    is_valid_import_path,
+    path_exists,
+)
 
 if TYPE_CHECKING:
     # `metapython` is an optional extra (see `_ensure_metapython_installed`), so it is
@@ -234,6 +242,11 @@ MINIMAL_VIABLE_STDLIB: Final[tuple[StdlibGroup, ...]] = (
             "abc",
             "codecs",
             "collections",
+            # `collections/abc.py` re-exports `_collections_abc` and is what everything
+            # spells (`from collections.abc import Mapping`). It is 3 KB, and nothing
+            # inside `collections` imports it -- only code outside does -- so pruning
+            # inside the package cannot see it is needed.
+            "collections.abc",
             "contextlib",
             "copyreg",
             "enum",
@@ -350,6 +363,55 @@ ALWAYS_KEEP: Final[tuple[str, ...]] = tuple(sorted(minimal_viable_stdlib()))
 #: closure has nothing to say about them and they are never pruned as one.
 #: `lib-dynload` is pruned per-`.so` instead, and `site-packages` is where a
 #: distribution's own payload would land if it were not kept in `app/`.
+#: Standard library packages a tailored interpreter keeps **whole**, never dropping
+#: individual submodules out of them, mapped to the reason.
+#:
+#: The counterpart to `MINIMAL_VIABLE_STDLIB` one level down: that names the modules a
+#: closure structurally cannot contain, this names the *packages* whose interior a
+#: closure cannot describe. Every entry resolves at least one of its own submodules
+#: from a name computed at runtime -- a dotted string in a config file, a registry
+#: keyed by codec or backend, a module-level `__getattr__` -- so no import statement
+#: anywhere points at it and pruning by closure removes it.
+#:
+#: Named at whatever depth the dynamic behaviour actually lives at: `xml.sax` picks its
+#: parser by name, while `xml.dom` and `xml.etree` are ordinary packages and together
+#: are most of `xml`'s 1.5 MB, so making the whole of `xml` atomic would pay for one
+#: module's habit with the other two.
+ATOMIC_PACKAGES: Final[dict[str, str]] = {
+    "encodings": (
+        "codecs are looked up by name -- `encodings.cp1252` for a locale, never "
+        "spelled out in any source (see the `text_codecs` group of "
+        "MINIMAL_VIABLE_STDLIB)"
+    ),
+    "importlib": (
+        "`importlib.readers` is imported by a function of `_bootstrap_external`, which "
+        "is *frozen* into the interpreter and so has no source to read the import from "
+        "at all -- the one blind spot no AST pass can cover"
+    ),
+    "logging": (
+        "`logging.config.dictConfig`/`fileConfig` resolve handler classes from dotted "
+        "strings in a config file (`logging.handlers.RotatingFileHandler`)"
+    ),
+    "multiprocessing": (
+        "`multiprocessing.context` selects a `popen_*` module by start-method name, and "
+        "a spawned child imports `spawn` and `resource_tracker` by name in a fresh "
+        "interpreter"
+    ),
+    "xml.sax": "`make_parser()` imports each candidate parser module by name",
+    "dbm": "`dbm.open`/`whichdb` import `dbm.gnu`, `dbm.ndbm` or `dbm.dumb` by name",
+    "ctypes": "`ctypes.util` resolves its platform helpers dynamically",
+    "unittest": "a module-level `__getattr__` loads `unittest.async_case` on first use",
+    "concurrent": (
+        "`concurrent.futures`' module-level `__getattr__` loads `.process`/`.thread` on first use"
+    ),
+    "sqlite3": "a module-level `__getattr__` loads `sqlite3.dbapi2` on first use",
+    "zoneinfo": (
+        "a module-level `__getattr__` picks the C or Python implementation, and the "
+        "data comes from a `tzdata` package imported by name"
+    ),
+}
+
+
 _NON_MODULE_STDLIB_ENTRIES: Final[tuple[str, ...]] = (
     "lib-dynload",
     "site-packages",
@@ -832,8 +894,8 @@ class InterpreterRequirements:
     @property
     def keep_top_levels(self) -> frozenset[str]:
         """
-        The top-level names of `keep_modules`, which is the granularity pruning works
-        at: a standard library package is kept or dropped whole, never half.
+        The top-level names of `keep_modules`, i.e. which standard library trees and
+        `lib-dynload` extension modules survive at all.
         """
         return frozenset(name.partition(".")[0] for name in self.keep_modules)
 
@@ -868,6 +930,43 @@ def plan_disabled_libraries(
     return frozenset(
         library for library, modules in LIBRARY_MODULES.items() if not named.intersection(modules)
     )
+
+
+def _widen_kept_packages(keep: frozenset[str]) -> frozenset[str]:
+    """
+    Adds, for every package `keep` reaches into, the submodules that package can reach
+    from the members already kept -- following deferred imports, which the closure
+    itself does not (see `explorer.package_closure`).
+
+    Pruning inside a package is where that difference bites. Dropping `asyncio` because
+    only a function body imports it saves 600 KB and is the whole point; dropping
+    `email.parser` because only `email.message_from_string()` imports it saves 20 KB and
+    breaks `email.message_from_string()`. So the closure decides which packages ship,
+    and this decides what a shipped package keeps.
+
+    `ATOMIC_PACKAGES` are skipped: nothing is pruned inside them, so there is nothing to
+    widen for.
+    """
+    packages = {
+        name
+        for name in keep
+        if name not in ATOMIC_PACKAGES
+        and is_valid_import_path(name)
+        and package_directories(assert_is_valid_import_path(name))
+    }
+    widened = set(keep)
+    for package in sorted(packages):
+        # Only the outermost packages need walking: `package_closure` is transitive, so
+        # walking `xml` already covers `xml.etree`.
+        if any(package.startswith(f"{parent}.") for parent in packages if parent != package):
+            continue
+        seeds = [
+            assert_is_valid_import_path(name)
+            for name in keep
+            if name == package or name.startswith(f"{package}.")
+        ]
+        widened.update(package_closure(assert_is_valid_import_path(package), seeds))
+    return frozenset(widened)
 
 
 def resolve_requirements(
@@ -913,6 +1012,7 @@ def resolve_requirements(
         for module in (*stdlib_modules, *forced, *mandatory, *bootstrap)
         for prefix_name in _import_prefixes(module)
     )
+    keep = _widen_kept_packages(keep)
     disabled = plan_disabled_libraries(stdlib_modules, include_modules=forced)
     # Cannot happen with any CPython this supports -- nothing in `LIBRARY_MODULES` is
     # imported at startup -- but by the time this runs the interpreter is already
@@ -961,6 +1061,10 @@ class StagedInterpreter:
     disabled_libraries: list[str] = field(default_factory=list)
     #: Standard library trees dropped because the closure did not reach them.
     pruned_modules: list[str] = field(default_factory=list)
+    #: Submodules dropped from *inside* a package that was itself kept, dotted. A
+    #: finer decision than `pruned_modules` and a more delicate one -- see
+    #: `_prune_to_requirements` and `ATOMIC_PACKAGES`.
+    pruned_submodules: list[str] = field(default_factory=list)
     #: `lib-dynload` extension modules dropped for the same reason.
     pruned_extensions: list[str] = field(default_factory=list)
     #: Size of the interpreter tree just before closure-driven pruning, i.e. after the
@@ -998,6 +1102,8 @@ class StagedInterpreter:
                     f"  libraries off:      {', '.join(self.disabled_libraries) or 'none'}",
                     f"  stdlib trees cut:   {len(self.pruned_modules)}"
                     + (f" ({', '.join(self.pruned_modules)})" if self.pruned_modules else ""),
+                    f"  submodules cut:     {len(self.pruned_submodules)}"
+                    + (f" ({', '.join(self.pruned_submodules)})" if self.pruned_submodules else ""),
                     f"  extensions cut:     {len(self.pruned_extensions)}"
                     + (f" ({', '.join(self.pruned_extensions)})" if self.pruned_extensions else ""),
                     f"  stdlib before cut:  {self.size_before_prune_bytes / 1e6:.1f} MB",
@@ -1021,6 +1127,7 @@ class StagedInterpreter:
             "pruned": self.pruned,
             "disabled_libraries": self.disabled_libraries,
             "pruned_modules": self.pruned_modules,
+            "pruned_submodules": self.pruned_submodules,
             "pruned_extensions": self.pruned_extensions,
             "dropped_stdlib_groups": self.dropped_stdlib_groups,
             "bundled_libraries": sorted(self.native_deps.dependencies),
@@ -1106,35 +1213,91 @@ def _dynload_modules(stdlib_dir: Path) -> frozenset[str]:
     )
 
 
-def _stdlib_entry_module(entry: Path) -> str | None:
+def _stdlib_entry_module(entry: Path, *, nested: bool = False) -> str | None:
     """
-    The module a top-level entry of a standard library directory provides, or None if
-    it is not one at all (`lib-dynload`, `config-*`, `LICENSE.txt`, ...).
+    The module an entry of a standard library directory provides, or None if it is not
+    one at all (`lib-dynload`, `config-*`, `LICENSE.txt`, a package's own `__init__`).
+
+    `nested` is for entries *inside* a package, where a directory is only a subpackage
+    if it carries an `__init__`: a package may hold data directories, and those belong
+    to the package rather than being modules of their own.
     """
     if entry.name in _NON_MODULE_STDLIB_ENTRIES:
         return None
-    name = entry.name if entry.is_dir() else entry.stem
-    if not entry.is_dir() and entry.suffix not in (".py", ".pyc"):
-        return None
+    if entry.is_dir():
+        if nested and not _is_package_dir(entry):
+            return None
+        name = entry.name
+    else:
+        if entry.suffix not in (".py", ".pyc") or entry.stem == "__init__":
+            return None
+        name = entry.stem
     return name if name.isidentifier() else None
+
+
+def _is_package_dir(entry: Path) -> bool:
+    """
+    Whether `entry` is an importable package, i.e. carries an `__init__` module. Both
+    suffixes, since pruning runs after the sourceless pass on some builds and before it
+    on others.
+    """
+    return any((entry / f"__init__{suffix}").is_file() for suffix in (".pyc", ".py"))
+
+
+def _remove(entry: Path) -> None:
+    """
+    Deletes a standard library entry, directory or file.
+    """
+    if entry.is_dir():
+        shutil.rmtree(entry)
+    else:
+        entry.unlink()
+
+
+def _prune_package(directory: Path, package: str, keep: frozenset[str]) -> list[str]:
+    """
+    Drops the submodules of the package at `directory` that `keep` does not name, and
+    returns their dotted names. Recurses into the subpackages that survive.
+
+    Stops at an `ATOMIC_PACKAGES` entry: those resolve their own submodules from names
+    computed at runtime, so no closure can describe their interior and pruning by one
+    removes whatever the application had not happened to import yet.
+    """
+    pruned: list[str] = []
+    for entry in sorted(directory.iterdir()):
+        module = _stdlib_entry_module(entry, nested=True)
+        if module is None:
+            continue
+        name = f"{package}.{module}"
+        if name not in keep:
+            _remove(entry)
+            pruned.append(name)
+        elif entry.is_dir() and name not in ATOMIC_PACKAGES:
+            pruned.extend(_prune_package(entry, name, keep))
+    return pruned
 
 
 def _prune_to_requirements(
     stdlib_dir: Path, requirements: InterpreterRequirements
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """
     Drops everything in `stdlib_dir` the application does not need, and returns
-    `(stdlib trees pruned, extension modules pruned)`.
+    `(stdlib trees pruned, submodules pruned, extension modules pruned)`.
 
-    Two passes, because the two halves of the standard library are stored differently
-    but decided identically -- a top-level name is kept when `requirements` names it,
-    and dropped whole otherwise. Top-level granularity is a deliberate floor: pruning
-    *inside* a package would trade real risk (a submodule imported through
-    `__getattr__`, a plugin table read at import time) for a few kilobytes.
+    Three passes over two differently stored halves of the standard library, decided
+    identically: a name is kept when `requirements` names it and dropped otherwise.
+    `lib-dynload` holds only top-level extension modules, so the first pass needs no
+    recursion; the tree pass drops whole top-level packages and then goes *inside* the
+    survivors (`_prune_package`).
+
+    Going inside is only safe because two things stand behind it. `keep_modules` was
+    widened for exactly this (`_widen_kept_packages`), so a submodule that a kept one
+    imports from a function body -- `email.parser`, reached only through
+    `email.message_from_string()` -- is named rather than inferred absent; and
+    `ATOMIC_PACKAGES` carries the packages where even that is not enough.
     """
-    # Materialised once: `keep_top_levels` derives itself from `keep_modules`, and this
-    # asks about every entry of a standard library tree.
-    keep = requirements.keep_top_levels
+    keep = requirements.keep_modules
+    top_levels = requirements.keep_top_levels
     dynload = _dynload_dir(stdlib_dir)
     pruned_extensions: list[str] = []
     if dynload.is_dir():
@@ -1142,28 +1305,34 @@ def _prune_to_requirements(
             if not entry.is_file():
                 continue
             module = _extension_module_name(entry)
-            if module in keep:
+            if module in top_levels:
                 continue
             entry.unlink()
             pruned_extensions.append(module)
 
     pruned_modules: list[str] = []
+    pruned_submodules: list[str] = []
     for entry in sorted(stdlib_dir.iterdir()):
         module = _stdlib_entry_module(entry)
-        if module is None or module in keep:
+        if module is None:
             continue
-        if entry.is_dir():
-            shutil.rmtree(entry)
-        else:
-            entry.unlink()
-        pruned_modules.append(module)
+        if module not in top_levels:
+            _remove(entry)
+            pruned_modules.append(module)
+        elif entry.is_dir() and module not in ATOMIC_PACKAGES:
+            pruned_submodules.extend(_prune_package(entry, module, keep))
     _logger.debug(
-        "Tailoring dropped %d stdlib tree(s) and %d extension module(s) from %s",
+        "Tailoring dropped %d stdlib tree(s), %d submodule(s) and %d extension module(s) from %s",
         len(pruned_modules),
+        len(pruned_submodules),
         len(pruned_extensions),
         stdlib_dir,
     )
-    return sorted(set(pruned_modules)), sorted(set(pruned_extensions))
+    return (
+        sorted(set(pruned_modules)),
+        sorted(set(pruned_submodules)),
+        sorted(set(pruned_extensions)),
+    )
 
 
 def _resolvable_modules(
@@ -1391,6 +1560,7 @@ def stage_interpreter(
 
     size_before_prune = 0
     pruned_modules: list[str] = []
+    pruned_submodules: list[str] = []
     pruned_extensions: list[str] = []
     if requirements is not None:
         # Measured here rather than on the built prefix: this is the tree as it would
@@ -1398,7 +1568,9 @@ def stage_interpreter(
         # so the difference against `size_bytes` is what tailoring itself accounts for
         # -- minus the libraries a dropped `.so` no longer pulls in, which land later.
         size_before_prune = _tree_size(dest_bin.parent, dest_lib)
-        pruned_modules, pruned_extensions = _prune_to_requirements(dest_stdlib, requirements)
+        pruned_modules, pruned_submodules, pruned_extensions = _prune_to_requirements(
+            dest_stdlib, requirements
+        )
 
     landmark = f"{STDLIB_LANDMARK}{'.pyc' if sourceless else '.py'}"
     if not (dest_stdlib / landmark).is_file():
@@ -1446,6 +1618,7 @@ def stage_interpreter(
         tailored=requirements is not None,
         disabled_libraries=sorted(requirements.disabled_libraries) if requirements else [],
         pruned_modules=pruned_modules,
+        pruned_submodules=pruned_submodules,
         pruned_extensions=pruned_extensions,
         dropped_stdlib_groups=sorted(
             requirements.dropped_stdlib_groups if requirements is not None else ()

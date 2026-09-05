@@ -581,6 +581,35 @@ def _submodules_among(target: ImportPath, names: Iterable[str]) -> Iterator[Impo
                 break
 
 
+def _import_targets(
+    importer: ImportPath,
+    is_package: bool,
+    raw_imports: Iterable[tuple[str | None, int, tuple[str, ...]]],
+) -> set[ImportPath]:
+    """
+    The modules `importer`'s import statements name, as absolute import paths.
+
+    Relative imports are resolved against `importer`, every package prefix of a dotted
+    target is added (importing `a.b.c` imports `a` and `a.b` too), and the names a
+    `from ... import` pulls out are checked for being submodules rather than
+    attributes.
+    """
+    targets: set[ImportPath] = set()
+    for imported, level, names in raw_imports:
+        resolved: ImportPath | None
+        if level:
+            resolved = _resolve_relative_import(importer, is_package, imported, level)
+        elif imported is not None and is_valid_import_path(imported):
+            resolved = assert_is_valid_import_path(imported)
+        else:
+            resolved = None
+        if resolved is None:
+            continue
+        targets.update(_expand_prefixes(resolved))
+        targets.update(_submodules_among(resolved, names))
+    return targets
+
+
 def _get_or_create_node(import_path: ImportPath, registry: dict[ImportPath, Node]) -> Node:
     node = registry.get(import_path)
     if node is None:
@@ -633,21 +662,7 @@ def _walk_module(
         # same as a module we can't resolve at all.
         return
 
-    dependencies: set[ImportPath] = set()
-    for imported, level, names in raw_imports:
-        resolved: ImportPath | None
-        if level:
-            resolved = _resolve_relative_import(node.name, is_package, imported, level)
-        elif imported is not None and is_valid_import_path(imported):
-            resolved = assert_is_valid_import_path(imported)
-        else:
-            resolved = None
-        if resolved is None:
-            continue
-        dependencies.update(_expand_prefixes(resolved))
-        dependencies.update(_submodules_among(resolved, names))
-
-    for dependency in dependencies:
+    for dependency in _import_targets(node.name, is_package, raw_imports):
         dep_node = _get_or_create_node(dependency, registry)
         node.deps.add(dep_node)
         _walk_module(dep_node, registry, visited, target, follow_optional)
@@ -704,6 +719,60 @@ def optional_modules(
         node.name for node in flatten_dependency_graph(build_dependency_graph(entrypoint, target))
     }
     return reachable - required
+
+
+def _is_under(import_path: ImportPath, package: ImportPath) -> bool:
+    """
+    Whether `import_path` is `package` itself or one of its submodules.
+    """
+    return import_path == package or import_path.startswith(f"{package}.")
+
+
+def package_closure(
+    package: ImportPath,
+    seeds: Iterable[ImportPath] = (),
+    target: TargetEnvironment = DEFAULT_TARGET,
+) -> set[ImportPath]:
+    """
+    The submodules of `package` reachable from `seeds` (and from the package's own
+    `__init__`), following **every** import statement they contain -- deferred ones
+    included.
+
+    A different traversal from `build_dependency_graph`, and deliberately so, because
+    it answers a different question. That one decides which *packages* to ship, where
+    assuming a function is never called is worth a whole tree of standard library; this
+    one decides what to keep *inside* a package already being shipped, where the same
+    assumption buys kilobytes and risks an `AttributeError` the first time someone calls
+    `email.message_from_string()` -- whose import of `email.parser` sits in a function
+    body. Platform guards are still honoured (`target`), since those cannot run either
+    way.
+
+    Bounded to `package`: the walk never leaves it, so nothing outside is parsed and
+    nothing outside comes back.
+    """
+    frontier = [path for path in (package, *seeds) if _is_under(path, package)]
+    reached: set[ImportPath] = set()
+    while frontier:
+        current = frontier.pop()
+        if current in reached:
+            continue
+        reached.add(current)
+        module = resolve_module(current)
+        source = module.parsable_source
+        if source is None:
+            continue
+        try:
+            raw_imports = list(
+                _iter_raw_imports(source.read_text(), follow_deferred=True, target=target)
+            )
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        frontier.extend(
+            dependency
+            for dependency in _import_targets(current, module.is_package, raw_imports)
+            if _is_under(dependency, package)
+        )
+    return reached
 
 
 def flatten_dependency_graph(root: Node) -> set[Node]:
