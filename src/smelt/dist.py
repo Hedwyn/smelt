@@ -94,6 +94,18 @@ from smelt.native_deps import (
     describe_command_failure,
 )
 from smelt.nuitkaify import Stdout, import_path_search_root
+from smelt.onefile import (
+    CACHE_ENV_VAR,
+    DEFAULT_ONEFILE,
+    DEFAULT_ONEFILE_COMPRESSION,
+    PYTHON_ENV_VAR,
+    OnefileArtifact,
+    OnefileCompression,
+    must_extract,
+    pack_executable,
+    pack_zip_application,
+    resolve_compression,
+)
 from smelt.own_python import (
     DEFAULT_OWN_PYTHON_TARGET,
     InterpreterRequirements,
@@ -270,6 +282,15 @@ class DistReport:
     interpreter: StagedInterpreter | None = None
     #: Distribution-root-relative path of the mode `own` launcher shim, if written.
     launcher: Path | None = None
+    #: Namespace packages shipped as a bare directory. Tracked rather than left in
+    #: `skipped` because one of them decides whether a single-file distribution can be
+    #: imported straight out of its zip (`onefile.must_extract`).
+    namespace_packages: list[ImportPath] = field(default_factory=list)
+    #: Where the single-file form will be written, known before it is packed so that
+    #: the instructions shipped *inside* it can name it.
+    onefile_path: Path | None = None
+    #: The single-file form, once packed (`smelt.onefile`).
+    onefile: OnefileArtifact | None = None
 
     @property
     def payload_root(self) -> Path:
@@ -311,6 +332,8 @@ class DistReport:
             lines.append(self.interpreter.render())
         if self.launcher is not None:
             lines.append(f"Launcher:     ./{self.launcher}")
+        if self.onefile is not None:
+            lines.append(self.onefile.render())
         for artifact in self.natives:
             lines.append(f"  [native:{artifact.origin}] {artifact.dest_rel_path}")
         for basename in sorted(self.native_deps.dependencies):
@@ -323,6 +346,7 @@ class DistReport:
             "mode": self.python,
             "interpreter": None if self.interpreter is None else self.interpreter.serialize(),
             "launcher": None if self.launcher is None else self.launcher.as_posix(),
+            "onefile": None if self.onefile is None else self.onefile.serialize(),
             # Every path below is relative to this, not to the distribution root:
             # it is the directory that goes on `sys.path`.
             "payload": PAYLOAD_DIR_NAME,
@@ -357,6 +381,7 @@ class DistReport:
             "native_dependencies_resolved": self.native_deps.resolved,
             "data_files": [str(data_file.dest_rel_path) for data_file in self.data_files],
             "metadata_files": [str(entry.dest_rel_path) for entry in self.metadata_files],
+            "namespace_packages": sorted(self.namespace_packages),
             "skipped": self.skipped,
         }
 
@@ -568,6 +593,39 @@ def resolve_drop_optional_imports(
             "module its own importer handles the absence of)."
         )
     return declared
+
+
+def resolve_onefile(
+    entrypoint_options: EntrypointOptions,
+    onefile: bool | None = None,
+) -> bool:
+    """
+    Whether to additionally pack the folder into a single file: `onefile` where the
+    caller decided (the CLI wins over the declaration), then the entrypoint's own
+    `onefile` option, then `DEFAULT_ONEFILE`.
+    """
+    if onefile is not None:
+        return onefile
+    declared = entrypoint_options.get("onefile", DEFAULT_ONEFILE)
+    if not isinstance(declared, bool):
+        raise DistError(
+            f"Invalid onefile {declared!r}, expected a boolean: false (the default, "
+            "assemble the folder only) or true (also pack it into a single file)."
+        )
+    return declared
+
+
+def resolve_onefile_compression(
+    entrypoint_options: EntrypointOptions,
+    onefile_compression: str | None = None,
+) -> OnefileCompression:
+    """
+    How the single file's payload is compressed (see `onefile.OnefileCompression`),
+    resolved the same way as every other option here.
+    """
+    return resolve_compression(
+        onefile_compression or entrypoint_options.get("onefile-compression", None)
+    )
 
 
 def assert_no_version_skew(tag: PycTargetTag, interpreter_version: tuple[int, int]) -> None:
@@ -1175,6 +1233,39 @@ def _optional_imports_note(report: DistReport) -> str:
     )
 
 
+def _onefile_note(report: DistReport) -> str:
+    """
+    The paragraph naming the single file this folder is also packed into, where one
+    was asked for.
+
+    Written before the packing happens -- the manifest inside the archive cannot
+    describe the archive -- so it names the file and how it behaves, not its digest.
+    """
+    if report.onefile_path is None:
+        return ""
+    if report.interpreter is not None:
+        shape = f"""a compiled launcher carrying this whole folder, interpreter
+  included, as a compressed payload. It unpacks itself into a cache directory the
+  first time it runs, then starts the bundled interpreter out of it; later runs only
+  check that the directory is already there. `{CACHE_ENV_VAR}` moves that cache,
+  which is the answer to a read-only home directory."""
+    else:
+        version = report.tag.version_string
+        shape = f"""an executable zip application: a `/bin/sh` preamble locating a
+  CPython {version} (`{PYTHON_ENV_VAR}` first, then `python{version}`, then `python3`),
+  followed by a zip that interpreter knows how to run. `python
+  {report.onefile_path.name}` works on it just as well as `./{report.onefile_path.name}`."""
+    return f"""
+Also packed into one file
+-------------------------
+
+* `{report.onefile_path}` is {shape}
+* The folder and the single file hold the same distribution -- packing is a step over
+  a finished folder, not a second way of assembling one. Whatever is true of this
+  folder is true of it.
+"""
+
+
 def _interpreter_contents_note(interpreter: StagedInterpreter) -> str:
     """
     The paragraph saying whether the shipped interpreter is the whole standard library
@@ -1292,7 +1383,7 @@ Current limitations
 * Package data files are only collected when asked for, through
   `include-package-data` -- a package folder can hold anything at all, so nothing is
   guessed. {len(report.data_files)} file(s) were collected here.
-{_discovery_note(report)}{_optional_imports_note(report)}"""
+{_discovery_note(report)}{_optional_imports_note(report)}{_onefile_note(report)}"""
 
 
 def _byo_run_instructions(report: DistReport) -> str:
@@ -1306,6 +1397,7 @@ def _byo_run_instructions(report: DistReport) -> str:
     data_files = len(report.data_files)
     discovery_note = _discovery_note(report)
     optional_note = _optional_imports_note(report)
+    onefile_note = _onefile_note(report)
     native_deps_note = (
         ""
         if report.native_deps.resolved
@@ -1386,7 +1478,7 @@ Current limitations
 * Package data files are only collected when asked for, through
   `include-package-data` -- a package folder can hold anything at all, so nothing is
   guessed. {data_files} file(s) were collected here.
-{discovery_note}{optional_note}{native_deps_note}"""
+{discovery_note}{optional_note}{native_deps_note}{onefile_note}"""
 
 
 def build_dist(
@@ -1411,6 +1503,9 @@ def build_dist(
     include_distribution_metadata: Iterable[str] = (),
     exclude_modules: Iterable[str] = (),
     drop_optional_imports: bool | None = None,
+    onefile: bool | None = None,
+    onefile_only: bool = False,
+    onefile_compression: str | None = None,
 ) -> DistReport:
     """
     Assembles the distribution folder for one of `config`'s entrypoints under
@@ -1450,6 +1545,12 @@ def build_dist(
     their own importer handles the failure of (`collect_optional_modules` and
     `DEFAULT_DROP_OPTIONAL_IMPORTS`). They are listed in the report either way.
 
+    `onefile` additionally packs the finished folder into a single file (see
+    `smelt.onefile`): an executable zip application in mode `byo`, a compiled launcher
+    carrying the compressed folder in mode `own`. `onefile_compression` chooses how
+    that payload is compressed, and `onefile_only` deletes the folder afterwards --
+    for a build whose output is published rather than inspected.
+
     `include_modules`, `include_packages`, `include_package_data`,
     `include_distribution_metadata` and `exclude_modules` are each additive over what
     the entrypoint declares under the same name in its own options.
@@ -1477,6 +1578,13 @@ def build_dist(
     resolved_discovery: DiscoveryMode = declared_discovery
     resolved_python = resolve_dist_python(entrypoint_options, python)
     drop_optional = resolve_drop_optional_imports(entrypoint_options, drop_optional_imports)
+    pack_onefile = resolve_onefile(entrypoint_options, onefile)
+    compression = resolve_onefile_compression(entrypoint_options, onefile_compression)
+    if onefile_only and not pack_onefile:
+        raise DistError(
+            "--onefile-only asks for the distribution folder to be deleted once it is "
+            "packed, but packing was not requested. Add --onefile."
+        )
     tag = PycTargetTag.current(optimize)
 
     search_paths = project_search_paths(path_solver)
@@ -1564,6 +1672,9 @@ def build_dist(
 
     report = DistReport(
         dist_root=dist_root,
+        onefile_path=(
+            output_dir / launcher_name(config, entrypoint_spec) if pack_onefile else None
+        ),
         entrypoint=entrypoint_spec,
         entrypoint_module=entrypoint_module,
         tag=tag,
@@ -1628,6 +1739,7 @@ def build_dist(
                 # explicitly no `__init__` -- adding one would turn it into a regular
                 # package and cut off any other portion of the same namespace.
                 (payload_root / Path(*import_path.split("."))).mkdir(parents=True, exist_ok=True)
+                report.namespace_packages.append(import_path)
                 report.skipped[import_path] = "namespace package (directory only)"
             case ModuleKind.BUILTIN:
                 report.skipped[import_path] = "builtin (compiled into the interpreter)"
@@ -1698,6 +1810,60 @@ def build_dist(
 
     (dist_root / MANIFEST_NAME).write_text(json.dumps(report.serialize(), indent=2))
     (dist_root / INSTRUCTIONS_NAME).write_text(run_instructions(report))
-
     _logger.info("Assembled distribution at %s", dist_root)
+
+    if report.onefile_path is not None:
+        report.onefile = pack_dist(report, zig_target=own_python_target, compression=compression)
+        # Rewritten now that there is something more to say. The copy *inside* the
+        # single file is the one written above and does not describe the packing --
+        # a manifest cannot record the digest of an archive it is itself part of.
+        (dist_root / MANIFEST_NAME).write_text(json.dumps(report.serialize(), indent=2))
+        if onefile_only:
+            shutil.rmtree(dist_root)
+            _logger.info("Removed %s, only %s was asked for", dist_root, report.onefile.path)
+
     return report
+
+
+def pack_dist(
+    report: DistReport,
+    *,
+    compression: OnefileCompression = DEFAULT_ONEFILE_COMPRESSION,
+    zig_target: str | None = None,
+) -> OnefileArtifact:
+    """
+    Packs the folder `report` describes into the single file it planned
+    (`DistReport.onefile_path`), choosing the shape from the distribution itself: a
+    compiled launcher where an interpreter ships inside the folder, an executable zip
+    application otherwise (see `smelt.onefile`).
+    """
+    if report.onefile_path is None:
+        raise DistError("This distribution was not assembled with a single file planned.")
+    dist_root = assert_path_exists(report.dist_root)
+    report.onefile_path.parent.mkdir(parents=True, exist_ok=True)
+    name = report.onefile_path.name
+    if report.interpreter is not None:
+        return pack_executable(
+            dist_root,
+            report.onefile_path,
+            name=name,
+            payload_dir=PAYLOAD_DIR_NAME,
+            exec_rel_path=report.interpreter.executable_rel_path,
+            compression=compression,
+            zig_target=zig_target,
+        )
+    return pack_zip_application(
+        dist_root,
+        report.onefile_path,
+        name=name,
+        payload_dir=PAYLOAD_DIR_NAME,
+        python_version=report.tag.python_version,
+        magic_number=report.tag.magic_number,
+        extract=must_extract(
+            has_natives=bool(report.natives) or bool(report.native_deps.dependencies),
+            has_data_files=bool(report.data_files),
+            has_namespace_packages=bool(report.namespace_packages),
+        ),
+        compression=compression,
+        extra_root_files=[dist_root / MANIFEST_NAME],
+    )

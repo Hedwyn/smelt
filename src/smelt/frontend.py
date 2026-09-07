@@ -399,6 +399,36 @@ def build_standalone_binary(
     "run without.",
 )
 @click.option(
+    "--onefile/--no-onefile",
+    "onefile",
+    default=None,
+    help="Additionally pack the finished folder into a single file. With --python byo "
+    "that is an executable zip application: a /bin/sh preamble locating a CPython, "
+    "followed by a zip it can run directly -- no compiler involved. With --python own "
+    "it is a compiled launcher (Zig) carrying the whole folder, interpreter included, "
+    "as an appended compressed payload, which it unpacks into a cache directory the "
+    "first time it runs. Defaults to the entrypoint's own declaration, then to off: "
+    "the folder is the shape that can be inspected.",
+)
+@click.option(
+    "--onefile-only",
+    is_flag=True,
+    default=False,
+    help="Delete the distribution folder once it has been packed, leaving only the "
+    "single file. Requires --onefile. For a job that publishes one artifact; without "
+    "it both are kept, and the folder is what stays debuggable.",
+)
+@click.option(
+    "--onefile-compression",
+    type=click.Choice(["xz", "gzip", "none"]),
+    default=None,
+    help="How the single file's payload is compressed. 'xz' (the default) is the "
+    "smallest and the slowest to inflate on the target's first run, 'gzip' trades size "
+    "for that, 'none' stores it as-is. Note a payload imported straight out of its zip "
+    "-- a pure-Python --python byo distribution -- is deflated either way, since that "
+    "is what zipimport reads.",
+)
+@click.option(
     "--no-version-guard",
     is_flag=True,
     default=False,
@@ -479,6 +509,9 @@ def build_dist_folder(
     own_python_target: str | None,
     tailor_interpreter: bool | None,
     drop_stdlib_groups: tuple[str, ...],
+    onefile: bool | None,
+    onefile_only: bool,
+    onefile_compression: Literal["xz", "gzip", "none"] | None,
     no_version_guard: bool,
     no_isolate: bool,
     exclude_modules: tuple[str, ...],
@@ -530,6 +563,9 @@ def build_dist_folder(
         include_modules=include_modules,
         include_packages=include_packages,
         include_package_data=include_package_data,
+        onefile=onefile,
+        onefile_only=onefile_only,
+        onefile_compression=onefile_compression,
     )
     click.echo(dist_report.render())
     click.echo("")

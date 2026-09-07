@@ -422,10 +422,23 @@ def collect_built_artifacts(
     build produced rather than what it was asked to produce -- `auto_mode` in
     particular is allowed to give up on individual modules.
 
-    Both shared runtimes are included, and both must keep the package-relative
-    position they have here: mypyc's is imported under the module's own package
-    (`pkg.mod__mypyc`), and smelt's shared Nuitka runtime is resolved through an
-    `$ORIGIN` rpath, i.e. from the directory of the `.so` that needs it.
+    **A module counts as built only when its own dynlib is there.** The two shared
+    runtimes are collected *alongside* it and are never evidence for it, which is a
+    distinction with teeth: `mod<EXT_SUFFIX>` and `mod__mypyc<EXT_SUFFIX>` carry the
+    interpreter's ABI tag, while smelt's shared Nuitka runtime (`lib<name>.so`) carries
+    no version at all. Counting the runtime as evidence let a *stale* one -- left next
+    to the source by a build under another interpreter -- claim the module was built:
+    the bundler then skipped emitting a `.pyc` for it ("native (built by smelt)"),
+    its own "nothing was shipped for the entrypoint module" guard saw the import path
+    attached to that runtime and passed, and the distribution shipped without the
+    module, failing on the target at first import. Every backend produces the module's
+    own dynlib (mypyc, cython, Nuitka module mode, handwritten C, Zig), so requiring it
+    costs nothing.
+
+    Both shared runtimes must keep the package-relative position they have here:
+    mypyc's is imported under the module's own package (`pkg.mod__mypyc`), and smelt's
+    shared Nuitka runtime is resolved through an `$ORIGIN` rpath, i.e. from the
+    directory of the `.so` that needs it.
     """
     suffix = sysconfig.get_config_var("EXT_SUFFIX")
     nuitka_runtime_name = f"lib{RUNTIME_LIB_NAME}.so"
@@ -435,14 +448,17 @@ def collect_built_artifacts(
     for import_path in sorted(targets):
         dest_folder = targets[import_path]
         module_name = get_module_name(import_path)
-        candidates = (
-            dest_folder / f"{module_name}{suffix}",
+        module_artifact = dest_folder / f"{module_name}{suffix}"
+        if not path_exists(module_artifact):
+            continue
+        runtimes = (
             dest_folder / f"{module_name}__mypyc{suffix}",
             dest_folder / nuitka_runtime_name,
         )
-        found = [artifact for artifact in candidates if path_exists(artifact)]
-        if found:
-            built[import_path] = found
+        built[import_path] = [
+            module_artifact,
+            *(runtime for runtime in runtimes if path_exists(runtime)),
+        ]
     return built
 
 

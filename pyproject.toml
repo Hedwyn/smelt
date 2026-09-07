@@ -35,11 +35,16 @@ cython = ["Cython"]
 # see smelt.own_python). Pinned to a commit rather than a version, like the pins above,
 # because it is not on PyPI and its build.zig options are what smelt codes against:
 # 5ebc889 was the first commit carrying the `pyconfig-header` and `strip` options
-# own_python.py passes, and b3fa35c is the first that installs a `_sysconfigdata_*`
-# module -- without it `sysconfig.get_paths()`, `pydoc`, `help()` and
-# `site.getsitepackages()` fail in every interpreter smelt builds, tailored or not.
+# own_python.py passes, b3fa35c the first that installs a `_sysconfigdata_*` module --
+# without it `sysconfig.get_paths()`, `pydoc`, `help()` and `site.getsitepackages()`
+# fail in every interpreter smelt builds, tailored or not -- and e78aeca is the first
+# that can actually be built: b3fa35c's `build.zig` imports a `build/sysconfigdata.zig`
+# that had not been committed, so every cold-cache interpreter build from it died on
+# `error: adding build_root build/sysconfigdata.zig to cache failed: FileNotFound`.
+# Nothing noticed for three days because a build that hits smelt's own prefix cache
+# never evaluates `build.zig` at all.
 metapython = [
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@b3fa35c",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@e78aeca",
 ]
 build = [
   "Cython",
@@ -48,7 +53,7 @@ build = [
   "mypy[mypyc]",
   "hatchling",
   "editables",
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@b3fa35c",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@e78aeca",
 ]
 
 [tool.setuptools]
@@ -60,6 +65,10 @@ package-dir = { "" = "src" }
 # There's on pyconfig.h per platform + python combination
 # Path is pyconfig/platform/python/pyconfig.h
 "smelt.pyconfig" = ["*/*/pyconfig.h"]
+# The onefile launcher is Zig source compiled at packing time (smelt.onefile), not at
+# install time -- it has to ship with the package or `--onefile --python own` has
+# nothing to build.
+"smelt" = ["launcher/*.zig"]
 
 [project.entry-points.hatch]
 smelt = "smelt.build_backends.hatch"

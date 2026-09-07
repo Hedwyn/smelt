@@ -86,11 +86,33 @@ def _format_context(context: ConfigContext) -> str:
 
 def build_datacls_from_toml[T: DataclassInstance](
     datacls: type[T],
-    toml_data: TomlData,
+    toml_data: _TomlData,
     context: ConfigContext | None = None,
     project_root: Path | None = None,
 ) -> T:
+    """
+    Builds one `datacls` out of the TOML table `toml_data`, resolving its path fields
+    against `project_root` (see `convert_path`).
+
+    `toml_data` is typed as any TOML value rather than as a table, because it *is* any
+    TOML value: it comes from a file the user wrote. A declaration in some other shape
+    has to be reported as a configuration error, which is what the first check does --
+    the alternative is an `AttributeError` from deep inside this function, naming
+    nothing the reader can act on. The shape that actually reaches it is the
+    `module = "source"` mapping module declarations used before they became arrays of
+    tables: iterating a table yields its keys, so each "declaration" arrives here as a
+    bare string.
+    """
     context = context if context is not None else []
+    if not isinstance(toml_data, dict):
+        field_names = ", ".join(f.name for f in fields(datacls))
+        raise SmeltConfigError(
+            f"{_format_context(context)}Expected a table declaring {field_names}, "
+            f"found {toml_data!r}. Modules are declared one array-of-tables entry "
+            "each, e.g. `[[tool.smelt.c_extensions]]` followed by `import_path = "
+            '"pkg.mod"` and `sources = ["src/pkg/mod.c"]`, and not as a '
+            "`module = \"source\"` mapping."
+        )
     sentinel = object()
     kwargs: dict[str, object] = {}
     for f in fields(datacls):
@@ -243,6 +265,13 @@ EntrypointOptions = TypedDict(
         # droppable without an `ImportError`, but what the fallback costs is not
         # knowable from here. See `smelt.dist.DEFAULT_DROP_OPTIONAL_IMPORTS`.
         "drop-optional-imports": bool,
+        # Whether the finished folder is additionally packed into a single file (see
+        # `smelt.onefile`). The shape follows `python`: an executable zip application
+        # for "byo", a compiled launcher carrying the compressed folder for "own".
+        "onefile": bool,
+        # How that single file's payload is compressed: "xz" (the default, smallest),
+        # "gzip" (faster to inflate on the target's first run) or "none".
+        "onefile-compression": str,
     },
     total=False,
 )
@@ -324,32 +353,42 @@ class SmeltConfig:
         # native code
         native_extensions_decl = toml_data.pop("c_extensions", [])
         native_extensions = [
-            build_datacls_from_toml(NativeExtension, decl, project_root=project_root)
+            build_datacls_from_toml(
+                NativeExtension, decl, context=["c_extensions"], project_root=project_root
+            )
             for decl in native_extensions_decl
         ]
         # zig modules
         zig_modules_decl = toml_data.pop("zig_modules", [])
         zig_modules = [
-            build_datacls_from_toml(ZigModule, decl, project_root=project_root)
+            build_datacls_from_toml(
+                ZigModule, decl, context=["zig_modules"], project_root=project_root
+            )
             for decl in zig_modules_decl
         ]
         # mypyc modules
         mypyc_modules_decl = toml_data.pop("mypyc_modules", [])
         mypyc_modules = [
-            build_datacls_from_toml(MypycModule, decl, project_root=project_root)
+            build_datacls_from_toml(
+                MypycModule, decl, context=["mypyc_modules"], project_root=project_root
+            )
             for decl in mypyc_modules_decl
         ]
 
         # cython
         cython_modules_decl = toml_data.pop("cython_modules", [])
         cython_modules = [
-            build_datacls_from_toml(CythonExtension, decl, project_root=project_root)
+            build_datacls_from_toml(
+                CythonExtension, decl, context=["cython_modules"], project_root=project_root
+            )
             for decl in cython_modules_decl
         ]
         # nuitka
         nuitka_modules_decl = toml_data.pop("nuitka_modules", [])
         nuitka_modules = [
-            build_datacls_from_toml(NuitkaModule, decl, project_root=project_root)
+            build_datacls_from_toml(
+                NuitkaModule, decl, context=["nuitka_modules"], project_root=project_root
+            )
             for decl in nuitka_modules_decl
         ]
 
@@ -367,6 +406,23 @@ class SmeltConfig:
             backend_priority_order = [Backend(name) for name in backend_priority_order_decl]
         except ValueError as exc:
             raise SmeltConfigError(f"Invalid backend in backend_priority_order: {exc}") from exc
+
+        # Whatever is left is passed through as a plain option below, so an option that
+        # is not one reaches `cls(**toml_data)` and comes back out as
+        # `TypeError: SmeltConfig.__init__() got an unexpected keyword argument`. That
+        # names the internals rather than the file the reader has to edit, and the
+        # option most likely to land here is the singular `entrypoint` that
+        # `[project.scripts]`/`[tool.smelt.entrypoints]` replaced.
+        unknown = sorted(set(toml_data) - {f.name for f in fields(cls)})
+        if unknown:
+            raise SmeltConfigError(
+                f"Unknown option(s) in [tool.smelt]: {unknown}. Modules are declared "
+                "in their own sections ([[tool.smelt.mypyc_modules]], "
+                "[[tool.smelt.c_extensions]], [[tool.smelt.cython_modules]], "
+                "[[tool.smelt.nuitka_modules]], [[tool.smelt.zig_modules]]), and "
+                "entrypoints in [project.scripts] or [tool.smelt.entrypoints] -- which "
+                "is what the singular `entrypoint` option was replaced by."
+            )
 
         return cls(
             mypyc_modules=mypyc_modules,
