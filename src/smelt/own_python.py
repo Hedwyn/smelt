@@ -63,6 +63,7 @@ from smelt.hooks import hidden_imports
 from smelt.native_deps import (
     ALWAYS_HOST_DLL_PREFIXES,
     LINUX_BASE_LIBC_DLL_PREFIXES,
+    WINDOWS_SYSTEM_DLL_IGNORE_PREFIXES,
     BundledNatives,
     collect_native_dependencies,
     is_supported_platform,
@@ -105,10 +106,91 @@ DEFAULT_OWN_PYTHON_TARGET: Final[str | None] = None
 #: The interpreter executable inside a built (or staged) prefix, prefix-relative.
 INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python")
 
+#: The Windows counterpart of `INTERPRETER_REL_PATH`. meta-python's `buildWindows`
+#: installs the executable and the DLL implementing the interpreter side by side under
+#: `bin/` -- Windows' DLL search order covers a binary's own directory, which is the
+#: Windows equivalent of the POSIX side's `$ORIGIN`-relative RPATH, so no rewriting is
+#: needed, just the right placement (see `_bundle_windows_interpreter_dependencies`).
+WINDOWS_INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python.exe")
+
+#: The standard library tree meta-python's `buildWindows` installs: flat and
+#: capitalized, unlike POSIX's nested `lib/pythonX.Y`. There is also no `lib-dynload`
+#: counterpart yet -- the Windows build does not produce extension modules at all yet
+#: (see `stage_interpreter`), only the frozen/builtin core.
+WINDOWS_STDLIB_REL_PATH: Final[Path] = Path("Lib")
+
+#: Written next to a Windows-target build's `bin/` once, at build time, recording the
+#: CPython version it was built from (see `_cpython_source_version`). The version of a
+#: cross-compiled `python.exe` cannot be probed the way `interpreter_version` probes
+#: every other target -- that `.exe` cannot run on the (typically Linux) host that
+#: cross-compiled it -- so it has to be recorded once, at the one point something *can*
+#: read it, rather than asked for again later.
+WINDOWS_VERSION_MARKER_NAME: Final[str] = "_smelt_cpython_version.txt"
+
 #: The stdlib module whose presence CPython's prefix detection uses to recognise a
 #: standard library directory. Sourceless is fine, absent is not -- see this module's
 #: docstring.
 STDLIB_LANDMARK: Final[str] = "os"
+
+
+def is_windows_zig_target(zig_target: str | None) -> bool:
+    """
+    Whether a `-target` string passed to `zig build`/`zig build-exe` names a Windows
+    target.
+
+    Every Windows zig target triple spells its OS component `windows` verbatim
+    (`x86_64-windows-gnu`, `aarch64-windows-gnu`, ...), so a substring check is exact
+    rather than a heuristic. `smelt.onefile` imports this rather than keeping its own
+    copy.
+    """
+    return zig_target is not None and "windows" in zig_target
+
+
+def _validate_windows_zig_target(zig_target: str) -> None:
+    """
+    Rejects a Windows target that is not mingw (`-gnu`) ABI.
+
+    meta-python's Windows build only ever works through mingw: CPython's own Windows
+    build assumes MSVC's linker/CRT specifics, which Zig cannot bring along as a
+    standalone toolchain the way it does `clang`+`lld` for every other target -- so
+    meta-python builds against mingw-w64 instead (see meta-python's `build.zig`,
+    `buildWindows`). A bare `x86_64-windows` target defaults to the MSVC ABI in Zig and
+    fails outright; only the explicit `-gnu` suffix is meta-python's supported shape.
+    """
+    if not is_windows_zig_target(zig_target) or zig_target.endswith("-gnu"):
+        return
+    base = zig_target.removesuffix("-msvc")
+    raise OwnPythonError(
+        f"Unsupported Windows target {zig_target!r}: meta-python only builds Windows "
+        "through the mingw (gnu) ABI -- it cannot bring along a standalone MSVC "
+        f"toolchain the way it does for every other target. Use {base}-gnu instead."
+    )
+
+
+_PATCHLEVEL_VERSION_RE: Final = re.compile(
+    r"^#define\s+PY_(MAJOR|MINOR)_VERSION\s+(\d+)", re.MULTILINE
+)
+
+
+def _cpython_source_version(cpython_dir: Path) -> tuple[int, int]:
+    """
+    The `(major, minor)` CPython version `cpython_dir` is pinned to, read directly from
+    `Include/patchlevel.h` rather than asked of a built interpreter.
+
+    The one case that needs this: a cross-compiled Windows `python.exe` cannot run on
+    the (typically Linux) host that built it, so `interpreter_version` cannot probe it
+    the way it does every other target. `PY_MAJOR_VERSION`/`PY_MINOR_VERSION` are what
+    CPython's own build derives its version from in the first place, so reading them
+    directly is not a weaker answer, only one that needs nothing to run.
+    """
+    patchlevel = cpython_dir / "Include" / "patchlevel.h"
+    if not patchlevel.is_file():
+        raise OwnPythonError(f"Cannot read the CPython version: {patchlevel} is missing.")
+    found = dict(_PATCHLEVEL_VERSION_RE.findall(patchlevel.read_text()))
+    if "MAJOR" not in found or "MINOR" not in found:
+        raise OwnPythonError(f"Cannot find PY_MAJOR_VERSION/PY_MINOR_VERSION in {patchlevel}.")
+    return int(found["MAJOR"]), int(found["MINOR"])
+
 
 #: Stdlib directory entries pruned from a staged interpreter by default.
 #:
@@ -727,6 +809,8 @@ def build_own_python(
       glibc-linked, so it will not load under a musl interpreter.
     """
     _ensure_metapython_installed()
+    if target is not None:
+        _validate_windows_zig_target(target)
     disabled = set(disabled_libraries)
     unknown = disabled - set(LIBRARY_MODULES)
     if unknown:
@@ -739,7 +823,9 @@ def build_own_python(
         if dest_dir is not None
         else own_python_cache_dir(target, debug=debug, disabled_libraries=disabled)
     )
-    bin_path = dest / INTERPRETER_REL_PATH
+    bin_path = dest / (
+        WINDOWS_INTERPRETER_REL_PATH if is_windows_zig_target(target) else INTERPRETER_REL_PATH
+    )
     if not no_cache and bin_path.exists():
         _logger.info("Reusing the interpreter already built at %s", dest)
         return assert_path_exists(dest)
@@ -857,7 +943,34 @@ def _build_interpreter(
         raise OwnPythonError(
             f"The interpreter build for target {target or 'native'} produced no {bin_path}."
         )
+    if is_windows_zig_target(target):
+        # Recorded now because this is the one point something *can* read it: the
+        # `.exe` this build just produced cannot run on the (typically Linux) host
+        # that cross-compiled it, so `interpreter_version` cannot probe it later the
+        # way it does every other target (see `WINDOWS_VERSION_MARKER_NAME`).
+        major, minor = _cpython_source_version(cpython_dir)
+        (dest / WINDOWS_VERSION_MARKER_NAME).write_text(f"{major}.{minor}\n")
     return assert_path_exists(dest)
+
+
+def _windows_interpreter_version(prefix: Path) -> tuple[int, int]:
+    """
+    Reads back the version `_build_interpreter` recorded for a Windows-target build
+    (see `WINDOWS_VERSION_MARKER_NAME`), since the `.exe` itself cannot be probed.
+    """
+    marker = prefix / WINDOWS_VERSION_MARKER_NAME
+    if not marker.is_file():
+        raise OwnPythonError(
+            f"No {WINDOWS_VERSION_MARKER_NAME} next to the Windows interpreter at "
+            f"{prefix / WINDOWS_INTERPRETER_REL_PATH}: its version cannot be probed "
+            "the way a POSIX interpreter's is (the .exe cannot run on this host), and "
+            "nothing recorded it at build time either."
+        )
+    text = marker.read_text().strip()
+    major_str, _, minor_str = text.partition(".")
+    if not major_str.isdigit() or not minor_str.isdigit():
+        raise OwnPythonError(f"Unreadable version marker at {marker}: {text!r}")
+    return int(major_str), int(minor_str)
 
 
 def interpreter_version(prefix: PathExists) -> tuple[int, int]:
@@ -869,7 +982,13 @@ def interpreter_version(prefix: PathExists) -> tuple[int, int]:
     Load-bearing rather than cosmetic: it is what the version-skew guard in
     `smelt.dist` compares against the interpreter that compiled the distribution's
     bytecode, and getting that comparison wrong ships a folder that cannot run.
+
+    A Windows-target prefix is detected by the presence of `bin/python.exe` (a POSIX
+    build never produces that name) and takes a different path entirely -- see
+    `_windows_interpreter_version`.
     """
+    if path_exists(Path(prefix) / WINDOWS_INTERPRETER_REL_PATH):
+        return _windows_interpreter_version(Path(prefix))
     executable = prefix / INTERPRETER_REL_PATH
     if not path_exists(executable):
         raise OwnPythonError(f"No interpreter at {executable}.")
@@ -1238,6 +1357,12 @@ class StagedInterpreter:
 
     prefix_rel_path: Path
     version: tuple[int, int]
+    #: The interpreter executable, prefix-relative -- `INTERPRETER_REL_PATH` on POSIX,
+    #: `WINDOWS_INTERPRETER_REL_PATH` for a Windows-staged interpreter. A field rather
+    #: than the bare constant `executable_rel_path` used to return unconditionally,
+    #: since the two targets install under different names (`bin/python` vs.
+    #: `bin/python.exe`).
+    interpreter_rel_path: Path = INTERPRETER_REL_PATH
     pruned: list[str] = field(default_factory=list)
     sourceless: bool = True
     size_bytes: int = 0
@@ -1275,7 +1400,7 @@ class StagedInterpreter:
 
     @property
     def executable_rel_path(self) -> Path:
-        return self.prefix_rel_path / INTERPRETER_REL_PATH
+        return self.prefix_rel_path / self.interpreter_rel_path
 
     def render(self) -> str:
         lines = [
@@ -1655,6 +1780,104 @@ def _bundle_interpreter_dependencies(prefix: Path) -> BundledNatives:
     return BundledNatives(dependencies=dependencies, rewritten=rewritten)
 
 
+def _windows_interpreter_files(prefix: Path) -> list[Path]:
+    """
+    Every file `_bundle_windows_interpreter_dependencies` walks for a Windows-staged
+    interpreter, prefix-relative: `python.exe` and the DLL implementing it. There is no
+    Windows equivalent of `lib-dynload` yet -- meta-python's Windows build does not
+    produce extension modules (see `stage_interpreter`).
+    """
+    found: list[Path] = []
+    for pattern in (WINDOWS_INTERPRETER_REL_PATH.as_posix(), "bin/python*.dll"):
+        for entry in sorted(prefix.glob(pattern)):
+            if entry.is_file():
+                found.append(entry.relative_to(prefix))
+    return found
+
+
+def _bundle_windows_interpreter_dependencies(prefix: Path) -> BundledNatives:
+    """
+    Copies whatever DLLs `bin/python.exe`/its own DLL need, next to them.
+
+    `binary_format="pe"` is forced explicitly rather than left to infer from the
+    running host: meta-python's Windows build is routinely cross-compiled from a
+    Linux host, and `native_deps`'s PE walk is a static parse that works regardless
+    (see `native_deps.BinaryFormat`). Unlike the ELF path there is no RPATH to
+    rewrite -- Windows already searches a binary's own directory first, so placing a
+    copy there is the whole job.
+    """
+    files = _windows_interpreter_files(prefix)
+    if not files:
+        return BundledNatives()
+    bin_dir = prefix / "bin"
+    dependencies = {
+        basename: assert_path_exists(resolved)
+        for basename, resolved in collect_native_dependencies(
+            [prefix / rel_path for rel_path in files],
+            WINDOWS_SYSTEM_DLL_IGNORE_PREFIXES,
+            binary_format="pe",
+        ).items()
+    }
+    for basename, resolved in dependencies.items():
+        shutil.copy2(resolved, bin_dir / basename)
+    return BundledNatives(dependencies=dependencies)
+
+
+def _stage_windows_interpreter(built_prefix: Path, dist_root: Path) -> StagedInterpreter:
+    """
+    The Windows counterpart of the bulk of `stage_interpreter`.
+
+    No tailoring, ever: `resolve_requirements` needs `bootstrap_modules`, which probes
+    the built interpreter by running it, and a cross-compiled `python.exe` cannot run
+    on the (typically Linux) host that built it. `smelt.dist` is what keeps `tailor`
+    forced off for a Windows target in the first place (see
+    `is_windows_zig_target`); this function does not re-check it, only reflects it in
+    `StagedInterpreter.tailored`.
+
+    Also no `prune`/sourceless-compile pass over the stdlib (see this function's
+    caller): the Windows `Lib/` tree is shipped exactly as meta-python installed it,
+    since neither of those has been exercised against its flat, non-`lib/pythonX.Y`
+    shape yet.
+    """
+    built_executable = built_prefix / WINDOWS_INTERPRETER_REL_PATH
+    if not built_executable.is_file():
+        raise OwnPythonError(f"No interpreter at {built_executable}.")
+    built_stdlib = built_prefix / WINDOWS_STDLIB_REL_PATH
+    if not built_stdlib.is_dir():
+        raise OwnPythonError(f"No {WINDOWS_STDLIB_REL_PATH} standard library under {built_prefix}.")
+    version = interpreter_version(assert_path_exists(built_prefix))
+
+    dest_bin = dist_root / "bin"
+    dest_bin.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(built_executable, dest_bin / built_executable.name)
+    for dll in sorted(built_prefix.glob("bin/python*.dll")):
+        shutil.copy2(dll, dest_bin / dll.name)
+
+    dest_stdlib = dist_root / WINDOWS_STDLIB_REL_PATH
+    shutil.copytree(built_stdlib, dest_stdlib, symlinks=True, dirs_exist_ok=True)
+
+    landmark = f"{STDLIB_LANDMARK}.py"
+    if not (dest_stdlib / landmark).is_file():
+        raise OwnPythonError(
+            f"{dest_stdlib.relative_to(dist_root)}/{landmark} is missing from the "
+            "staged interpreter. It is the landmark CPython's prefix detection looks "
+            f"for, so without it the interpreter fails to find its own standard library."
+        )
+
+    native_deps = _bundle_windows_interpreter_dependencies(dist_root)
+    staged = StagedInterpreter(
+        prefix_rel_path=Path("."),
+        version=version,
+        interpreter_rel_path=WINDOWS_INTERPRETER_REL_PATH,
+        sourceless=False,
+        size_bytes=_tree_size(dest_bin, dest_stdlib),
+        native_deps=native_deps,
+        tailored=False,
+    )
+    _logger.info("Staged Windows interpreter into %s: %s", dist_root, staged.render())
+    return staged
+
+
 def stage_interpreter(
     built_prefix: PathExists,
     dist_root: Path,
@@ -1702,7 +1925,21 @@ def stage_interpreter(
       excluded and stay host-supplied (see `INTERPRETER_HOST_DLL_PREFIXES`). It runs
       *after* pruning on purpose: an extension module that is gone does not get its
       libraries copied in behind it, which is where most of tailoring's win is.
+
+    A Windows-built prefix (`bin/python.exe` present) is staged by
+    `_stage_windows_interpreter` instead: no `prune`/`sourceless`/`requirements` pass
+    over the stdlib yet, and no tailoring -- see that function's docstring for why.
     """
+    if (Path(built_prefix) / WINDOWS_INTERPRETER_REL_PATH).is_file():
+        if requirements is not None:
+            raise OwnPythonError(
+                "Cannot tailor a Windows-target interpreter: resolving requirements "
+                "needs to probe the built interpreter by running it, and a "
+                "cross-compiled python.exe cannot run on the host that built it. "
+                "Build without --tailor-interpreter for this target."
+            )
+        return _stage_windows_interpreter(Path(built_prefix), dist_root)
+
     built_stdlib = _stdlib_dir(built_prefix)
     built_executable = built_prefix / INTERPRETER_REL_PATH
     if not built_executable.is_file():

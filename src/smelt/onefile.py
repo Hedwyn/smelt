@@ -54,6 +54,7 @@ from typing import Final, Iterable, Literal
 
 from smelt.backend import python_version_guard
 from smelt.native_deps import describe_command_failure
+from smelt.own_python import is_windows_zig_target
 from smelt.process import call_command
 from smelt.utils import PathExists, SmeltError, assert_path_exists
 
@@ -223,8 +224,7 @@ def resolve_compression(declared: str | None) -> OnefileCompression:
         if declared == compression:
             return compression
     raise OnefileError(
-        f"Invalid onefile compression {declared!r}, expected one of "
-        f"{list(ONEFILE_COMPRESSIONS)}."
+        f"Invalid onefile compression {declared!r}, expected one of {list(ONEFILE_COMPRESSIONS)}."
     )
 
 
@@ -602,9 +602,7 @@ def extracting_main(
     )
 
 
-def must_extract(
-    *, has_natives: bool, has_data_files: bool, has_namespace_packages: bool
-) -> bool:
+def must_extract(*, has_natives: bool, has_data_files: bool, has_namespace_packages: bool) -> bool:
     """
     Whether a mode `byo` single file has to unpack itself before it can run, rather
     than being imported straight out of its own zip.
@@ -773,7 +771,13 @@ def pack_executable(
     `exec_rel_path` is the bundled interpreter's path *within* the folder
     (`bin/python`); the launcher joins it onto the extracted directory, so the
     interpreter it starts is the shipped one and never the target's.
+
+    `dest` gains a `.exe` suffix when `zig_target` names a Windows target and does not
+    already carry one: Windows resolves what is executable by extension, unlike POSIX's
+    permission bit, so the artifact needs the right name to be runnable at all.
     """
+    if is_windows_zig_target(zig_target) and dest.suffix.lower() != ".exe":
+        dest = dest.with_name(dest.name + ".exe")
     with tempfile.TemporaryDirectory() as scratch:
         archive = build_payload_archive(
             dist_root, Path(scratch) / PAYLOAD_MEMBER_NAME, compression=compression

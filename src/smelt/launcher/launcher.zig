@@ -10,8 +10,10 @@
 //! only has to produce a directory and exec.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const fatal = std.process.fatal;
+const native_os = builtin.os.tag;
 
 /// Trailer magic. The final byte is the trailer format version: a stub and a payload
 /// built by different smelt versions must not silently half-understand each other.
@@ -109,17 +111,54 @@ pub fn main(init: std.process.Init) !void {
     // through it, which is a known cost of exec'ing the interpreter directly.
     try argv.append(arena, interpreter);
     try argv.append(arena, payload);
-    var args = init.minimal.args.iterate();
+    // `iterate()` alone is POSIX/WASI-only (see its doc comment); Windows args are
+    // read from `GetCommandLineW` and need an allocator to reassemble.
+    var args = init.minimal.args.iterateAllocator(gpa) catch |err|
+        fatal("cannot read command-line arguments: {t}", .{err});
+    defer args.deinit();
     _ = args.next();
     while (args.next()) |arg| try argv.append(arena, arg);
 
-    const err = std.process.replace(io, .{ .argv = argv.items });
-    fatal("cannot start the bundled interpreter {s}: {t}", .{ interpreter, err });
+    if (std.process.can_replace) {
+        const err = std.process.replace(io, .{ .argv = argv.items });
+        fatal("cannot start the bundled interpreter {s}: {t}", .{ interpreter, err });
+    }
+    // Windows has no exec(): the closest equivalent is spawning the bundled
+    // interpreter as a child, waiting for it, and exiting with its own code. Argv[0]
+    // stays lost either way, same as the POSIX branch above.
+    var child = std.process.spawn(io, .{ .argv = argv.items }) catch |err|
+        fatal("cannot start the bundled interpreter {s}: {t}", .{ interpreter, err });
+    const term = child.wait(io) catch |err|
+        fatal("cannot wait for the bundled interpreter {s}: {t}", .{ interpreter, err });
+    std.process.exit(switch (term) {
+        .exited => |code| code,
+        else => 1,
+    });
+}
+
+/// Reads a WTF-16 Windows environment variable and re-encodes it as WTF-8, the string
+/// encoding every other path in this file (and `Io.Dir`) is in.
+fn envGetWindows(arena: std.mem.Allocator, environ: std.process.Environ, comptime key: []const u8) !?[]const u8 {
+    const key_w = comptime std.unicode.wtf8ToWtf16LeStringLiteral(key);
+    const value_w = environ.getWindows(key_w) orelse return null;
+    return try std.unicode.wtf16LeToWtf8Alloc(arena, value_w);
 }
 
 /// Where extracted payloads are kept. `SMELT_ONEFILE_CACHE` wins so that a read-only
 /// or unusual home directory can be worked around without rebuilding the executable.
 fn cacheRoot(arena: std.mem.Allocator, environ: std.process.Environ) ![]const u8 {
+    if (native_os == .windows) {
+        if (try envGetWindows(arena, environ, "SMELT_ONEFILE_CACHE")) |dir| return dir;
+        if (try envGetWindows(arena, environ, "LOCALAPPDATA")) |dir|
+            return std.fs.path.join(arena, &.{ dir, "smelt" });
+        if (try envGetWindows(arena, environ, "TEMP")) |dir|
+            return std.fs.path.join(arena, &.{ dir, "smelt" });
+        if (try envGetWindows(arena, environ, "TMP")) |dir|
+            return std.fs.path.join(arena, &.{ dir, "smelt" });
+        // No usable temp directory at all -- as unlikely on Windows as no HOME is on
+        // POSIX, and the same reasoning applies: fail soft rather than not at all.
+        return "C:/Windows/Temp/smelt";
+    }
     if (environ.getPosix("SMELT_ONEFILE_CACHE")) |dir| return dir;
     if (environ.getPosix("XDG_CACHE_HOME")) |dir| return std.fs.path.join(arena, &.{ dir, "smelt" });
     if (environ.getPosix("HOME")) |dir| return std.fs.path.join(arena, &.{ dir, ".cache", "smelt" });
@@ -197,5 +236,8 @@ fn untar(io: Io, dir: Io.Dir, reader: *Io.Reader) !void {
 /// each other's tree -- and so a scratch tree left behind by a killed process is
 /// eventually reclaimed rather than accumulating forever.
 fn currentPid() u32 {
-    return @intCast(std.posix.system.getpid());
+    return switch (native_os) {
+        .windows => std.os.windows.GetCurrentProcessId(),
+        else => @intCast(std.posix.system.getpid()),
+    };
 }

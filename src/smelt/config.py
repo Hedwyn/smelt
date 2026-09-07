@@ -111,7 +111,7 @@ def build_datacls_from_toml[T: DataclassInstance](
             f"found {toml_data!r}. Modules are declared one array-of-tables entry "
             "each, e.g. `[[tool.smelt.c_extensions]]` followed by `import_path = "
             '"pkg.mod"` and `sources = ["src/pkg/mod.c"]`, and not as a '
-            "`module = \"source\"` mapping."
+            '`module = "source"` mapping.'
         )
     sentinel = object()
     kwargs: dict[str, object] = {}

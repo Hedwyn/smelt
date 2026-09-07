@@ -112,6 +112,7 @@ from smelt.own_python import (
     StagedInterpreter,
     build_own_python,
     interpreter_version,
+    is_windows_zig_target,
     plan_disabled_libraries,
     resolve_requirements,
     stage_interpreter,
@@ -1632,6 +1633,17 @@ def build_dist(
             import_path for import_path, resolved in closure.items() if resolved.is_stdlib
         )
         tailor = resolve_tailor_interpreter(entrypoint_options, tailor_interpreter)
+        if tailor and is_windows_zig_target(target):
+            # Tailoring needs `bootstrap_modules` to probe the built interpreter by
+            # running it, and a cross-compiled `python.exe` cannot run on the
+            # (typically Linux) host that built it -- see `stage_interpreter`.
+            _logger.info(
+                "Not tailoring the interpreter for Windows target %r: the built "
+                "python.exe cannot be probed from this host. Shipping the whole "
+                "standard library instead.",
+                target,
+            )
+            tailor = False
         # Which libraries to build without has to be settled *before* the build, while
         # the rest of the decision (`resolve_requirements`) needs the built prefix to
         # ask it for its bootstrap module set -- hence the two calls rather than one.

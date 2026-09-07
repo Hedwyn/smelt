@@ -61,12 +61,16 @@ from smelt.own_python import (
     LIBRARY_MODULES,
     MINIMAL_VIABLE_STDLIB,
     OPTIONAL_STDLIB_GROUPS,
+    WINDOWS_INTERPRETER_REL_PATH,
+    WINDOWS_STDLIB_REL_PATH,
+    WINDOWS_VERSION_MARKER_NAME,
     OwnPythonError,
     StagedInterpreter,
     bootstrap_modules,
     expand_interpreter_modules,
     interpreter_build_lock,
     interpreter_version,
+    is_windows_zig_target,
     minimal_viable_stdlib,
     own_python_cache_dir,
     plan_disabled_libraries,
@@ -137,6 +141,129 @@ def _fake_interpreter_prefix(root: Path) -> Path:
     (dynload / "_json.cpython-312-x86_64-linux-gnu.so").write_bytes(b"")
     (dynload / "_tkinter.cpython-312-x86_64-linux-gnu.so").write_bytes(b"")
     return prefix
+
+
+def _fake_windows_interpreter_prefix(root: Path) -> Path:
+    """
+    A Windows-target interpreter prefix in the shape `_stage_windows_interpreter`
+    walks. Arbitrary bytes stand in for `python.exe`/its DLL -- a cross-compiled `.exe`
+    cannot run on this host either, which is exactly the property this whole staging
+    path exists to work around (see `WINDOWS_VERSION_MARKER_NAME`).
+    """
+    prefix = root / "built-windows"
+    bin_dir = prefix / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "python.exe").write_bytes(b"not a real exe")
+    (bin_dir / "python312.dll").write_bytes(b"not a real dll")
+    (prefix / WINDOWS_VERSION_MARKER_NAME).write_text("3.12\n")
+    stdlib = prefix / WINDOWS_STDLIB_REL_PATH
+    stdlib.mkdir()
+    (stdlib / "os.py").write_text("sep = '\\\\'\n")
+    (stdlib / "json").mkdir()
+    (stdlib / "json" / "__init__.py").write_text("VERSION = 1\n")
+    return prefix
+
+
+@pytest.mark.parametrize(
+    ("zig_target", "expected"),
+    [
+        (None, False),
+        ("x86_64-linux", False),
+        ("aarch64-linux-musl", False),
+        ("x86_64-windows-gnu", True),
+        ("aarch64-windows-gnu", True),
+        ("x86_64-windows", True),
+    ],
+)
+def test_is_windows_zig_target(zig_target: str | None, expected: bool) -> None:
+    assert is_windows_zig_target(zig_target) is expected
+
+
+def test_validate_windows_zig_target_accepts_the_gnu_abi() -> None:
+    import smelt.own_python as own_python
+
+    own_python._validate_windows_zig_target("x86_64-windows-gnu")  # does not raise
+
+
+@pytest.mark.parametrize("zig_target", ["x86_64-windows", "x86_64-windows-msvc"])
+def test_validate_windows_zig_target_refuses_non_gnu_abi(zig_target: str) -> None:
+    import smelt.own_python as own_python
+
+    with pytest.raises(OwnPythonError, match="mingw"):
+        own_python._validate_windows_zig_target(zig_target)
+
+
+def test_cpython_source_version_reads_patchlevel_h(tmp_path: Path) -> None:
+    import smelt.own_python as own_python
+
+    include_dir = tmp_path / "Include"
+    include_dir.mkdir()
+    (include_dir / "patchlevel.h").write_text(
+        "#define PY_MAJOR_VERSION\t3\n#define PY_MINOR_VERSION\t12\n#define PY_MICRO_VERSION\t5\n"
+    )
+    assert own_python._cpython_source_version(tmp_path) == (3, 12)
+
+
+def test_interpreter_version_for_a_windows_prefix_reads_the_marker_without_running_anything(
+    tmp_path: Path,
+) -> None:
+    """
+    The whole point: `python.exe` here is not even a valid executable, and this must
+    still succeed -- it is never invoked.
+    """
+    prefix = _fake_windows_interpreter_prefix(tmp_path)
+    assert interpreter_version(assert_path_exists(prefix)) == (3, 12)
+
+
+def test_interpreter_version_for_a_windows_prefix_without_a_marker_raises(tmp_path: Path) -> None:
+    prefix = _fake_windows_interpreter_prefix(tmp_path)
+    (prefix / WINDOWS_VERSION_MARKER_NAME).unlink()
+    with pytest.raises(OwnPythonError, match=WINDOWS_VERSION_MARKER_NAME):
+        interpreter_version(assert_path_exists(prefix))
+
+
+def test_stage_interpreter_dispatches_to_the_windows_path(tmp_path: Path) -> None:
+    prefix = _fake_windows_interpreter_prefix(tmp_path)
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+
+    staged = stage_interpreter(assert_path_exists(prefix), dist_root, bundle_dependencies=False)
+
+    assert staged.version == (3, 12)
+    assert staged.interpreter_rel_path == WINDOWS_INTERPRETER_REL_PATH
+    assert staged.executable_rel_path == WINDOWS_INTERPRETER_REL_PATH
+    assert not staged.tailored
+    assert (dist_root / "bin" / "python.exe").is_file()
+    assert (dist_root / "bin" / "python312.dll").is_file()
+    assert (dist_root / WINDOWS_STDLIB_REL_PATH / "os.py").is_file()
+    assert (dist_root / WINDOWS_STDLIB_REL_PATH / "json" / "__init__.py").is_file()
+
+
+def test_stage_interpreter_refuses_to_tailor_a_windows_prefix(tmp_path: Path) -> None:
+    prefix = _fake_windows_interpreter_prefix(tmp_path)
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+    requirements = resolve_requirements(
+        ["json"], assert_path_exists(_fake_interpreter_prefix(tmp_path))
+    )
+
+    with pytest.raises(OwnPythonError, match="tailor"):
+        stage_interpreter(
+            assert_path_exists(prefix),
+            dist_root,
+            bundle_dependencies=False,
+            requirements=requirements,
+        )
+
+
+def test_stage_interpreter_for_windows_refuses_without_the_stdlib_landmark(tmp_path: Path) -> None:
+    prefix = _fake_windows_interpreter_prefix(tmp_path)
+    (prefix / WINDOWS_STDLIB_REL_PATH / "os.py").unlink()
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+
+    with pytest.raises(OwnPythonError):
+        stage_interpreter(assert_path_exists(prefix), dist_root, bundle_dependencies=False)
 
 
 def test_interpreter_version_asks_the_interpreter(tmp_path: Path) -> None:

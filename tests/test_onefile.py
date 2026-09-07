@@ -232,7 +232,7 @@ def test_extracting_main_guards_before_it_unpacks() -> None:
     )
     ast.parse(source)
     assert source.index("_REQUIRED_VERSION") < source.index("def _extract")
-    assert 'mode=_TAR_MODE' in source
+    assert "mode=_TAR_MODE" in source
     assert '"r:xz"' in source
 
 
