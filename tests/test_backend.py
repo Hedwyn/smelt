@@ -130,6 +130,25 @@ def test_is_static_link_eligible_refuses_a_runtime_linking_a_library() -> None:
     assert not is_static_link_eligible(ext)
 
 
+def test_is_static_link_eligible_refuses_a_nuitka_module() -> None:
+    """
+    Locks in the claim in `run_backend`'s own doc: a Nuitka module is routed through
+    Tier 1 like anything else (it genuinely goes through `compile_generic_extension`),
+    and always fails it -- linking against its own shared runtime or not,
+    `nuitkaify_module` always declares an external library (libm at minimum, see
+    `nuitkaify._runtime_link_libraries`).
+    """
+    from smelt.config import NuitkaModule
+    from smelt.nuitkaify import nuitkaify_module
+
+    module = NuitkaModule(
+        import_path=ImportPath("fib"), source=assert_path_exists(MODULE_FOLDER / "fib.py")
+    )
+    ext = nuitkaify_module(module, path_solver=PathSolver())
+    assert ext.extension.libraries
+    assert not is_static_link_eligible(ext)
+
+
 @pytest.mark.xfail(
     reason=(
         "_mypycify_one unpacks mypycify(..., include_runtime_files=True)) as a "
@@ -164,12 +183,13 @@ def test_compile_mypyc_extensions_builds_module_and_runtime(tmp_path: Path) -> N
 def test_run_backend_static_link_stages_eligible_modules_only() -> None:
     """
     `hatchdemo` exercises every backend `run_backend` drives (mypyc, Cython, a Nuitka
-    module, handwritten C and Zig) in one project, so it is the one place that proves
-    `static_link` stages exactly the modules `compiling_pipeline_refactor.md` says it
-    should: the mypyc and Cython ones, straight through Tier 1
-    (`is_static_link_eligible`) since neither declares an external library -- and
-    *not* the Nuitka one, which is out of scope regardless of Tier 1, and not the
-    handwritten C/Zig ones, which never go through `GenericExtension` at all.
+    module, handwritten C and Zig-as-a-single-source) in one project, so it is the one
+    place that proves `static_link` stages exactly the modules
+    `compiling_pipeline_refactor.md` says it should: mypyc, Cython, and the handwritten
+    C/Zig `c_extensions`, all straight through Tier 1 (`is_static_link_eligible`) since
+    none of them declares an external library -- and *not* the Nuitka one, which is
+    out of scope regardless of Tier 1 (it drives its own build, no object-file seam
+    this module controls).
     """
     with open(HATCHDEMO_ROOT / "pyproject.toml", "rb") as toml_file:
         toml_data = tomllib.load(toml_file)
@@ -178,7 +198,12 @@ def test_run_backend_static_link_stages_eligible_modules_only() -> None:
 
     result = run_backend(config, path_solver=path_solver, without_entrypoint=True, static_link=True)
     try:
-        assert set(result.static_modules) == {"hatchdemo.fib", "hatchdemo.fib_cython"}
+        assert set(result.static_modules) == {
+            "hatchdemo.fib",
+            "hatchdemo.fib_cython",
+            "hatchdemo.hello",
+            "hatchdemo.zighello",
+        }
         for objects in result.static_modules.values():
             assert objects
             for obj in objects:
@@ -188,9 +213,9 @@ def test_run_backend_static_link_stages_eligible_modules_only() -> None:
         assert any(name.startswith("cli") for name in built_names), (
             "the Nuitka module must still be linked and placed as an ordinary .so"
         )
-        assert not any(name.startswith("fib") for name in built_names), (
-            "a staged module must not also appear as a placed artifact"
-        )
+        assert not any(
+            name.startswith(("fib", "hello", "zighello")) for name in built_names
+        ), "a staged module must not also appear as a placed artifact"
         assert result.static_build_dir is not None
     finally:
         if result.static_build_dir is not None:

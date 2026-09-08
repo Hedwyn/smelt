@@ -1606,12 +1606,13 @@ def build_dist(
 
     Left empty (the default), `static_modules` fills itself in: when `use_inittab`
     resolves true and this is a mode `own` build, `run_backend` is asked to compile
-    every pinned mypyc/Cython module (Nuitka is out of scope, see
-    `compiling_pipeline_refactor.md`) and stage the Tier-1-eligible ones (no external
-    `libraries`/`extra_link_args`, see `smelt.backend.is_static_link_eligible`)
-    instead of linking them into a `.so`. Passing `static_modules` explicitly instead
-    -- import path -> its already-compiled object files, from
-    `smelt.compiler.compile_extension_objects` or `smelt.backend.compile_generic_extension`
+    every pinned mypyc, Cython and handwritten C/Zig module (Nuitka and `zig build`
+    projects are out of scope, see `compiling_pipeline_refactor.md`) and stage the
+    Tier-1-eligible ones (no external `libraries`/`extra_link_args`, see
+    `smelt.backend.is_static_link_eligible`) instead of linking them into a `.so`.
+    Passing `static_modules` explicitly instead -- import path -> its already-compiled
+    object files, from `smelt.compiler.compile_extension_objects` or
+    `smelt.backend.compile_generic_extension`
     -- opts out of that auto-discovery and is used as-is, on the caller's own
     eligibility judgment.
 

@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, Iterable
 from mypyc.build import mypycify
 
 from smelt.compiler import (
-    compile_extension,
     compile_extension_objects,
     compile_zig_module,
     link_extension_objects,
@@ -160,6 +159,26 @@ def is_static_link_eligible(ext: GenericExtension) -> bool:
     return all(
         not candidate.libraries and not candidate.extra_link_args for candidate in candidates
     )
+
+
+def _compile_place_or_stage(
+    ext: GenericExtension, static_build_dir: PathLike[str] | None
+) -> list[PathExists] | None:
+    """
+    Compiles `ext` and either links+places it (the default), or -- when
+    `static_build_dir` is given and `ext` passes Tier 1 (`is_static_link_eligible`) --
+    compiles it into `static_build_dir` instead and returns its (module + runtime)
+    object files, unlinked.
+
+    Returns `None` when `ext` was linked and placed normally -- the shared decision
+    point every `run_backend` compile loop (pinned or auto-discovered) goes through.
+    """
+    if static_build_dir is not None and is_static_link_eligible(ext):
+        compiled = compile_generic_extension(ext, static_build_dir)
+        return [*compiled.objects, *(compiled.runtime_objects or [])]
+    with tempfile.TemporaryDirectory() as build_folder:
+        link_generic_extension(compile_generic_extension(ext, build_folder))
+    return None
 
 
 def compile_mypyc_extensions(
@@ -351,23 +370,33 @@ def compile_module_with_fallback(
     import_path: ImportPath,
     backend_priority_order: Iterable[Backend],
     path_solver: PathSolver,
-) -> GenericExtension:
+    *,
+    static_build_dir: PathLike[str] | None = None,
+) -> tuple[GenericExtension, list[PathExists] | None]:
     """
     Compiles `import_path` trying each backend in `backend_priority_order` in turn,
     falling back to the next one when a backend fails to produce a working extension.
+
+    `static_build_dir` is threaded straight through to `_compile_place_or_stage`: a
+    successful attempt is staged for static linking instead of linked+placed when it
+    passes Tier 1 (`is_static_link_eligible`) -- whichever backend actually produced
+    it, Nuitka included (it only ever fails Tier 1 on the merits, see `run_backend`'s
+    own doc, not because it is auto-discovered). The second element of the returned
+    tuple is that staging's own object files, or `None` when linked+placed normally.
     """
     auto_context = _get_auto_mode_context()
     last_exc: Exception | None = None
     for backend in backend_priority_order:
         try:
-            ext = _compile_and_place(_generate_with_backend(backend, import_path, path_solver))
+            ext = _generate_with_backend(backend, import_path, path_solver)
+            objects = _compile_place_or_stage(ext, static_build_dir)
         except (SmeltError, RuntimeError, ImportError) as exc:
             auto_context.record_attempt(import_path, backend, error=str(exc))
             _logger.warning("Backend %s failed to compile %s: %s", backend.value, import_path, exc)
             last_exc = exc
             continue
         auto_context.record_attempt(import_path, backend, error=None)
-        return ext
+        return ext, objects
     raise SmeltError(
         f"All backends {[b.value for b in backend_priority_order]} failed to compile {import_path}"
     ) from last_exc
@@ -755,13 +784,28 @@ def run_backend(
     `import_path`, dotted-to-slash, joined with `data_file_path`'s filename),
     applied to every entrypoint built in this run.
 
-    `static_link` opts pinned mypyc and Cython modules into Tier 1 eligibility
-    checking (see `is_static_link_eligible` and `compiling_pipeline_refactor.md`):
-    one that passes is compiled but left unlinked, its object files reported in the
-    result's `static_modules` instead of shipped as a `.so`. Nuitka-compiled modules
-    and auto-discovered ones are never considered -- the former drives its own build
-    outside the `GenericExtension.extension`/`.runtime` + compile step this seam
-    opens up, and the latter can silently select Nuitka too.
+    `static_link` opts every pinned mypyc, Cython, Nuitka and handwritten C/Zig
+    (`config.c_extensions`) module into Tier 1 eligibility checking (see
+    `is_static_link_eligible` and `compiling_pipeline_refactor.md`): one that passes
+    is compiled but left unlinked, its object files reported in the result's
+    `static_modules` instead of shipped as a `.so`. A Nuitka module genuinely goes
+    through the same `GenericExtension` + compile step as the others (`nuitkaify_module`
+    only transpiles to C), so it is checked the same way -- it just never actually
+    passes: linking against its own shared runtime or not, it always declares
+    `libraries=["m", ...]` (see `nuitkaify._runtime_link_libraries`), so Tier 1 refuses
+    it structurally, the same as any other module naming a real external library.
+
+    Auto-discovered modules (`config.auto_mode`, via `compile_module_with_fallback`)
+    are checked the same way too, whichever backend (mypyc/Cython/Nuitka)
+    `backend_priority_order` lands on for a given module -- Tier 1 needs no
+    per-backend special-casing since it only ever looks at the produced `Extension`'s
+    own `libraries`/`extra_link_args`.
+
+    Only `config.zig_modules` is hard-excluded rather than routed through Tier 1:
+    a project's own `build.zig` (as opposed to a single `.zig` source under
+    `c_extensions`, which *is* checked) drives `zig build` end-to-end and hands back
+    only a finished `.so`, with no object-file seam smelt controls to stage in the
+    first place.
 
     Returns a `BackendResult` (see its own doc) rather than a bare list, so a caller
     that opted into `static_link` has somewhere to receive `static_modules` from --
@@ -787,6 +831,22 @@ def run_backend(
         "`run_backend` implementation is not fully implemented yet and will only "
         "compile C extensions"
     )
+
+    def _place_or_stage(ext: GenericExtension) -> bool:
+        """
+        `_compile_place_or_stage` plus this run's bookkeeping: records staged objects
+        in `static_modules` and returns whether `ext` was staged (vs. linked+placed).
+        """
+        objects = _compile_place_or_stage(ext, static_build_dir)
+        if objects is None:
+            return False
+        static_modules[ext.import_path] = objects
+        _logger.info("Staged %s for static linking (no .so written)", ext.import_path)
+        return True
+
+    # Zig modules drive their own `zig build` end-to-end (a project-supplied
+    # `build.zig`, not smelt's own compile step), so -- like Nuitka -- there is no
+    # object-file seam here to stage for static linking; always a loose `.so`.
     for zig_mod in config.zig_modules:
         built_artifacts.append(
             compile_zig_module(
@@ -798,41 +858,27 @@ def run_backend(
             )
         )
 
+    # Handwritten C extensions -- eligible for static linking, same as mypyc/Cython:
+    # they go through the same `compile_extension`/`GenericExtension` seam.
     for native_extension in config.c_extensions:
         sources = native_extension.sources
         if len(sources) > 1:
             raise NotImplementedError("Not supported yet")
         c_extension_path = sources[0]
-        parent_folder_path = Path(c_extension_path).parent
-        # TODO: we should probably run that logic in temp folder
-        built_so_path = compile_extension(c_extension_path)
-        so_final_path = parent_folder_path / os.path.basename(built_so_path)
-        shutil.move(built_so_path, so_final_path)
-        built_artifacts.append(so_final_path)
+        native_ext = GenericExtension.factory(
+            src_path=c_extension_path,
+            import_path=native_extension.import_path,
+            dest_folder=c_extension_path.parent,
+        )
+        if _place_or_stage(native_ext):
+            continue
+        built_artifacts.append(native_ext.get_dest_path())
 
     # Note: mypyc has a runtime shipped as a separate extension
     # this runtime should be named modname__mypy
     # we need to keep track of it to include to nuitka,
     # as it would be invisible otherwise
     shared_runtime_extensions: set[str] = set()
-
-    def _place_or_stage(ext: GenericExtension) -> bool:
-        """
-        Links and places `ext` (the default), or -- when `static_build_dir` is set
-        and `ext` passes Tier 1 -- compiles it into `static_build_dir` and records it
-        in `static_modules` instead. Returns whether it was staged for static linking.
-        """
-        if static_build_dir is not None and is_static_link_eligible(ext):
-            compiled = compile_generic_extension(ext, static_build_dir)
-            static_modules[ext.import_path] = [
-                *compiled.objects,
-                *(compiled.runtime_objects or []),
-            ]
-            _logger.info("Staged %s for static linking (no .so written)", ext.import_path)
-            return True
-        with tempfile.TemporaryDirectory() as build_folder:
-            link_generic_extension(compile_generic_extension(ext, build_folder))
-        return False
 
     for module in config.mypyc_modules:
         mypyc_ext = _mypycify_one(module, path_solver)
@@ -851,12 +897,18 @@ def run_backend(
         if cython_ext.runtime:
             built_artifacts.append(cython_ext.get_runtime_dest_path())
 
-    # Nuitka drives its own build end-to-end rather than through a compile step this
-    # module controls, so it has no object-file seam to stage for static linking (see
-    # "Nuitka is out of scope" in compiling_pipeline_refactor.md) -- always linked.
+    # A Nuitka module *does* go through smelt's own compile step (`nuitkaify_module`
+    # only transpiles to C; `_place_or_stage`/`compile_generic_extension` is what
+    # actually compiles it) -- so, unlike `zig_modules` above, it is routed through
+    # Tier 1 rather than hard-excluded. In practice it never passes: linking against
+    # its own shared runtime (`use_runtime=True`) or not, `nuitkaify_module` always
+    # declares `libraries=["m", ...]` (see `_runtime_link_libraries`), so Tier 1
+    # refuses it the same way it would any other module linking a real external
+    # library -- correctly, and without needing a name-the-backend special case.
     for nuitka_mod in config.nuitka_modules:
         nuitka_ext = nuitkaify_module(nuitka_mod, path_solver=path_solver)
-        _compile_and_place(nuitka_ext)
+        if _place_or_stage(nuitka_ext):
+            continue
         built_artifacts.append(nuitka_ext.get_dest_path())
         if nuitka_ext.runtime:
             built_artifacts.append(nuitka_ext.get_runtime_dest_path())
@@ -869,11 +921,18 @@ def run_backend(
     # site-packages, etc).
     for import_path in sorted(discover_auto_targets(config, path_solver)):
         try:
-            auto_ext = compile_module_with_fallback(
-                import_path, config.backend_priority_order, path_solver
+            auto_ext, auto_objects = compile_module_with_fallback(
+                import_path,
+                config.backend_priority_order,
+                path_solver,
+                static_build_dir=static_build_dir,
             )
         except SmeltError as exc:
             _logger.warning("Skipping auto-discovered module %s: %s", import_path, exc)
+            continue
+        if auto_objects is not None:
+            static_modules[auto_ext.import_path] = auto_objects
+            _logger.info("Staged %s for static linking (no .so written)", auto_ext.import_path)
             continue
         built_artifacts.append(auto_ext.get_dest_path())
         if auto_ext.runtime:
