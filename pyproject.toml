@@ -46,6 +46,10 @@ cython = ["Cython"]
 metapython = [
   "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@e78aeca",
 ]
+# unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
+# (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
+# without needing to actually run there.
+isolated-build = ["unearth"]
 build = [
   "Cython",
   "nuitka[onefile]<4.2",
