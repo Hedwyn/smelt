@@ -454,6 +454,27 @@ def build_standalone_binary(
     "to fall back to. Still experimental -- see compiling_pipeline_refactor.md.",
 )
 @click.option(
+    "--own-python-static/--no-own-python-static",
+    "own_python_static",
+    default=None,
+    help="With --python own, build one monolithic, static-PIE interpreter (no "
+    "libpythonX.Y.so) instead of the ordinary dynamic-libc/dynamic-libpython shape. "
+    "Verified only for --own-python-target x86_64-linux-musl (see "
+    "static_pie_musl_plan.md) -- every extension module not named via "
+    "--own-python-static-module then simply cannot be imported (dlopen() itself does "
+    "not work under this shape). Cannot be combined with --use-inittab: a "
+    "static-linked interpreter has no libpythonX.Y.so to link smelt's own compiled "
+    "extensions against.",
+)
+@click.option(
+    "--own-python-static-module",
+    "own_python_static_modules",
+    multiple=True,
+    help="With --own-python-static, compile a CPython stdlib module (e.g. '_socket', "
+    "'zlib') straight into the interpreter as a builtin, instead of the ordinary "
+    "lib-dynload/*.so dlopen() cannot actually load under this shape. Repeatable.",
+)
+@click.option(
     "--no-version-guard",
     is_flag=True,
     default=False,
@@ -538,6 +559,8 @@ def build_dist_folder(
     onefile_only: bool,
     onefile_compression: Literal["xz", "gzip", "none"] | None,
     use_inittab: bool | None,
+    own_python_static: bool | None,
+    own_python_static_modules: tuple[str, ...],
     no_version_guard: bool,
     no_isolate: bool,
     exclude_modules: tuple[str, ...],
@@ -593,6 +616,8 @@ def build_dist_folder(
         onefile_only=onefile_only,
         onefile_compression=onefile_compression,
         use_inittab=use_inittab,
+        own_python_static=own_python_static,
+        own_python_static_modules=own_python_static_modules,
     )
     click.echo(dist_report.render())
     click.echo("")

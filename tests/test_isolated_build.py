@@ -177,9 +177,7 @@ def test_isolated_build_cache_dir_keys_on_dist_name_version_and_target() -> None
 def test_resolve_isolated_build_prefers_the_caller_then_the_declaration() -> None:
     assert resolve_isolated_build(EntrypointOptions()) is DEFAULT_ISOLATED_BUILD
     assert resolve_isolated_build(EntrypointOptions({"isolated-build": True})) is True
-    assert (
-        resolve_isolated_build(EntrypointOptions({"isolated-build": True}), False) is False
-    )
+    assert resolve_isolated_build(EntrypointOptions({"isolated-build": True}), False) is False
 
 
 def test_resolve_isolated_build_rejects_a_non_boolean() -> None:
@@ -188,10 +186,7 @@ def test_resolve_isolated_build_rejects_a_non_boolean() -> None:
 
 
 def test_resolve_isolated_build_versions_prefers_the_caller_then_the_declaration() -> None:
-    assert (
-        resolve_isolated_build_versions(EntrypointOptions())
-        == DEFAULT_ISOLATED_BUILD_VERSIONS
-    )
+    assert resolve_isolated_build_versions(EntrypointOptions()) == DEFAULT_ISOLATED_BUILD_VERSIONS
     assert (
         resolve_isolated_build_versions(EntrypointOptions({"isolated-build-versions": "lock"}))
         == "lock"
@@ -258,9 +253,7 @@ def test_fetch_wheel_reuses_the_cache_for_a_pinned_version(tmp_path: Path) -> No
 @needs_isolated_build_network
 def test_fetch_wheel_raises_when_nothing_satisfies_the_target(tmp_path: Path) -> None:
     with pytest.raises(IsolatedBuildError):
-        fetch_wheel(
-            "MarkupSafe", "==999.999.999", "x86_64-linux-gnu", cache_dir=tmp_path
-        )
+        fetch_wheel("MarkupSafe", "==999.999.999", "x86_64-linux-gnu", cache_dir=tmp_path)
 
 
 @needs_isolated_build_network
@@ -302,9 +295,7 @@ def test_build_dist_ships_the_isolated_build_replacement(tmp_path: Path) -> None
     package = tmp_path / "src" / "isopkg"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("")
-    (package / "cli.py").write_text(
-        "import markupsafe\ndef main() -> int:\n    return 0\n"
-    )
+    (package / "cli.py").write_text("import markupsafe\ndef main() -> int:\n    return 0\n")
     config = SmeltConfig(
         packages_location={"isopkg": "src/isopkg"},
         entrypoints={"isopkg.cli:main": {}},
@@ -331,9 +322,7 @@ def test_build_dist_fails_loudly_when_isolated_build_has_no_wheel_for_the_target
     package = tmp_path / "src" / "isopkg2"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("")
-    (package / "cli.py").write_text(
-        "import markupsafe\ndef main() -> int:\n    return 0\n"
-    )
+    (package / "cli.py").write_text("import markupsafe\ndef main() -> int:\n    return 0\n")
     config = SmeltConfig(
         packages_location={"isopkg2": "src/isopkg2"},
         entrypoints={"isopkg2.cli:main": {}},

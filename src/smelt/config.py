@@ -288,6 +288,15 @@ EntrypointOptions = TypedDict(
         # Target triple `isolated-build` reinstalls native dependencies for (same
         # spelling as `own-python-target`); omitted means the host's own platform.
         "isolated-build-target": str,
+        # Whether the `python = "own"` interpreter is built as one monolithic,
+        # static-PIE executable (no libpythonX.Y.so) instead of the ordinary
+        # dynamic-libc/dynamic-libpython shape. Off by default -- see
+        # `smelt.own_python.DEFAULT_OWN_PYTHON_LINKAGE`.
+        "own-python-static": bool,
+        # CPython stdlib module names to compile as builtins (no dlopen) instead of
+        # lib-dynload/*.so, when "own-python-static" is on -- see
+        # `smelt.own_python.build_own_python`'s `static_modules`.
+        "own-python-static-modules": list[str],
     },
     total=False,
 )

@@ -92,7 +92,10 @@ from smelt.isolated_build import (
     DEFAULT_ISOLATED_BUILD,
     DEFAULT_ISOLATED_BUILD_VERSIONS,
     ISOLATED_BUILD_VERSIONS,
+    IsolatedBuildError,
     IsolatedBuildVersions,
+    parse_pyproject_dependencies,
+    prepare_isolated_natives,
 )
 from smelt.native_deps import (
     BundledNatives,
@@ -230,6 +233,14 @@ DEFAULT_DROP_OPTIONAL_IMPORTS: Final[bool] = False
 #: `static_modules`, but this stays an explicit opt-in on top of them regardless,
 #: rather than defaulting on the moment they land.
 DEFAULT_USE_INITTAB: Final[bool] = False
+
+#: Whether the `python = "own"` interpreter is built as one monolithic, static-PIE
+#: executable (`own_python.OwnPythonLinkage` "static") instead of the default
+#: dynamic-libc/dynamic-libpython shape. **Off by default**: verified only for
+#: `x86_64-linux-musl` (see `static_pie_musl_plan.md`), and incompatible with
+#: `static_modules`/`use_inittab` (see `build_dist`'s own doc) -- not something to turn
+#: on the moment it lands.
+DEFAULT_OWN_PYTHON_STATIC: Final[bool] = False
 
 #: How long the tracing subprocess is given before it is given up on. Importing an
 #: entrypoint is normally near-instantaneous; a module that blocks on import (opening
@@ -621,6 +632,50 @@ def resolve_use_inittab(
             "them as ordinary .so files)."
         )
     return declared
+
+
+def resolve_own_python_static(
+    entrypoint_options: EntrypointOptions,
+    own_python_static: bool | None = None,
+) -> bool:
+    """
+    Whether the mode `own` interpreter is built with `own_python.OwnPythonLinkage`
+    `"static"` instead of `"dynamic"`: `own_python_static` where the caller decided
+    (the CLI wins over the declaration), then the entrypoint's own `own-python-static`
+    option, then `DEFAULT_OWN_PYTHON_STATIC` (off).
+    """
+    if own_python_static is not None:
+        return own_python_static
+    declared = entrypoint_options.get("own-python-static", DEFAULT_OWN_PYTHON_STATIC)
+    if not isinstance(declared, bool):
+        raise DistError(
+            f"Invalid own-python-static {declared!r}, expected a boolean: true (build "
+            "a monolithic static-PIE interpreter) or false (the default -- the "
+            "ordinary dynamic-libc/dynamic-libpython shape)."
+        )
+    return declared
+
+
+def resolve_own_python_static_modules(
+    entrypoint_options: EntrypointOptions,
+    own_python_static_modules: Iterable[str] | None = None,
+) -> tuple[str, ...]:
+    """
+    CPython stdlib module names to compile as builtins under `own_python_static`:
+    `own_python_static_modules` where the caller decided (the CLI wins over the
+    declaration), then the entrypoint's own `own-python-static-modules` option, then
+    empty -- there is no sensible default set (see `own_python.build_own_python`'s
+    `static_modules`).
+    """
+    if own_python_static_modules is not None:
+        return tuple(own_python_static_modules)
+    declared = entrypoint_options.get("own-python-static-modules", [])
+    if not isinstance(declared, list) or not all(isinstance(name, str) for name in declared):
+        raise DistError(
+            f"Invalid own-python-static-modules {declared!r}, expected a list of "
+            "module name strings."
+        )
+    return tuple(declared)
 
 
 def resolve_drop_optional_imports(
@@ -1623,6 +1678,11 @@ def build_dist(
     onefile_compression: str | None = None,
     static_modules: Mapping[str, Iterable[PathExists]] = {},
     use_inittab: bool | None = None,
+    isolated_build: bool | None = None,
+    isolated_build_versions: IsolatedBuildVersions | None = None,
+    isolated_build_target: str | None = None,
+    own_python_static: bool | None = None,
+    own_python_static_modules: Iterable[str] | None = None,
 ) -> DistReport:
     """
     Assembles the distribution folder for one of `config`'s entrypoints under
@@ -1702,6 +1762,27 @@ def build_dist(
     `include_distribution_metadata` and `exclude_modules` are each additive over what
     the entrypoint declares under the same name in its own options.
 
+    `isolated_build` reinstalls every third-party native dependency the closure reaches
+    for `isolated_build_target` (a Zig-triple-shaped string; `None` means the host's
+    own platform) instead of copying whatever build happens to be installed here --
+    off by default, since it needs the `isolated-build` extra and a real network fetch
+    per native dependency (see `smelt.isolated_build`). `isolated_build_versions`
+    picks which version of each dependency gets fetched (see `IsolatedBuildVersions`).
+    A native dependency with no wheel matching both fails the build rather than
+    shipping a file that cannot be loaded on the target.
+
+    `own_python_static` builds the mode `own` interpreter with `own_python`'s
+    `OwnPythonLinkage` `"static"`: one monolithic, static-PIE `bin/python` with no
+    `libpythonX.Y.so`, verified only for a musl `own_python_target` (see
+    `static_pie_musl_plan.md`). `own_python_static_modules` names CPython stdlib
+    modules (e.g. `_socket`, `zlib`) to compile as builtins under it -- without this,
+    a `linkage="static"` interpreter can still `import sys`/`os`/the frozen stdlib,
+    but every module that would otherwise need `dlopen()` is unusable. Mutually
+    exclusive with `static_modules`/`use_inittab` (smelt's own extensions): a
+    `linkage="static"` interpreter has no `libpythonX.Y.so` for
+    `smelt.static_python.build_static_interpreter` to relink against, so combining
+    both raises `DistError` rather than failing deep inside that relink.
+
     An existing distribution folder of the same name is replaced.
     """
     path_solver = path_solver or config.get_path_solver()
@@ -1713,6 +1794,24 @@ def build_dist(
     # object files at all (`static_link` below) depends on both.
     resolved_python = resolve_dist_python(entrypoint_options, python)
     resolved_use_inittab = resolve_use_inittab(entrypoint_options, use_inittab)
+    resolved_isolated_build = resolve_isolated_build(entrypoint_options, isolated_build)
+    resolved_isolated_build_versions = resolve_isolated_build_versions(
+        entrypoint_options, isolated_build_versions
+    )
+    resolved_isolated_build_target = resolve_isolated_build_target(
+        entrypoint_options, isolated_build_target
+    )
+    resolved_own_python_static = resolve_own_python_static(entrypoint_options, own_python_static)
+    resolved_own_python_static_modules = resolve_own_python_static_modules(
+        entrypoint_options, own_python_static_modules
+    )
+    if resolved_own_python_static and (static_modules or resolved_use_inittab):
+        raise DistError(
+            "own_python_static and static_modules/use_inittab (smelt's own compiled "
+            "extensions) cannot be combined: a linkage=\"static\" interpreter has no "
+            "libpythonX.Y.so for smelt.static_python.build_static_interpreter to "
+            "relink against. See static_pie_musl_plan.md."
+        )
     # Auto-discovery (`run_backend(static_link=True)`, see `compiling_pipeline_refactor.md`)
     # only kicks in when the caller left `static_modules` for us to fill in ourselves --
     # one who hand-supplies it already did their own eligibility judgment, and gets the
@@ -1853,7 +1952,12 @@ def build_dist(
         # before anything is assembled: the skew check below can only be made once the
         # interpreter's own version is known, and failing it after the whole folder has
         # been written would be a pointless wait for an answer available now.
-        built_interpreter = build_own_python(target=target, disabled_libraries=disabled_libraries)
+        built_interpreter = build_own_python(
+            target=target,
+            disabled_libraries=disabled_libraries,
+            linkage="static" if resolved_own_python_static else "dynamic",
+            static_modules=resolved_own_python_static_modules,
+        )
         assert_no_version_skew(tag, interpreter_version(built_interpreter))
         if tailor:
             interpreter_requirements = resolve_requirements(
@@ -1886,6 +1990,20 @@ def build_dist(
         discovery=resolved_discovery,
         optional=optional,
         dropped_optional=drop_optional,
+    )
+
+    # Reinstalled ahead of the closure loop below: every `ModuleKind.EXTENSION` entry
+    # it locates a replacement for is substituted in there instead of `resolved.origin`.
+    isolated_natives = (
+        prepare_isolated_natives(
+            closure,
+            payload_root,
+            target=resolved_isolated_build_target,
+            versions=resolved_isolated_build_versions,
+            dependencies=parse_pyproject_dependencies(config.dependencies),
+        )
+        if resolved_isolated_build
+        else {}
     )
 
     # Native artifacts first: whatever smelt built for a module is what that module
@@ -1940,7 +2058,15 @@ def build_dist(
                     report.skipped[import_path] = f"bytecode compilation failed: {exc}"
             case ModuleKind.EXTENSION:
                 assert resolved.origin is not None, "an EXTENSION module always has an origin"
-                native = _copy_native(import_path, resolved.origin, payload_root, "environment")
+                if resolved_isolated_build and import_path not in isolated_natives:
+                    raise IsolatedBuildError(
+                        f"isolated-build could not reinstall {import_path!r} for "
+                        f"target {resolved_isolated_build_target or 'the host'!r} -- "
+                        "either its owning distribution could not be determined, or "
+                        "the fetched wheel has no matching file."
+                    )
+                source = isolated_natives.get(import_path, resolved.origin)
+                native = _copy_native(import_path, source, payload_root, "environment")
                 if native.dest_rel_path not in placed_natives:
                     placed_natives.add(native.dest_rel_path)
                     report.natives.append(native)

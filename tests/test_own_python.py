@@ -34,6 +34,7 @@ import pytest
 from smelt.bytecode import PycTargetTag, compile_tree
 from smelt.config import EntrypointOptions, SmeltConfig
 from smelt.dist import (
+    DEFAULT_OWN_PYTHON_STATIC,
     DEFAULT_TAILOR_INTERPRETER,
     INSTRUCTIONS_NAME,
     LAUNCHER_RESERVED_NAMES,
@@ -45,6 +46,8 @@ from smelt.dist import (
     build_dist,
     launcher_name,
     resolve_dist_python,
+    resolve_own_python_static,
+    resolve_own_python_static_modules,
     resolve_tailor_interpreter,
     run_instructions,
     write_launcher_shim,
@@ -67,6 +70,7 @@ from smelt.own_python import (
     OwnPythonError,
     StagedInterpreter,
     bootstrap_modules,
+    build_own_python,
     expand_interpreter_modules,
     interpreter_build_lock,
     interpreter_version,
@@ -782,6 +786,40 @@ def test_own_python_cache_dir_separates_library_option_sets() -> None:
     assert keyed != own_python_cache_dir()
     # order-independent, so the same option set never builds twice
     assert keyed == own_python_cache_dir(disabled_libraries=["sqlite", "tk"])
+
+
+def test_own_python_cache_dir_separates_linkage_and_static_modules() -> None:
+    static = own_python_cache_dir(linkage="static")
+    builtin = own_python_cache_dir(linkage="static", static_modules=["_socket", "zlib"])
+
+    assert static != own_python_cache_dir()
+    assert static.name == "native-static"
+    assert builtin != static
+    # order-independent, so the same option set never builds twice
+    assert builtin == own_python_cache_dir(linkage="static", static_modules=["zlib", "_socket"])
+
+
+def test_build_own_python_rejects_static_modules_without_static_linkage() -> None:
+    with pytest.raises(OwnPythonError, match="static_modules"):
+        build_own_python(static_modules=["_socket"])
+
+
+def test_resolve_own_python_static_prefers_the_caller_then_the_declaration() -> None:
+    assert resolve_own_python_static(EntrypointOptions()) is DEFAULT_OWN_PYTHON_STATIC
+    assert resolve_own_python_static(EntrypointOptions({"own-python-static": True})) is True
+    assert (
+        resolve_own_python_static(EntrypointOptions({"own-python-static": True}), False) is False
+    )
+
+
+def test_resolve_own_python_static_modules_prefers_the_caller_then_the_declaration() -> None:
+    assert resolve_own_python_static_modules(EntrypointOptions()) == ()
+    assert resolve_own_python_static_modules(
+        EntrypointOptions({"own-python-static-modules": ["zlib", "_socket"]})
+    ) == ("zlib", "_socket")
+    assert resolve_own_python_static_modules(
+        EntrypointOptions({"own-python-static-modules": ["zlib"]}), ["_socket"]
+    ) == ("_socket",)
 
 
 def test_resolve_tailor_interpreter_prefers_the_caller_then_the_declaration() -> None:

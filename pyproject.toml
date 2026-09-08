@@ -48,8 +48,10 @@ metapython = [
 ]
 # unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
-# without needing to actually run there.
-isolated-build = ["unearth"]
+# without needing to actually run there. packaging: listed explicitly (not just relied
+# on as unearth's own transitive dependency) since smelt.isolated_build imports it
+# directly too, to parse [project.dependencies] specifiers.
+isolated-build = ["unearth", "packaging"]
 build = [
   "Cython",
   "nuitka[onefile]<4.2",

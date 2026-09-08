@@ -47,10 +47,10 @@ import re
 import shutil
 import subprocess
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Iterable, Iterator
+from typing import TYPE_CHECKING, Final, Iterable, Iterator, Literal
 
 from smelt.bytecode import compile_tree
 from smelt.explorer import (
@@ -70,6 +70,7 @@ from smelt.native_deps import (
     set_rpath,
 )
 from smelt.process import call_command
+from smelt.pyconfig import PYCONFIG_DIR, resolve_pyconfig_header
 from smelt.utils import (
     PathExists,
     SmeltError,
@@ -102,6 +103,21 @@ _METAPYTHON_CACHE_DIR: Final = Path.home() / ".cache" / "smelt" / "metapython"
 #: musl is only useful once the *whole* dependency set is musl-built, so it stays an
 #: explicit opt-in (`own-python-target`) rather than the default.
 DEFAULT_OWN_PYTHON_TARGET: Final[str | None] = None
+
+#: How `build_own_python` links libc and the core interpreter. `"dynamic"` (the
+#: default, unchanged from before this existed) is `libc-linkage=dynamic` +
+#: `python-linkage=dynamic` -- a real `libpythonX.Y.so`, ordinary `dlopen()`'d
+#: `lib-dynload/*.so` extension modules. `"static"` is `libc-linkage=static` +
+#: `python-linkage=off` -- one monolithic, static-PIE `bin/python` with no
+#: `libpythonX.Y.so` at all. Verified end to end (meta-python's own `roadmap.md`)
+#: only for `x86_64-linux-musl`: musl is specifically documented/designed to support
+#: `dlopen()` from a static executable, which is what makes bypassing it (see
+#: `static_modules` below) worth doing there. glibc's static `dlopen()` fails
+#: *categorically*, with no PIE workaround -- `"static"` is not blocked for a glibc
+#: target, but every accelerator module not named in `static_modules` is simply
+#: unusable there.
+type OwnPythonLinkage = Literal["dynamic", "static"]
+DEFAULT_OWN_PYTHON_LINKAGE: Final[OwnPythonLinkage] = "dynamic"
 
 #: The interpreter executable inside a built (or staged) prefix, prefix-relative.
 INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python")
@@ -630,32 +646,105 @@ def _is_musl_target(target: str | None) -> bool:
     return target is not None and "musl" in target
 
 
+def generate_pyconfig_template(target: str) -> PathExists:
+    """
+    Captures a known-good pyconfig.h for `target` and writes it to
+    `smelt.pyconfig.PYCONFIG_DIR / target / "pyconfig.h"` -- what
+    `smelt.pyconfig.resolve_pyconfig_header` then serves to every later
+    `build_own_python(target=target)` call, with no `./configure` run involved at all.
+
+    A maintenance tool, **not** part of an ordinary build -- `build_own_python` never
+    calls this itself. Run it once per target, review the diff against the previous
+    checked-in file (if there is one), and commit the result.
+
+    Only implemented for a musl target today: `./configure`'s own native,
+    non-cross-aware detection (see this module's docstring, and `smelt.pyconfig`'s) is
+    the one case actually known to be wrong, not merely redundant -- a glibc target's
+    `pyconfig.h` is not obviously wrong the same way, so capturing one would only buy
+    the "no `./configure` at all" property itself, not correctness. Raises
+    `OwnPythonError` for anything else.
+
+    Mechanism: lets `./configure` run natively against `target` once (`zig_build`,
+    deliberately expected to fail -- its only purpose is producing a base pyconfig.h
+    for `_patch_musl_pyconfig` to start from; the musl-specific compile errors that
+    failure comes from are exactly what every build *after* this one sidesteps),
+    then applies the same `HAVE_*` fixups meta-python's own `build.zig` already
+    applies automatically at build time (kept here too, so the checked-in file is
+    correct standalone -- readable and diffable on its own, not only when it happens
+    to be fed through that path).
+    """
+    if not _is_musl_target(target):
+        raise OwnPythonError(
+            f"generate_pyconfig_template({target!r}): only implemented for a musl "
+            "target -- ./configure's own detection is not known to be wrong for "
+            "anything else yet."
+        )
+    _ensure_metapython_installed()
+    from metapython.compile import VENDORED_PROJECT_DIR, BuildOptions, zig_build
+
+    cpython_dir = VENDORED_PROJECT_DIR / "cpython"
+    with interpreter_build_lock():
+        for stale in ("Makefile", "pyconfig.h"):
+            (cpython_dir / stale).unlink(missing_ok=True)
+        shutil.rmtree(VENDORED_PROJECT_DIR / ".zig-cache", ignore_errors=True)
+        try:
+            zig_build(
+                BuildOptions(target=target),
+                cwd=VENDORED_PROJECT_DIR,
+                extra_args=["-p", str(VENDORED_PROJECT_DIR / "_smelt_pyconfig_scratch")],
+            )
+        except subprocess.CalledProcessError:
+            pass
+        unpatched_pyconfig = cpython_dir / "pyconfig.h"
+        if not unpatched_pyconfig.exists():
+            raise OwnPythonError(
+                f"{unpatched_pyconfig} is missing after the bootstrap build for target "
+                f"{target!r}: ./configure itself failed, rather than just the "
+                "musl-specific compile errors this bootstrap expects to see."
+            )
+        dest_dir = PYCONFIG_DIR / target
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / "pyconfig.h"
+        _patch_musl_pyconfig(unpatched_pyconfig, dest)
+    return assert_path_exists(dest)
+
+
 def own_python_cache_dir(
     target: str | None = None,
     *,
     debug: bool = False,
     disabled_libraries: Iterable[str] = (),
+    linkage: OwnPythonLinkage = DEFAULT_OWN_PYTHON_LINKAGE,
+    static_modules: Iterable[str] = (),
 ) -> Path:
     """
     Where `build_own_python` caches its build for `target`, build mode and library
     option set.
 
-    Keyed on all three, because none of them produce interchangeable trees: a native
-    and a musl build of the same CPython are not, a stripped and an unstripped one are
-    not, and an `openssl=off` build is missing `_ssl.so` outright -- sharing one
-    directory would make whichever ran first silently satisfy the others' cache check.
+    Keyed on all of these, because none of them produce interchangeable trees: a
+    native and a musl build of the same CPython are not, a stripped and an unstripped
+    one are not, an `openssl=off` build is missing `_ssl.so` outright, and a
+    `linkage="static"` build is a different executable shape entirely (no
+    `libpythonX.Y.so`, a different set of modules built in rather than dlopen'd) --
+    sharing one directory would make whichever ran first silently satisfy the others'
+    cache check.
 
     The all-defaults configuration keeps the bare `native` (or `<target>`) name it has
     always had, rather than growing an "everything on" fingerprint. That is not
     cosmetic: it is what lets an interpreter cached before tailoring existed keep being
     reused, instead of turning every untailored build into a ten-minute rebuild.
-    Disabled libraries are spelled out rather than hashed, so the directory says what
-    it holds to whoever goes looking in `~/.cache/smelt/metapython`.
+    Disabled libraries and static modules are spelled out rather than hashed, so the
+    directory says what it holds to whoever goes looking in `~/.cache/smelt/metapython`.
     """
     name = f"{target or 'native'}{'-debug' if debug else ''}"
     disabled = sorted(set(disabled_libraries))
     if disabled:
         name = f"{name}-without-{'-'.join(disabled)}"
+    if linkage != "dynamic":
+        name = f"{name}-{linkage}"
+    static = sorted(set(static_modules))
+    if static:
+        name = f"{name}-builtin-{'-'.join(static)}"
     return _METAPYTHON_CACHE_DIR / name
 
 
@@ -726,6 +815,9 @@ def build_own_python(
     no_cache: bool = False,
     debug: bool = False,
     disabled_libraries: Iterable[str] = (),
+    linkage: OwnPythonLinkage = DEFAULT_OWN_PYTHON_LINKAGE,
+    static_modules: Iterable[str] = (),
+    pyconfig_header: PathExists | None = None,
 ) -> PathExists:
     """
     Builds smelt's own CPython through the sibling `meta-python` project (Zig-driven:
@@ -744,16 +836,31 @@ def build_own_python(
     is reset at the start of each one, so overlapping builds corrupt each other rather
     than merely duplicating work.
 
-    Linkage: `python-linkage=dynamic` + `libc-linkage=dynamic`, i.e. a real
-    `libpythonX.Y.so` that both `bin/python` and the stdlib's extension modules link
-    against. `libc-linkage=static` is deliberately not used even though it sounds like
-    the more standalone choice: meta-python rejects it combined with any dynamically
-    linked Python at all, and that is an ELF constraint rather than a tunable -- a
-    fully static executable has no dynamic section, so it cannot depend on any `.so`,
-    by build-time link or by `dlopen`. There is no "static libc, dynamic everything
-    else" for it to reach. A genuinely static interpreter needs every extension module
-    compiled *into* it (`-Dstatic-modules=`), which in turn requires
-    `python-linkage=off` -- and that leaves no `libpython` at all.
+    `linkage="dynamic"` (the default): `python-linkage=dynamic` + `libc-linkage=dynamic`,
+    i.e. a real `libpythonX.Y.so` that both `bin/python` and the stdlib's extension
+    modules link against.
+
+    `linkage="static"`: `python-linkage=off` + `libc-linkage=static` -- one monolithic,
+    static-PIE `bin/python`, no `libpythonX.Y.so` at all. A fully static executable has
+    no dynamic section, so it cannot depend on any `.so` by build-time link *or* by
+    `dlopen()` -- there is no "static libc, dynamic everything else" to reach, which is
+    why this is a single `linkage` choice rather than two independent knobs. `dlopen()`
+    itself is then a dead end for extension modules: it either fails outright (glibc,
+    categorically, no workaround) or compiles clean but fails at runtime with musl's own
+    `dlerror()` ("Dynamic loading not supported", confirmed absent from CPython's own
+    source -- musl's libc refusing, not a CPython-side check). `static_modules` is the
+    only way found so far to get a working extension module under `linkage="static"`:
+    named modules are compiled straight into `bin/python` (`-Dstatic-modules=`, CPython's
+    own "builtin module" mechanism -- a `PyInit_<name>` linked in and registered in a
+    static `_PyImport_Inittab`, no `.so`, no `dlopen()` of any kind). Verified end to end
+    for `x86_64-linux-musl` only (see meta-python's own `roadmap.md`); not blocked for a
+    glibc target, but every accelerator module *not* named in `static_modules` is simply
+    unusable there, since glibc's static `dlopen()` has no fix to lean on.
+
+    A `linkage="static"` interpreter has no `libpythonX.Y.so` for
+    `smelt.static_python.build_static_interpreter` (`dist.py`'s own `static_modules`/
+    `use_inittab`, for smelt's *own* compiled extensions) to relink against -- the two
+    mechanisms do not compose today; see `static_pie_musl_plan.md`.
 
     `disabled_libraries` names meta-python libraries to compile *without*
     (`-D<library>-linkage=off`), one of the two levers a tailored interpreter pulls
@@ -764,6 +871,14 @@ def build_own_python(
     (minutes) per distinct option set. Names outside `LIBRARY_MODULES` are refused
     rather than passed through, since `zig build` would reject them anyway and it is
     cheaper to hear about a typo now.
+
+    `static_modules` names CPython stdlib extension modules (e.g. `_socket`, `zlib`,
+    `_json`) to compile as builtins instead of `lib-dynload/*.so` -- see `linkage`
+    above for why this exists. Only meaningful with `linkage="static"`; raises
+    `OwnPythonError` otherwise, the same "fail on the typo/misuse now" reasoning as
+    `disabled_libraries`' own validation. Caller-supplied, not auto-discovered from a
+    closure the way `disabled_libraries` can be (see `plan_disabled_libraries`) -- a
+    natural follow-up, not implemented here.
 
     Every other entry of `libraries` is left at meta-python's own defaults
     (`zlib`/`openssl`/`libffi` static, the rest dynamic or off). If a static library
@@ -797,17 +912,36 @@ def build_own_python(
       mode B delivers today, and it keeps working with the host's third-party
       extension modules, which is what makes it usable at all.
     * **musl** (`"x86_64-linux-musl"` and friends): the genuinely host-independent
-      shape, and **untested on this path** -- the bootstrap below is carried over from
-      earlier work and no mode B distribution has been built with it. Two real costs.
-      First, meta-python never passes `--host=`, so `./configure` runs natively and
-      feature-detects against the build machine's glibc, producing a `pyconfig.h` that
-      claims glibc-only features; that is handled by a two-phase bootstrap (a first
-      `zig_build` *expected* to fail, whose only purpose is making `./configure`
-      produce a base `pyconfig.h`, then `_patch_musl_pyconfig`, then the real build
-      with `-Dpyconfig-header=`). Second, and not fixable here: every third-party
+      shape. meta-python never passes `--host=` to `./configure`, so it runs natively
+      and feature-detects against the build machine's own libc -- wrong by
+      construction for a musl target on a glibc machine (see `pyconfig_header` below
+      for how that is worked around) -- and, not fixable here: every third-party
       extension module the application ships still comes from the host and is
       glibc-linked, so it will not load under a musl interpreter.
+
+    `pyconfig_header` is an escape hatch for library callers, not something the CLI or
+    an entrypoint declaration exposes: pass an explicit `pyconfig.h` to use verbatim
+    (copied in *after* `./configure` runs, overriding its own output -- same mechanism
+    `metapython.compile.BuildOptions.pyconfig_header` has always had). Left `None` (the
+    default), `smelt.pyconfig.resolve_pyconfig_header(target, debug=debug)` picks one
+    automatically: the pyconfig.h of the interpreter currently running smelt for a
+    native build (nothing `./configure` could tell us that a real, already-built file
+    for this exact machine doesn't already answer), or a checked-in, target-specific
+    file for an explicit target (never derived from the host -- whatever libc the venv
+    running smelt happens to use, a musl target always gets the musl file, see
+    `generate_pyconfig_template`) -- falling back to `None` (i.e. `./configure`'s own
+    detection, unchanged) when neither is available. Either way, meta-python's own
+    `build.zig` still auto-patches the musl-specific macros it knows about on top of
+    whatever ends up on disk, so a target with no checked-in template yet is workable,
+    just less robust against a mismatch nobody has hit yet than one with a template.
     """
+    static = tuple(static_modules)
+    if static and linkage != "static":
+        raise OwnPythonError(
+            f"static_modules names {sorted(static)}, but linkage={linkage!r}: "
+            'compiling modules as builtins only has an effect under linkage="static" '
+            "(python-linkage=off) -- pass linkage=\"static\", or drop static_modules."
+        )
     _ensure_metapython_installed()
     if target is not None:
         _validate_windows_zig_target(target)
@@ -821,7 +955,9 @@ def build_own_python(
     dest = (
         Path(dest_dir)
         if dest_dir is not None
-        else own_python_cache_dir(target, debug=debug, disabled_libraries=disabled)
+        else own_python_cache_dir(
+            target, debug=debug, disabled_libraries=disabled, linkage=linkage, static_modules=static
+        )
     )
     bin_path = dest / (
         WINDOWS_INTERPRETER_REL_PATH if is_windows_zig_target(target) else INTERPRETER_REL_PATH
@@ -839,7 +975,17 @@ def build_own_python(
         if not no_cache and bin_path.exists():
             _logger.info("Reusing the interpreter built at %s while waiting", dest)
             return assert_path_exists(dest)
-        return _build_interpreter(dest, bin_path, target=target, debug=debug, disabled=disabled)
+        resolved_pyconfig_header = pyconfig_header or resolve_pyconfig_header(target, debug=debug)
+        return _build_interpreter(
+            dest,
+            bin_path,
+            target=target,
+            debug=debug,
+            disabled=disabled,
+            linkage=linkage,
+            static=static,
+            pyconfig_header=resolved_pyconfig_header,
+        )
 
 
 def _build_interpreter(
@@ -849,6 +995,9 @@ def _build_interpreter(
     target: str | None,
     debug: bool,
     disabled: set[str],
+    linkage: OwnPythonLinkage = DEFAULT_OWN_PYTHON_LINKAGE,
+    static: tuple[str, ...] = (),
+    pyconfig_header: PathExists | None = None,
 ) -> PathExists:
     """
     Runs the actual meta-python build into `dest`, assuming the caller holds
@@ -878,8 +1027,17 @@ def _build_interpreter(
         optimize=OptimizeMode.DEBUG if debug else OptimizeMode.RELEASE_FAST,
         # Not implied by `optimize`, see this function's docstring.
         strip=not debug,
-        libc_linkage=LibCLinkage.DYNAMIC,
-        python_linkage=Linkage.DYNAMIC,
+        libc_linkage=LibCLinkage.STATIC if linkage == "static" else LibCLinkage.DYNAMIC,
+        python_linkage=Linkage.OFF if linkage == "static" else Linkage.DYNAMIC,
+        static_modules=static,
+        # A known-good pyconfig.h (see `smelt.pyconfig`), when one was resolved --
+        # `None` here (a target with no checked-in template and no matching host
+        # build) leaves `./configure`'s own detection in place, exactly as before this
+        # existed. Either way, meta-python's own `build.zig` still auto-patches the
+        # musl-specific macros it knows about on top of whatever ends up on disk
+        # (idempotent against an already-correct value), so this is additive, not the
+        # only thing standing between a musl build and a wrong `pyconfig.h`.
+        pyconfig_header=pyconfig_header,
     )
 
     cpython_dir = VENDORED_PROJECT_DIR / "cpython"
@@ -902,24 +1060,6 @@ def _build_interpreter(
     # `-p`: without an explicit install prefix, `zig build install` writes into
     # `zig-out` next to `build.zig` -- i.e. inside site-packages.
     install_prefix = ["-p", str(dest)]
-    if _is_musl_target(target):
-        try:
-            # Expected to fail: this pass exists only to make `./configure` run and
-            # produce a base `pyconfig.h` to patch below.
-            zig_build(options, cwd=VENDORED_PROJECT_DIR, extra_args=install_prefix)
-        except subprocess.CalledProcessError:
-            pass
-        unpatched_pyconfig = cpython_dir / "pyconfig.h"
-        if not unpatched_pyconfig.exists():
-            raise OwnPythonError(
-                f"{unpatched_pyconfig} is missing after the bootstrap build for target "
-                f"{target!r}: ./configure itself failed, rather than just the "
-                "musl-specific compile errors this bootstrap expects to see."
-            )
-        patched_pyconfig = dest / "_smelt_pyconfig_musl.h"
-        _patch_musl_pyconfig(unpatched_pyconfig, patched_pyconfig)
-        options = replace(options, pyconfig_header=patched_pyconfig)
-
     try:
         zig_build(options, cwd=VENDORED_PROJECT_DIR, extra_args=install_prefix)
     except subprocess.CalledProcessError as exc:
