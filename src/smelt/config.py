@@ -277,6 +277,17 @@ EntrypointOptions = TypedDict(
         # PyImport_AppendInittab, instead of being refused. Off by default -- see
         # `smelt.dist.DEFAULT_USE_INITTAB`.
         "use-inittab": bool,
+        # Whether a `ModuleKind.EXTENSION` closure entry is reinstalled for the actual
+        # target instead of copied from the local environment. Off by default -- see
+        # `smelt.isolated_build.DEFAULT_ISOLATED_BUILD`.
+        "isolated-build": bool,
+        # Which version-resolution strategy a reinstalled native dependency uses --
+        # see `smelt.isolated_build.IsolatedBuildVersions` and
+        # `DEFAULT_ISOLATED_BUILD_VERSIONS`.
+        "isolated-build-versions": str,
+        # Target triple `isolated-build` reinstalls native dependencies for (same
+        # spelling as `own-python-target`); omitted means the host's own platform.
+        "isolated-build-target": str,
     },
     total=False,
 )
@@ -303,6 +314,10 @@ class SmeltConfig:
     auto_mode: AutoMode = "off"
     backend_priority_order: list[Backend] = field(default_factory=lambda: [Backend.NUITKA])
     report_path: str | None = None
+    #: Raw `[project.dependencies]` specifier strings (PEP 621), for `isolated-build`'s
+    #: `"pyproject"` version-resolution strategy -- see
+    #: `smelt.isolated_build.resolve_isolated_build_version`.
+    dependencies: list[str] = field(default_factory=list)
 
     @classmethod
     def from_toml_data(
@@ -310,6 +325,7 @@ class SmeltConfig:
         toml_data: dict[str, Any],
         project_root: Path | None = None,
         project_scripts: dict[str, str] | None = None,
+        project_dependencies: list[str] | None = None,
     ) -> Self:
         # operate on a copy: callers (e.g. the hatch build hook) keep their own
         # reference to `toml_data` around for error reporting after this call.
@@ -439,6 +455,7 @@ class SmeltConfig:
             backend_priority_order=backend_priority_order,
             entrypoints=entrypoints,
             script_names=script_names,
+            dependencies=project_dependencies or [],
             **toml_data,
         )
 

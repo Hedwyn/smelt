@@ -213,9 +213,9 @@ def test_run_backend_static_link_stages_eligible_modules_only() -> None:
         assert any(name.startswith("cli") for name in built_names), (
             "the Nuitka module must still be linked and placed as an ordinary .so"
         )
-        assert not any(
-            name.startswith(("fib", "hello", "zighello")) for name in built_names
-        ), "a staged module must not also appear as a placed artifact"
+        assert not any(name.startswith(("fib", "hello", "zighello")) for name in built_names), (
+            "a staged module must not also appear as a placed artifact"
+        )
         assert result.static_build_dir is not None
     finally:
         if result.static_build_dir is not None:

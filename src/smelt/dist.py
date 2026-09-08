@@ -88,6 +88,12 @@ from smelt.explorer import (
 )
 from smelt.explorer import optional_modules as explorer_optional_modules
 from smelt.hooks import hidden_imports
+from smelt.isolated_build import (
+    DEFAULT_ISOLATED_BUILD,
+    DEFAULT_ISOLATED_BUILD_VERSIONS,
+    ISOLATED_BUILD_VERSIONS,
+    IsolatedBuildVersions,
+)
 from smelt.native_deps import (
     BundledNatives,
     bundle_native_dependencies,
@@ -634,6 +640,72 @@ def resolve_drop_optional_imports(
             f"Invalid drop-optional-imports {declared!r}, expected a boolean: false "
             "(the default, ship what the closure reached) or true (leave out every "
             "module its own importer handles the absence of)."
+        )
+    return declared
+
+
+def resolve_isolated_build(
+    entrypoint_options: EntrypointOptions,
+    isolated_build: bool | None = None,
+) -> bool:
+    """
+    Whether a `ModuleKind.EXTENSION` closure entry is reinstalled for the actual
+    target instead of copied from the local environment: `isolated_build` where the
+    caller decided (the CLI wins over the declaration), then the entrypoint's own
+    `isolated-build` option, then `DEFAULT_ISOLATED_BUILD` (off).
+    """
+    if isolated_build is not None:
+        return isolated_build
+    declared = entrypoint_options.get("isolated-build", DEFAULT_ISOLATED_BUILD)
+    if not isinstance(declared, bool):
+        raise DistError(
+            f"Invalid isolated-build {declared!r}, expected a boolean: true (reinstall "
+            "third-party native dependencies for the actual target instead of copying "
+            "them from the local environment) or false (the default -- copy them as-is)."
+        )
+    return declared
+
+
+def resolve_isolated_build_versions(
+    entrypoint_options: EntrypointOptions,
+    isolated_build_versions: IsolatedBuildVersions | None = None,
+) -> IsolatedBuildVersions:
+    """
+    Which version-resolution strategy `isolated-build` uses for a reinstalled native
+    dependency: `isolated_build_versions` where the caller decided (the CLI wins over
+    the declaration), then the entrypoint's own `isolated-build-versions` option, then
+    `DEFAULT_ISOLATED_BUILD_VERSIONS`.
+    """
+    declared = isolated_build_versions or entrypoint_options.get(
+        "isolated-build-versions", DEFAULT_ISOLATED_BUILD_VERSIONS
+    )
+    for strategy in ISOLATED_BUILD_VERSIONS:
+        if declared == strategy:
+            return strategy
+    raise DistError(
+        f"Invalid isolated-build-versions {declared!r}, expected one of "
+        f"{ISOLATED_BUILD_VERSIONS!r}."
+    )
+
+
+def resolve_isolated_build_target(
+    entrypoint_options: EntrypointOptions,
+    isolated_build_target: str | None = None,
+) -> str | None:
+    """
+    The target triple `isolated-build` reinstalls native dependencies for (same
+    spelling as `own_python_target`; `None` means the host's own platform):
+    `isolated_build_target` where the caller decided (the CLI wins over the
+    declaration), then the entrypoint's own `isolated-build-target` option, then
+    `None` -- there is no sensible default besides the host.
+    """
+    if isolated_build_target is not None:
+        return isolated_build_target
+    declared = entrypoint_options.get("isolated-build-target")
+    if declared is not None and not isinstance(declared, str):
+        raise DistError(
+            f"Invalid isolated-build-target {declared!r}, expected a string (a target "
+            'triple, e.g. "x86_64-linux-musl") or unset.'
         )
     return declared
 

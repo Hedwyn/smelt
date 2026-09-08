@@ -189,10 +189,25 @@ def parse_config_from_pyproject(
             raise SmeltConfigError(f"`project.scripts.{name}` should be a string, got {target}. ")
         project_scripts[name] = target
 
+    project_section = toml_get_nested_section(toml_data, "project")
+    project_dependencies_decl = project_section.get("dependencies", [])
+    if not isinstance(project_dependencies_decl, list):
+        raise SmeltConfigError(
+            f"`project.dependencies` section should be a list, got {project_dependencies_decl}. "
+        )
+    project_dependencies: list[str] = []
+    for dependency in project_dependencies_decl:
+        if not isinstance(dependency, str):
+            raise SmeltConfigError(
+                f"`project.dependencies` entries should be strings, got {dependency}. "
+            )
+        project_dependencies.append(dependency)
+
     return SmeltConfig.from_toml_data(
         smelt_config,
         project_root=project_root,
         project_scripts=project_scripts,
+        project_dependencies=project_dependencies,
     )
 
 
