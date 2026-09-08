@@ -429,6 +429,16 @@ def build_standalone_binary(
     "is what zipimport reads.",
 )
 @click.option(
+    "--use-inittab/--no-use-inittab",
+    "use_inittab",
+    default=None,
+    help="With --python own, statically link smelt's own compiled extensions into the "
+    "interpreter (PyImport_AppendInittab) instead of shipping them as .so files -- "
+    "skips dlopen() and RPATH for those modules entirely. Off by default: this "
+    "replaces the interpreter's own entrypoint, and a bad build has no .so fallback "
+    "to fall back to. Still experimental -- see compiling_pipeline_refactor.md.",
+)
+@click.option(
     "--no-version-guard",
     is_flag=True,
     default=False,
@@ -512,6 +522,7 @@ def build_dist_folder(
     onefile: bool | None,
     onefile_only: bool,
     onefile_compression: Literal["xz", "gzip", "none"] | None,
+    use_inittab: bool | None,
     no_version_guard: bool,
     no_isolate: bool,
     exclude_modules: tuple[str, ...],
@@ -566,6 +577,7 @@ def build_dist_folder(
         onefile=onefile,
         onefile_only=onefile_only,
         onefile_compression=onefile_compression,
+        use_inittab=use_inittab,
     )
     click.echo(dist_report.render())
     click.echo("")

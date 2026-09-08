@@ -272,6 +272,11 @@ EntrypointOptions = TypedDict(
         # How that single file's payload is compressed: "xz" (the default, smallest),
         # "gzip" (faster to inflate on the target's first run) or "none".
         "onefile-compression": str,
+        # Whether `static_modules` (smelt's own compiled extensions passed to
+        # `build_dist`) are actually linked into the `python = "own"` interpreter via
+        # PyImport_AppendInittab, instead of being refused. Off by default -- see
+        # `smelt.dist.DEFAULT_USE_INITTAB`.
+        "use-inittab": bool,
     },
     total=False,
 )

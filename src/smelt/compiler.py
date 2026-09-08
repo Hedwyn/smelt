@@ -463,6 +463,54 @@ def compile_extension(
     return assert_path_exists(so_path)
 
 
+def compile_extension_objects(
+    extension: Path | str | Extension,
+    dest_folder: PathLike[str],
+    compiler: Compiler | None = None,
+    crosscompile: SupportedPlatforms | None = None,
+) -> list[PathExists]:
+    """
+    Compiles `extension` the same way `compile_extension` does, but stops short of the
+    final link step and returns the relocatable object files instead of a shared
+    library.
+
+    For a backend whose module is known at `smelt` build time (as opposed to a
+    third-party wheel's prebuilt `.so`), these object files are what lets it skip the
+    `.so` + `dlopen()` + RPATH dance entirely: handed to
+    `smelt.static_python.build_static_interpreter`, they get linked straight into a
+    mode `own` distribution's interpreter and registered with `PyImport_AppendInittab`
+    instead.
+
+    Unlike `compile_extension`, `dest_folder` is required and not cleaned up here: the
+    objects have to outlive this call to be of any use to that later build step, so
+    there is no tempdir to hide the persistence decision behind.
+    """
+    compiler = compiler or ZigCompiler()
+    include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
+
+    if isinstance(extension, (str, Path)):
+        if not os.path.exists(extension):
+            raise FileNotFoundError(f"Extension does not exists: {extension}")
+
+        extension = Path(extension)
+        if extension.suffix not in compiler.src_extensions:
+            raise ValueError(
+                f"Unsupported extension: {extension.suffix} "
+                f"Supported values: {','.join(compiler.src_extensions)}"
+            )
+        extension_obj = Extension(
+            name=extension.name.replace(extension.suffix, ""),
+            sources=[str(extension)],
+        )
+    else:
+        extension_obj = extension
+
+    objects, _extra_preargs = _compile_extension_sources(
+        compiler, extension_obj, include_dirs, crosscompile, str(dest_folder)
+    )
+    return [assert_path_exists(obj) for obj in objects]
+
+
 def compile_executable(
     extension: Path | str | Extension,
     compiler: Compiler | None = None,

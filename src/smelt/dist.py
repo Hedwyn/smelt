@@ -59,7 +59,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Final, Iterable, Iterator, Literal
+from typing import Final, Iterable, Iterator, Literal, Mapping
 
 from smelt.backend import (
     collect_built_artifacts,
@@ -118,6 +118,7 @@ from smelt.own_python import (
     stage_interpreter,
 )
 from smelt.process import call_command
+from smelt.static_python import build_static_interpreter
 from smelt.utils import (
     ImportPath,
     PathExists,
@@ -212,6 +213,16 @@ DEFAULT_TAILOR_INTERPRETER: Final[bool] = True
 #: build reports what is on the table and leaves the decision where the knowledge is.
 DEFAULT_DROP_OPTIONAL_IMPORTS: Final[bool] = False
 
+#: Whether `static_modules` is honoured at all (see `build_dist`'s own doc). **Off by
+#: default**: static linking replaces a mode `own` distribution's `bin/python` with a
+#: freshly built one (see `smelt.static_python`), and unlike every other flag here that
+#: only prunes or reorganises the folder, a broken build of *this* has no fallback --
+#: there is no other `bin/python` to fall back to once the original has been
+#: overwritten. Kept behind an explicit opt-in until the eligibility checks in
+#: `compiling_pipeline_refactor.md` land, rather than defaulting on the moment
+#: `static_modules` is non-empty.
+DEFAULT_USE_INITTAB: Final[bool] = False
+
 #: How long the tracing subprocess is given before it is given up on. Importing an
 #: entrypoint is normally near-instantaneous; a module that blocks on import (opening
 #: a socket, waiting on a lock) would otherwise hang the build indefinitely.
@@ -287,6 +298,12 @@ class DistReport:
     #: `skipped` because one of them decides whether a single-file distribution can be
     #: imported straight out of its zip (`onefile.must_extract`).
     namespace_packages: list[ImportPath] = field(default_factory=list)
+    #: Modules linked straight into the interpreter (see `smelt.static_python`)
+    #: instead of shipped as a loose `.so` -- mode `own` only. Tracked separately from
+    #: `natives`/`skipped` because neither fits: there is no file in the distribution
+    #: to record as a `NativeArtifact`, and it is not left out the way `skipped`'s
+    #: other entries are.
+    static_modules: list[ImportPath] = field(default_factory=list)
     #: Where the single-file form will be written, known before it is packed so that
     #: the instructions shipped *inside* it can name it.
     onefile_path: Path | None = None
@@ -319,6 +336,7 @@ class DistReport:
             f"({'dropped' if self.dropped_optional else 'shipped'})",
             f"Bytecode modules:     {len(self.bytecode)}",
             f"Native artifacts:     {len(self.natives)}",
+            f"Static modules:       {len(self.static_modules)}",
             f"Bundled libraries:    {len(self.native_deps.dependencies)}"
             + (
                 ""
@@ -375,6 +393,7 @@ class DistReport:
                 }
                 for artifact in self.natives
             ],
+            "static_modules": sorted(self.static_modules),
             "bundled_libraries": {
                 basename: str(source)
                 for basename, source in sorted(self.native_deps.dependencies.items())
@@ -571,6 +590,27 @@ def resolve_tailor_interpreter(
             f"Invalid tailor-interpreter {declared!r}, expected a boolean: true (the "
             "default, ship only what the application needs) or false (ship the whole "
             "standard library)."
+        )
+    return declared
+
+
+def resolve_use_inittab(
+    entrypoint_options: EntrypointOptions,
+    use_inittab: bool | None = None,
+) -> bool:
+    """
+    Whether `static_modules` is honoured at all (see `DEFAULT_USE_INITTAB`):
+    `use_inittab` where the caller decided (the CLI wins over the declaration), then
+    the entrypoint's own `use-inittab` option, then `DEFAULT_USE_INITTAB` (off).
+    """
+    if use_inittab is not None:
+        return use_inittab
+    declared = entrypoint_options.get("use-inittab", DEFAULT_USE_INITTAB)
+    if not isinstance(declared, bool):
+        raise DistError(
+            f"Invalid use-inittab {declared!r}, expected a boolean: true (statically "
+            "link static_modules into the interpreter) or false (the default -- ship "
+            "them as ordinary .so files)."
         )
     return declared
 
@@ -1507,6 +1547,8 @@ def build_dist(
     onefile: bool | None = None,
     onefile_only: bool = False,
     onefile_compression: str | None = None,
+    static_modules: Mapping[str, Iterable[PathExists]] = {},
+    use_inittab: bool | None = None,
 ) -> DistReport:
     """
     Assembles the distribution folder for one of `config`'s entrypoints under
@@ -1552,6 +1594,23 @@ def build_dist(
     that payload is compressed, and `onefile_only` deletes the folder afterwards --
     for a build whose output is published rather than inspected.
 
+    `static_modules` names modules from `built` (smelt's own compiled extensions) to
+    link straight into the interpreter instead of shipping as a loose `.so` (see
+    `smelt.static_python`): import path -> its already-compiled object files/static
+    archives, in link order. Mode `own` only -- there is no interpreter of smelt's own
+    to link into in mode `byo` -- and POSIX only for now (no `libpythonX.Y` to link
+    against yet on a Windows target). Every named import path is dropped from the
+    ordinary native-artifact copy below; getting the object files themselves is on the
+    caller (see `smelt.compiler.compile_extension_objects`).
+
+    `static_modules` only takes effect when `use_inittab` resolves true (see
+    `resolve_use_inittab`, `DEFAULT_USE_INITTAB`) -- **off by default**, and passing a
+    non-empty `static_modules` without it raises rather than silently ignoring it.
+    Static linking overwrites the interpreter's own entrypoint with a freshly built
+    one; unlike every other option here, a bad build of *that* leaves nothing to fall
+    back to, so it stays behind an explicit opt-in until the eligibility checks
+    described in `compiling_pipeline_refactor.md` land.
+
     `include_modules`, `include_packages`, `include_package_data`,
     `include_distribution_metadata` and `exclude_modules` are each additive over what
     the entrypoint declares under the same name in its own options.
@@ -1570,6 +1629,12 @@ def build_dist(
 
     entrypoint_options = config.entrypoints[entrypoint_spec]
     built = collect_built_artifacts(config, path_solver)
+    unknown_static = set(static_modules) - set(built)
+    if unknown_static:
+        raise DistError(
+            f"static_modules names {sorted(unknown_static)}, which smelt did not "
+            f"build for this project. Known built modules: {sorted(built)}."
+        )
     declared_discovery = discovery or entrypoint_options.get("discovery", DEFAULT_DISCOVERY)
     if declared_discovery not in ("static", "trace", "both"):
         raise DistError(
@@ -1578,6 +1643,19 @@ def build_dist(
         )
     resolved_discovery: DiscoveryMode = declared_discovery
     resolved_python = resolve_dist_python(entrypoint_options, python)
+    resolved_use_inittab = resolve_use_inittab(entrypoint_options, use_inittab)
+    if static_modules and not resolved_use_inittab:
+        raise DistError(
+            f"static_modules names {sorted(static_modules)}, but use_inittab is off "
+            f"(the default, see DEFAULT_USE_INITTAB): pass use_inittab=True (CLI: "
+            "--use-inittab) to actually link them into the interpreter."
+        )
+    if static_modules and resolved_python != "own":
+        raise DistError(
+            f"static_modules names {sorted(static_modules)}, but this distribution "
+            f"runs on python={resolved_python!r}: static linking has an interpreter "
+            "of smelt's own to link into only in mode 'own'."
+        )
     drop_optional = resolve_drop_optional_imports(entrypoint_options, drop_optional_imports)
     pack_onefile = resolve_onefile(entrypoint_options, onefile)
     compression = resolve_onefile_compression(entrypoint_options, onefile_compression)
@@ -1626,6 +1704,12 @@ def build_dist(
         target = own_python_target or entrypoint_options.get(
             "own-python-target", DEFAULT_OWN_PYTHON_TARGET
         )
+        if static_modules and is_windows_zig_target(target):
+            raise DistError(
+                f"static_modules names {sorted(static_modules)}, but target {target!r} "
+                "is a Windows target: there is no libpythonX.Y to link them against "
+                "yet there (see smelt.static_python)."
+            )
         # The closure's own standard library modules -- what `build_dist` used to
         # discard as "the target interpreter brings its own", and what decides the
         # interpreter's contents now.
@@ -1702,6 +1786,11 @@ def build_dist(
     # may well be imported in a way static discovery cannot see.
     placed_natives: set[Path] = set()
     for import_path, artifacts in built.items():
+        if import_path in static_modules:
+            # Linked straight into the interpreter after it is staged, below -- not
+            # copied in as a `.so` at all (see `smelt.static_python`).
+            report.static_modules.append(import_path)
+            continue
         for artifact in artifacts:
             native = _copy_native(import_path, artifact, payload_root, "smelt")
             if native.dest_rel_path in placed_natives:
@@ -1816,6 +1905,13 @@ def build_dist(
         report.interpreter = stage_interpreter(
             built_interpreter, dist_root, requirements=interpreter_requirements
         )
+        if static_modules:
+            # Operates on the *staged* prefix (inside `dist_root`), never on
+            # `built_interpreter` (meta-python's shared build cache): which modules
+            # are statically linked in is a property of this one distribution, and
+            # baking it into the cache would corrupt it for every other project
+            # reusing the same cached interpreter (see `static_python`'s docstring).
+            build_static_interpreter(dist_root / report.interpreter.prefix_rel_path, static_modules)
         report.launcher = write_launcher_shim(
             launcher_name(config, entrypoint_spec), dist_root, report.interpreter
         )
