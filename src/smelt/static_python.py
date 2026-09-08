@@ -38,8 +38,8 @@ from distutils.compilers.C.unix import Compiler
 from setuptools import Extension
 
 from smelt.compiler import ZigCompiler, _compile_extension_sources
-from smelt.native_deps import set_rpath
-from smelt.own_python import INTERPRETER_REL_PATH
+from smelt.native_deps import ldd_dependencies, set_rpath
+from smelt.own_python import INTERPRETER_HOST_DLL_PREFIXES, INTERPRETER_REL_PATH
 from smelt.utils import PathExists, SmeltError, assert_path_exists
 
 _logger = logging.getLogger(__name__)
@@ -120,6 +120,25 @@ def _find_libpython(prefix: PathExists) -> PathExists:
     return assert_path_exists(candidates[0])
 
 
+def _unexpected_dependencies(binary_path: PathExists) -> list[str]:
+    """
+    Tier 2 (authoritative, after the trial static link) of the static-linking
+    eligibility check described in `compiling_pipeline_refactor.md`: every
+    `ldd`-resolved dependency of `binary_path` that is neither host-supplied
+    (`INTERPRETER_HOST_DLL_PREFIXES`) nor `libpython` itself.
+
+    Tier 1 (`smelt.backend.is_static_link_eligible`) only catches a module that
+    *declares* an external library via `Extension.libraries`/`extra_link_args`; this
+    catches one pulled in implicitly, which Tier 1's purely structural check cannot
+    see by construction.
+    """
+    return sorted(
+        name
+        for name in ldd_dependencies(binary_path)
+        if not name.startswith(INTERPRETER_HOST_DLL_PREFIXES) and not name.startswith("libpython")
+    )
+
+
 def build_static_interpreter(
     prefix: PathExists,
     static_modules: Mapping[str, Iterable[PathExists]],
@@ -185,6 +204,17 @@ def build_static_interpreter(
         )
         new_bin_path = assert_path_exists(Path(build_folder) / new_bin_name)
         set_rpath(new_bin_path, _INTERPRETER_RPATH)
+
+        if unexpected := _unexpected_dependencies(new_bin_path):
+            raise StaticPythonError(
+                f"Statically linking {sorted(static_modules)} pulled in {unexpected} "
+                "beyond the host-supplied libc/loader and libpython itself. Folding "
+                "that into bin/python would turn a missing dependency into a hard, "
+                "whole-process startup failure (refused before main() even runs) "
+                "instead of the soft, per-import one a loose .so gets. The existing "
+                "bin/python was left untouched; ship the offending module as an "
+                "ordinary .so instead."
+            )
 
         # Replace atomically: `bin_path` may already be the target of an in-progress
         # run of a previous build, and a half-written executable there is worse than

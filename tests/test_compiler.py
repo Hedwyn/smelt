@@ -8,10 +8,12 @@ Test suite for the C-extension compile tools.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 import platform
 import shutil
 import sysconfig
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final, Generator, Literal, assert_never, cast, get_args
@@ -24,7 +26,9 @@ from smelt.compiler import (
     PYCONFIG_PATH,
     SupportedPlatforms,
     compile_extension,
+    compile_extension_objects,
     get_extension_suffix,
+    link_extension_objects,
 )
 
 TEST_FOLDER: Final[Path] = Path(__file__).parent
@@ -237,5 +241,45 @@ def test_compiler_built_mypyc(mod_name: TestModule) -> None:
                     "Entrypoint module did not run successfully.: " + shared_lib_path
                 )
 
+            case _ as unreachable:
+                assert_never(unreachable)
+
+
+@pytest.mark.parametrize("ext_name", AVAILABLE_EXTENSIONS)
+def test_compile_extension_objects_produces_object_files(ext_name: TestExtension) -> None:
+    """
+    `compile_extension_objects` stops short of linking: it must hand back `.o` files,
+    not a shared library, and must leave them on disk (unlike `compile_extension`,
+    which cleans up its own scratch directory).
+    """
+    with tempfile.TemporaryDirectory() as dest_folder:
+        objects = compile_extension_objects(get_extension_path(ext_name), dest_folder)
+        assert objects
+        for obj in objects:
+            assert os.path.exists(obj)
+            assert str(obj).endswith(".o")
+
+
+@pytest.mark.parametrize("ext_name", AVAILABLE_EXTENSIONS)
+def test_link_extension_objects_matches_compile_extension(ext_name: TestExtension) -> None:
+    """
+    `compile_extension_objects` + `link_extension_objects` must produce a working
+    shared library equivalent to `compile_extension`'s all-in-one behavior -- the seam
+    the refactor in `compiling_pipeline_refactor.md` opens up between them.
+    """
+    so_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    with tempfile.TemporaryDirectory() as dest_folder:
+        objects = compile_extension_objects(get_extension_path(ext_name), dest_folder)
+        so_path = link_extension_objects(objects, ext_name + so_suffix, dest_folder=dest_folder)
+        assert os.path.exists(so_path)
+
+        spec = importlib.util.spec_from_file_location(ext_name, so_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        match ext_name:
+            case "hello":
+                assert module.hello() == "Hello World!"
             case _ as unreachable:
                 assert_never(unreachable)

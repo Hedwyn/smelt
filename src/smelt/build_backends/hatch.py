@@ -177,7 +177,7 @@ class HatchlingBuildHook(BuildHookInterface):
                 strategy=ModpathType.FS,
                 without_entrypoint=True,
                 stdout="stdout",
-            )
+            ).artifacts
         except Exception as exc:
             raise RuntimeError(f"Smelt build failed: {exc}")
         finally:

@@ -17,11 +17,16 @@ import tempfile
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from mypyc.build import mypycify
 
-from smelt.compiler import compile_extension, compile_zig_module
+from smelt.compiler import (
+    compile_extension,
+    compile_extension_objects,
+    compile_zig_module,
+    link_extension_objects,
+)
 from smelt.config import (
     Backend,
     CythonExtension,
@@ -47,6 +52,7 @@ from smelt.utils import (
     GenericExtension,
     ImportPath,
     ModpathType,
+    PathExists,
     PathSolver,
     SmeltConfigError,
     SmeltError,
@@ -54,6 +60,9 @@ from smelt.utils import (
     locate_module,
     path_exists,
 )
+
+if TYPE_CHECKING:
+    from os import PathLike
 
 # TODO: replace .so references to a variable that's set to .so
 # for Unix-like and .dll for Windows
@@ -76,6 +85,83 @@ def _mypycify_one(module: MypycModule, path_solver: PathSolver) -> GenericExtens
     )
 
 
+@dataclass
+class CompiledExtension:
+    """
+    A `GenericExtension`'s object files, compiled but not yet linked (see
+    `compiling_pipeline_refactor.md`).
+
+    `runtime_objects` is mypyc's shared runtime's own object files, present exactly
+    when `generic.runtime` is -- a runtime needs no `PyInit_` of its own, just its
+    code merged in alongside whatever consumes `objects`.
+    """
+
+    generic: GenericExtension
+    objects: list[PathExists]
+    runtime_objects: list[PathExists] | None = None
+
+
+def compile_generic_extension(
+    ext: GenericExtension, dest_folder: PathLike[str]
+) -> CompiledExtension:
+    """
+    Compiles `ext`'s extension (and its runtime, if any) into `dest_folder`, stopping
+    short of linking either into a `.so`.
+
+    This is the object-file stage `link_generic_extension` (today's default: ship a
+    loose `.so`) and static linking (`smelt.static_python.build_static_interpreter`)
+    both build on -- the seam `compiling_pipeline_refactor.md` opens between codegen
+    and "compile-and-place".
+    """
+    objects = compile_extension_objects(ext.extension, dest_folder)
+    runtime_objects = compile_extension_objects(ext.runtime, dest_folder) if ext.runtime else None
+    return CompiledExtension(ext, objects, runtime_objects)
+
+
+def link_generic_extension(compiled: CompiledExtension) -> GenericExtension:
+    """
+    Links a `CompiledExtension`'s object files into `.so`s and moves them to their
+    final destination next to the source module.
+
+    The default consumer of `compile_generic_extension`'s output -- what
+    `compile_mypyc_extensions` and `_compile_and_place` used to do directly through
+    `compile_extension`, now composed from the observable object-file stage instead.
+    """
+    ext = compiled.generic
+    so_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    module_so_path = link_extension_objects(compiled.objects, ext.extension.name + so_suffix)
+    shutil.move(module_so_path, str(ext.get_dest_path()))
+    if compiled.runtime_objects is not None:
+        assert ext.runtime is not None, "runtime_objects is only ever set alongside a runtime"
+        runtime_so_path = link_extension_objects(
+            compiled.runtime_objects, ext.runtime.name + so_suffix
+        )
+        shutil.move(runtime_so_path, str(ext.get_runtime_dest_path()))
+    return ext
+
+
+def is_static_link_eligible(ext: GenericExtension) -> bool:
+    """
+    Tier 1 (structural, before compiling anything) of `compiling_pipeline_refactor.md`'s
+    static-linking eligibility check: whether `ext` could safely be folded straight
+    into `bin/python` instead of shipped as a loose `.so`.
+
+    An extension (or its mypyc runtime) that names an external library via
+    `Extension.libraries`/`extra_link_args` links against something outside its own
+    object code. Folding that into the interpreter turns a missing dependency from a
+    soft, per-import failure (today's `.so` + `dlopen()`) into a hard, whole-process
+    startup failure -- an unresolved `DT_NEEDED`, refused before `main()` even runs.
+
+    This is the cheap, free-before-compiling half of the check; anything pulled in
+    implicitly slips past it, which is what `smelt.static_python.build_static_interpreter`'s
+    own `ldd` pass over the trial link exists to catch.
+    """
+    candidates = (ext.extension, *((ext.runtime,) if ext.runtime else ()))
+    return all(
+        not candidate.libraries and not candidate.extra_link_args for candidate in candidates
+    )
+
+
 def compile_mypyc_extensions(
     modules: Iterable[MypycModule],
     path_solver: PathSolver | None = None,
@@ -87,15 +173,14 @@ def compile_mypyc_extensions(
     built_extensions: list[GenericExtension] = []
     for module in modules:
         mypyc_ext = _mypycify_one(module, path_solver)
-        module_so_path = compile_extension(mypyc_ext.extension)
-        runtime_so_path = compile_extension(mypyc_ext.runtime)
+        with tempfile.TemporaryDirectory() as build_folder:
+            link_generic_extension(compile_generic_extension(mypyc_ext, build_folder))
         so_dest_path = str(mypyc_ext.get_dest_path())
-        runtime_dest_path = str(mypyc_ext.get_runtime_dest_path())
-        shutil.move(runtime_so_path, runtime_dest_path)
-        shutil.move(module_so_path, so_dest_path)
         _logger.info("Built extensions %s @ %s", module.import_path, so_dest_path)
         if mypyc_ext.runtime:
-            _logger.info("-> %s runtime: %s", module.import_path, runtime_dest_path)
+            _logger.info(
+                "-> %s runtime: %s", module.import_path, str(mypyc_ext.get_runtime_dest_path())
+            )
         built_extensions.append(mypyc_ext)
     return built_extensions
 
@@ -148,11 +233,8 @@ def _compile_and_place(ext: GenericExtension) -> GenericExtension:
     Compiles `ext` and moves its resulting `.so` (and runtime `.so`, if any)
     to their final destination next to the source module.
     """
-    module_so_path = compile_extension(ext.extension)
-    shutil.move(module_so_path, str(ext.get_dest_path()))
-    if ext.runtime:
-        runtime_so_path = compile_extension(ext.runtime)
-        shutil.move(runtime_so_path, str(ext.get_runtime_dest_path()))
+    with tempfile.TemporaryDirectory() as build_folder:
+        link_generic_extension(compile_generic_extension(ext, build_folder))
     return ext
 
 
@@ -627,6 +709,26 @@ def create_entrypoint_script(
     return dest_path
 
 
+@dataclass
+class BackendResult:
+    """
+    What `run_backend` produced.
+
+    `artifacts` is what it always returned: the filesystem paths of every compiled
+    artifact placed next to its Python source. `static_modules` is new: modules
+    `static_link` found Tier-1-eligible (see `is_static_link_eligible`), compiled but
+    deliberately left unlinked -- their object files, ready to hand to
+    `smelt.static_python.build_static_interpreter` instead of a loose `.so`. Empty
+    unless `static_link=True`. `static_build_dir` is where those objects live; the
+    caller owns cleaning it up once it is done consuming `static_modules` (`None`
+    when `static_modules` is empty, since nothing was staged there).
+    """
+
+    artifacts: list[Path]
+    static_modules: dict[ImportPath, list[PathExists]] = field(default_factory=dict)
+    static_build_dir: Path | None = None
+
+
 def run_backend(
     config: SmeltConfig,
     stdout: Stdout | None = None,
@@ -637,7 +739,8 @@ def run_backend(
     entrypoint: str | None = None,
     embed_files: Iterable[tuple[Path, ImportPath]] | None = None,
     no_cache: bool = False,
-) -> list[Path]:
+    static_link: bool = False,
+) -> BackendResult:
     """
     Runs the whole backend pipeline:
     * C extensions compilation
@@ -652,21 +755,32 @@ def run_backend(
     `import_path`, dotted-to-slash, joined with `data_file_path`'s filename),
     applied to every entrypoint built in this run.
 
-    Returns the filesystem paths of every compiled artifact placed next to its
-    Python source (module + shared runtime .so/.pyd files), for callers (e.g. the
-    hatchling build hook) that need to force-include them in packaging.
+    `static_link` opts pinned mypyc and Cython modules into Tier 1 eligibility
+    checking (see `is_static_link_eligible` and `compiling_pipeline_refactor.md`):
+    one that passes is compiled but left unlinked, its object files reported in the
+    result's `static_modules` instead of shipped as a `.so`. Nuitka-compiled modules
+    and auto-discovered ones are never considered -- the former drives its own build
+    outside the `GenericExtension.extension`/`.runtime` + compile step this seam
+    opens up, and the latter can silently select Nuitka too.
+
+    Returns a `BackendResult` (see its own doc) rather than a bare list, so a caller
+    that opted into `static_link` has somewhere to receive `static_modules` from --
+    `.artifacts` is what every existing caller (e.g. the hatchling build hook, which
+    force-includes them in packaging) already expected from this function.
     """
     local_platform = platform.system().lower()
     if (platforms := config.platforms) is not None and local_platform not in platforms:
         if stdout is None:
-            return []
+            return BackendResult([])
         printer = _logger.info if stdout == "logger" else print
         printer(
             f"Running on {local_platform}, build hook is restricted to {platforms}, skipping extension building"
         )
-        return []
+        return BackendResult([])
 
     built_artifacts: list[Path] = []
+    static_modules: dict[ImportPath, list[PathExists]] = {}
+    static_build_dir = Path(tempfile.mkdtemp(prefix="smelt-static-")) if static_link else None
     path_solver = path_solver or config.get_path_solver()
     # Starting with C extensions
     warnings.warn(
@@ -701,25 +815,51 @@ def run_backend(
     # we need to keep track of it to include to nuitka,
     # as it would be invisible otherwise
     shared_runtime_extensions: set[str] = set()
-    collected_extensions: list[GenericExtension] = []
-    built_mypyc_extensions = compile_mypyc_extensions(config.mypyc_modules, path_solver)
-    for ext in built_mypyc_extensions:
-        built_artifacts.append(ext.get_dest_path())
-        if ext.runtime:
-            shared_runtime_extensions.add(ext.runtime.name)
-            built_artifacts.append(ext.get_runtime_dest_path())
-    # cython extensions
-    collected_extensions.extend(
-        compile_cython_extensions(config.cython_modules, path_solver=path_solver)
-    )
-    for nuitka_mod in config.nuitka_modules:
-        collected_extensions.append(nuitkaify_module(nuitka_mod, path_solver=path_solver))
 
-    for generic_ext in collected_extensions:
-        _compile_and_place(generic_ext)
-        built_artifacts.append(generic_ext.get_dest_path())
-        if generic_ext.runtime:
-            built_artifacts.append(generic_ext.get_runtime_dest_path())
+    def _place_or_stage(ext: GenericExtension) -> bool:
+        """
+        Links and places `ext` (the default), or -- when `static_build_dir` is set
+        and `ext` passes Tier 1 -- compiles it into `static_build_dir` and records it
+        in `static_modules` instead. Returns whether it was staged for static linking.
+        """
+        if static_build_dir is not None and is_static_link_eligible(ext):
+            compiled = compile_generic_extension(ext, static_build_dir)
+            static_modules[ext.import_path] = [
+                *compiled.objects,
+                *(compiled.runtime_objects or []),
+            ]
+            _logger.info("Staged %s for static linking (no .so written)", ext.import_path)
+            return True
+        with tempfile.TemporaryDirectory() as build_folder:
+            link_generic_extension(compile_generic_extension(ext, build_folder))
+        return False
+
+    for module in config.mypyc_modules:
+        mypyc_ext = _mypycify_one(module, path_solver)
+        if _place_or_stage(mypyc_ext):
+            continue
+        built_artifacts.append(mypyc_ext.get_dest_path())
+        if mypyc_ext.runtime:
+            shared_runtime_extensions.add(mypyc_ext.runtime.name)
+            built_artifacts.append(mypyc_ext.get_runtime_dest_path())
+
+    # cython extensions -- eligible for static linking, unlike Nuitka below.
+    for cython_ext in compile_cython_extensions(config.cython_modules, path_solver=path_solver):
+        if _place_or_stage(cython_ext):
+            continue
+        built_artifacts.append(cython_ext.get_dest_path())
+        if cython_ext.runtime:
+            built_artifacts.append(cython_ext.get_runtime_dest_path())
+
+    # Nuitka drives its own build end-to-end rather than through a compile step this
+    # module controls, so it has no object-file seam to stage for static linking (see
+    # "Nuitka is out of scope" in compiling_pipeline_refactor.md) -- always linked.
+    for nuitka_mod in config.nuitka_modules:
+        nuitka_ext = nuitkaify_module(nuitka_mod, path_solver=path_solver)
+        _compile_and_place(nuitka_ext)
+        built_artifacts.append(nuitka_ext.get_dest_path())
+        if nuitka_ext.runtime:
+            built_artifacts.append(nuitka_ext.get_runtime_dest_path())
 
     # auto-discovered modules (see `config.auto_mode`), each compiled by trying
     # `config.backend_priority_order` in turn until one succeeds. Unlike pinned
@@ -804,4 +944,4 @@ def run_backend(
                     no_cache=no_cache,
                 )
 
-    return built_artifacts
+    return BackendResult(built_artifacts, static_modules, static_build_dir)

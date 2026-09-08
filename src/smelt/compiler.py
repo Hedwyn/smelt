@@ -371,6 +371,39 @@ def _compile_extension_sources(
     return objects, extra_preargs
 
 
+def link_extension_objects(
+    objects: Iterable[PathLike[str] | str],
+    ext_name: str,
+    *,
+    compiler: Compiler | None = None,
+    libraries: Iterable[str] = (),
+    library_dirs: Iterable[str] = (),
+    runtime_library_dirs: Iterable[str] = (),
+    dest_folder: PathLike[str] | None = None,
+    extra_preargs: Iterable[str] = (),
+) -> PathExists:
+    """
+    Links already-compiled object files (as produced by `compile_extension_objects`)
+    into a shared library named `ext_name` (already carrying its final suffix).
+
+    The tail end `compile_extension` used to inline before its object-file stage
+    became independently observable (`compile_extension_objects`); the two together
+    reconstitute `compile_extension`'s own behavior.
+    """
+    compiler = compiler or ZigCompiler()
+    output_dir = dest_folder or "."
+    compiler.link_shared_object(
+        [str(obj) for obj in objects],
+        ext_name,
+        output_dir=str(output_dir),
+        libraries=list(libraries),
+        library_dirs=list(library_dirs),
+        runtime_library_dirs=list(runtime_library_dirs),
+        extra_preargs=list(extra_preargs),
+    )
+    return assert_path_exists(os.path.join(output_dir, ext_name))
+
+
 def compile_extension(
     extension: Path | str | Extension,
     compiler: Compiler | None = None,
@@ -397,7 +430,6 @@ def compile_extension(
         Defaults to cwd.
     """
     compiler = compiler or ZigCompiler()
-    include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
     libdir = sysconfig.get_config_var("LIBDIR")
     library_dirs = [libdir] if libdir is not None else []
     libraries: list[str] = []
@@ -412,7 +444,6 @@ def compile_extension(
 
         # building an extension object for a single source file
         extension = Path(extension)
-        ext_name = extension.name
 
         if extension.suffix not in compiler.src_extensions:
             raise ValueError(
@@ -427,20 +458,19 @@ def compile_extension(
         )
     else:
         extension_obj = extension
-        ext_name = extension.name
 
     # Compile the C file
     if crosscompile is not None:
         so_suffix = get_extension_suffix(crosscompile.get_triple_name())
+        extra_preargs = [f"--target={crosscompile.value}"]
     else:
         so_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+        extra_preargs = []
 
     with tempfile.TemporaryDirectory() as build_folder:
         # TODO: investigate the pure setuptools alternative
         # as the distutils compiler is deprecated
-        objects, extra_preargs = _compile_extension_sources(
-            compiler, extension_obj, include_dirs, crosscompile, build_folder
-        )
+        objects = compile_extension_objects(extension_obj, build_folder, compiler, crosscompile)
 
         # Link it into a shared object
         ext_name = extension_obj.name + so_suffix
@@ -448,17 +478,18 @@ def compile_extension(
         output_dir = dest_folder or "."
 
         if not use_zig_native_interface:
-            compiler.link_shared_object(
+            link_extension_objects(
                 objects,
                 ext_name,
-                output_dir=str(output_dir),
+                compiler=compiler,
                 libraries=extension_obj.libraries + libraries,
                 library_dirs=extension_obj.library_dirs + library_dirs,
                 runtime_library_dirs=extension_obj.runtime_library_dirs,
+                dest_folder=output_dir,
                 extra_preargs=extra_preargs,
             )
         else:
-            zig_build_lib(extension.name, objects, crosscompile=crosscompile)
+            zig_build_lib(extension.name, [str(obj) for obj in objects], crosscompile=crosscompile)
     so_path = os.path.join(output_dir, ext_name)
     return assert_path_exists(so_path)
 

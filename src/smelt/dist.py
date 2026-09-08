@@ -213,14 +213,16 @@ DEFAULT_TAILOR_INTERPRETER: Final[bool] = True
 #: build reports what is on the table and leaves the decision where the knowledge is.
 DEFAULT_DROP_OPTIONAL_IMPORTS: Final[bool] = False
 
-#: Whether `static_modules` is honoured at all (see `build_dist`'s own doc). **Off by
-#: default**: static linking replaces a mode `own` distribution's `bin/python` with a
-#: freshly built one (see `smelt.static_python`), and unlike every other flag here that
-#: only prunes or reorganises the folder, a broken build of *this* has no fallback --
-#: there is no other `bin/python` to fall back to once the original has been
-#: overwritten. Kept behind an explicit opt-in until the eligibility checks in
-#: `compiling_pipeline_refactor.md` land, rather than defaulting on the moment
-#: `static_modules` is non-empty.
+#: Whether `static_modules` is honoured at all -- including auto-discovering it, see
+#: `build_dist`'s own doc. **Off by default**: static linking replaces a mode `own`
+#: distribution's `bin/python` with a freshly built one (see `smelt.static_python`),
+#: and unlike every other flag here that only prunes or reorganises the folder, a
+#: broken build of *this* has no fallback -- there is no other `bin/python` to fall
+#: back to once the original has been overwritten. The eligibility checks in
+#: `compiling_pipeline_refactor.md` (Tier 1 structural, Tier 2 an `ldd` pass over the
+#: trial link) now guard every module this flag lets through either way it reaches
+#: `static_modules`, but this stays an explicit opt-in on top of them regardless,
+#: rather than defaulting on the moment they land.
 DEFAULT_USE_INITTAB: Final[bool] = False
 
 #: How long the tracing subprocess is given before it is given up on. Importing an
@@ -1600,16 +1602,28 @@ def build_dist(
     archives, in link order. Mode `own` only -- there is no interpreter of smelt's own
     to link into in mode `byo` -- and POSIX only for now (no `libpythonX.Y` to link
     against yet on a Windows target). Every named import path is dropped from the
-    ordinary native-artifact copy below; getting the object files themselves is on the
-    caller (see `smelt.compiler.compile_extension_objects`).
+    ordinary native-artifact copy below.
 
-    `static_modules` only takes effect when `use_inittab` resolves true (see
-    `resolve_use_inittab`, `DEFAULT_USE_INITTAB`) -- **off by default**, and passing a
-    non-empty `static_modules` without it raises rather than silently ignoring it.
-    Static linking overwrites the interpreter's own entrypoint with a freshly built
-    one; unlike every other option here, a bad build of *that* leaves nothing to fall
-    back to, so it stays behind an explicit opt-in until the eligibility checks
-    described in `compiling_pipeline_refactor.md` land.
+    Left empty (the default), `static_modules` fills itself in: when `use_inittab`
+    resolves true and this is a mode `own` build, `run_backend` is asked to compile
+    every pinned mypyc/Cython module (Nuitka is out of scope, see
+    `compiling_pipeline_refactor.md`) and stage the Tier-1-eligible ones (no external
+    `libraries`/`extra_link_args`, see `smelt.backend.is_static_link_eligible`)
+    instead of linking them into a `.so`. Passing `static_modules` explicitly instead
+    -- import path -> its already-compiled object files, from
+    `smelt.compiler.compile_extension_objects` or `smelt.backend.compile_generic_extension`
+    -- opts out of that auto-discovery and is used as-is, on the caller's own
+    eligibility judgment.
+
+    `static_modules` (auto-discovered or hand-supplied) only takes effect when
+    `use_inittab` resolves true (see `resolve_use_inittab`, `DEFAULT_USE_INITTAB`) --
+    **off by default**, and passing a non-empty `static_modules` without it raises
+    rather than silently ignoring it. Static linking overwrites the interpreter's own
+    entrypoint with a freshly built one; unlike every other option here, a bad build
+    of *that* leaves nothing to fall back to -- which is what Tier 1 here and Tier 2
+    inside `smelt.static_python.build_static_interpreter` (an `ldd` pass over the
+    trial link, refusing anything pulled in beyond libc/the loader/libpython) both
+    guard against before a module is ever actually folded in.
 
     `include_modules`, `include_packages`, `include_package_data`,
     `include_distribution_metadata` and `exclude_modules` are each additive over what
@@ -1620,16 +1634,40 @@ def build_dist(
     path_solver = path_solver or config.get_path_solver()
     entrypoint_spec = resolve_entrypoint_spec(config, entrypoint)
     entrypoint_module = assert_is_valid_import_path(entrypoint_spec.partition(":")[0])
+    entrypoint_options = config.entrypoints[entrypoint_spec]
+
+    # Resolved ahead of `run_backend` on purpose: whether it is worth having it stage
+    # object files at all (`static_link` below) depends on both.
+    resolved_python = resolve_dist_python(entrypoint_options, python)
+    resolved_use_inittab = resolve_use_inittab(entrypoint_options, use_inittab)
+    # Auto-discovery (`run_backend(static_link=True)`, see `compiling_pipeline_refactor.md`)
+    # only kicks in when the caller left `static_modules` for us to fill in ourselves --
+    # one who hand-supplies it already did their own eligibility judgment, and gets the
+    # exact caller-supplied behavior this parameter has always had.
+    auto_static_link = resolved_use_inittab and resolved_python == "own" and not static_modules
+    static_build_dir: Path | None = None
 
     if build_extensions:
         # `without_entrypoint`: the native artifacts are what is wanted here, not a
         # Nuitka-compiled binary of the entrypoint -- this pipeline is the alternative
         # to that one, not a step of it.
-        run_backend(config, stdout=stdout, path_solver=path_solver, without_entrypoint=True)
+        backend_result = run_backend(
+            config,
+            stdout=stdout,
+            path_solver=path_solver,
+            without_entrypoint=True,
+            static_link=auto_static_link,
+        )
+        if auto_static_link:
+            static_modules = backend_result.static_modules
+            static_build_dir = backend_result.static_build_dir
 
-    entrypoint_options = config.entrypoints[entrypoint_spec]
     built = collect_built_artifacts(config, path_solver)
-    unknown_static = set(static_modules) - set(built)
+    # Auto-discovered `static_modules` are, by construction, exactly what `run_backend`
+    # staged instead of writing a `.so` for -- they are deliberately *absent* from
+    # `built`'s disk scan, so this check (guarding a hand-supplied `static_modules`
+    # against typos/stale import paths) does not apply to them.
+    unknown_static = set(static_modules) - set(built) if not auto_static_link else set()
     if unknown_static:
         raise DistError(
             f"static_modules names {sorted(unknown_static)}, which smelt did not "
@@ -1642,8 +1680,6 @@ def build_dist(
             "'static', 'trace', 'both'."
         )
     resolved_discovery: DiscoveryMode = declared_discovery
-    resolved_python = resolve_dist_python(entrypoint_options, python)
-    resolved_use_inittab = resolve_use_inittab(entrypoint_options, use_inittab)
     if static_modules and not resolved_use_inittab:
         raise DistError(
             f"static_modules names {sorted(static_modules)}, but use_inittab is off "
@@ -1912,6 +1948,11 @@ def build_dist(
             # baking it into the cache would corrupt it for every other project
             # reusing the same cached interpreter (see `static_python`'s docstring).
             build_static_interpreter(dist_root / report.interpreter.prefix_rel_path, static_modules)
+        if static_build_dir is not None:
+            # Only ever set by `run_backend(static_link=True)` staging its own scratch
+            # directory (see `BackendResult`'s doc) -- ours to clean up once consumed,
+            # whether or not anything ended up eligible for it.
+            shutil.rmtree(static_build_dir, ignore_errors=True)
         report.launcher = write_launcher_shim(
             launcher_name(config, entrypoint_spec), dist_root, report.interpreter
         )
