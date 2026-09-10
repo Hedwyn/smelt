@@ -37,14 +37,17 @@ cython = ["Cython"]
 # 5ebc889 was the first commit carrying the `pyconfig-header` and `strip` options
 # own_python.py passes, b3fa35c the first that installs a `_sysconfigdata_*` module --
 # without it `sysconfig.get_paths()`, `pydoc`, `help()` and `site.getsitepackages()`
-# fail in every interpreter smelt builds, tailored or not -- and e78aeca is the first
+# fail in every interpreter smelt builds, tailored or not -- e78aeca is the first
 # that can actually be built: b3fa35c's `build.zig` imports a `build/sysconfigdata.zig`
 # that had not been committed, so every cold-cache interpreter build from it died on
 # `error: adding build_root build/sysconfigdata.zig to cache failed: FileNotFound`.
 # Nothing noticed for three days because a build that hits smelt's own prefix cache
-# never evaluates `build.zig` at all.
+# never evaluates `build.zig` at all. 27183a9 is the first that exposes a standalone
+# `configure` build step (`BuildStep.CONFIGURE`) -- `own_python.py`'s
+# `_resolve_pyconfig_header` imports it directly, so anything older than this fails
+# with `AttributeError: type object 'BuildStep' has no attribute 'CONFIGURE'`.
 metapython = [
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@e78aeca",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@27183a9",
 ]
 # unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
@@ -59,7 +62,7 @@ build = [
   "mypy[mypyc]",
   "hatchling",
   "editables",
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@e78aeca",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@27183a9",
 ]
 
 [tool.setuptools]

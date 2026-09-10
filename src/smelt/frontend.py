@@ -459,12 +459,13 @@ def build_standalone_binary(
     default=None,
     help="With --python own, build one monolithic, static-PIE interpreter (no "
     "libpythonX.Y.so) instead of the ordinary dynamic-libc/dynamic-libpython shape. "
-    "Verified only for --own-python-target x86_64-linux-musl (see "
-    "static_pie_musl_plan.md) -- every extension module not named via "
-    "--own-python-static-module then simply cannot be imported (dlopen() itself does "
-    "not work under this shape). Cannot be combined with --use-inittab: a "
-    "static-linked interpreter has no libpythonX.Y.so to link smelt's own compiled "
-    "extensions against.",
+    "A statically linked interpreter has no working dlopen(), so every native module "
+    "has to be compiled into it: --own-python-static-module for standard library "
+    "accelerators, --use-inittab for smelt's own extension modules. Any .so left in "
+    "the finished folder fails the build, since it could not be imported on the "
+    "target machine. Off by default: the ordinary shape ships musl's own loader with "
+    "the interpreter and keeps dlopen() -- and third-party native modules -- working. "
+    "Verified only for --own-python-target x86_64-linux-musl.",
 )
 @click.option(
     "--own-python-static-module",

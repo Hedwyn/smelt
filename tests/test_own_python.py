@@ -62,24 +62,31 @@ from smelt.own_python import (
     INTERPRETER_HOST_DLL_PREFIXES,
     INTERPRETER_REL_PATH,
     LIBRARY_MODULES,
+    MUSL_LOADER_GLOB,
     MINIMAL_VIABLE_STDLIB,
     OPTIONAL_STDLIB_GROUPS,
+    REAL_INTERPRETER_REL_PATH,
     WINDOWS_INTERPRETER_REL_PATH,
     WINDOWS_STDLIB_REL_PATH,
     WINDOWS_VERSION_MARKER_NAME,
     OwnPythonError,
     StagedInterpreter,
+    _resolve_pyconfig_header,
     bootstrap_modules,
     build_own_python,
     expand_interpreter_modules,
+    find_musl_loader,
+    interpreter_argv,
     interpreter_build_lock,
     interpreter_version,
+    is_musl_zig_target,
     is_windows_zig_target,
     minimal_viable_stdlib,
     own_python_cache_dir,
     plan_disabled_libraries,
     resolve_requirements,
     stage_interpreter,
+    unprovided_modules,
 )
 from smelt.utils import assert_is_valid_import_path, assert_path_exists
 
@@ -93,6 +100,19 @@ _CACHE_AVAILABLE = (_CACHED_PREFIX / INTERPRETER_REL_PATH).exists()
 needs_own_python = pytest.mark.skipif(
     not _CACHE_AVAILABLE or not is_supported_platform(),
     reason=f"needs Linux and an interpreter already built at {_CACHED_PREFIX}",
+)
+
+try:
+    import metapython as _metapython
+
+    _ = _metapython
+    _METAPYTHON_AVAILABLE = True
+except ImportError:
+    _METAPYTHON_AVAILABLE = False
+
+needs_metapython = pytest.mark.skipif(
+    not _METAPYTHON_AVAILABLE or not is_supported_platform(),
+    reason="needs Linux and the metapython extra installed",
 )
 
 
@@ -121,6 +141,10 @@ def _fake_interpreter_prefix(root: Path) -> Path:
         "    *version_info*) echo '3 12' ;;\n"
         "    *sys.modules*) echo 'builtins marshal sys zipimport' ;;\n"
         '    *FrozenImporter*) echo \'["builtins", "marshal", "sys", "zipimport"]\' ;;\n'
+        # `unprovided_modules`' second pass. This stand-in has no modules of its own
+        # beyond the files in its tree, so it reports every name it is handed as one it
+        # cannot import -- which is what makes the check observable in a test.
+        '    *__import__*) echo "[\\"missing_extension\\"]" ;;\n'
         "    *) echo 'unexpected probe' >&2; exit 1 ;;\n"
         "esac\n"
     )
@@ -799,6 +823,22 @@ def test_own_python_cache_dir_separates_linkage_and_static_modules() -> None:
     assert builtin == own_python_cache_dir(linkage="static", static_modules=["zlib", "_socket"])
 
 
+@needs_metapython
+def test_resolve_pyconfig_header_runs_a_real_configure_step(tmp_path: Path) -> None:
+    """
+    Real, not mocked: `_resolve_pyconfig_header` shells out to meta-python's
+    `configure` build step (a real `./configure`, no compiling) and must produce a
+    genuinely musl-correct file, not just avoid raising.
+    """
+    with interpreter_build_lock():
+        resolved = _resolve_pyconfig_header("x86_64-linux-musl", debug=False, dest=tmp_path)
+
+    assert resolved.parent == tmp_path
+    text = resolved.read_text()
+    assert "/* #undef HAVE_CLOSE_RANGE */" in text
+    assert "#define HAVE_DECL_RTLD_DEEPBIND 0" in text
+
+
 def test_build_own_python_rejects_static_modules_without_static_linkage() -> None:
     with pytest.raises(OwnPythonError, match="static_modules"):
         build_own_python(static_modules=["_socket"])
@@ -1219,3 +1259,135 @@ def test_dropping_a_group_narrows_the_keep_set() -> None:
     assert narrowed.dropped_stdlib_groups == frozenset({"international_hostnames"})
     assert narrowed.keep_modules < kept.keep_modules
     assert "unicodedata" in kept.keep_modules - narrowed.keep_modules
+
+
+def _fake_musl_loader(prefix: Path, name: str = "ld-musl-x86_64.so.1") -> Path:
+    """
+    A stand-in for the musl loader a `libc-linkage=dynamic` musl prefix ships: a script
+    honouring the one part of its contract smelt uses -- run the program handed to it
+    as an argument, with an optional `--argv0` override in front.
+    """
+    loader = prefix / "lib" / name
+    loader.parent.mkdir(parents=True, exist_ok=True)
+    loader.write_text('#!/bin/sh\nif [ "$1" = "--argv0" ]; then shift 2; fi\nexec "$@"\n')
+    loader.chmod(0o755)
+    return loader
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("x86_64-linux-musl", True),
+        ("arm-linux-musleabihf", True),
+        ("x86_64-linux-gnu", False),
+        ("aarch64-windows-gnu", False),
+        (None, False),
+    ],
+)
+def test_is_musl_zig_target(target: str | None, expected: bool) -> None:
+    assert is_musl_zig_target(target) is expected
+
+
+def test_find_musl_loader_returns_none_without_one(tmp_path: Path) -> None:
+    assert find_musl_loader(_fake_interpreter_prefix(tmp_path)) is None
+
+
+def test_find_musl_loader_refuses_a_prefix_holding_two(tmp_path: Path) -> None:
+    """
+    Two loaders mean a prefix built for two architectures, and picking one silently
+    fails much further away: the wrong loader starts and then cannot relocate the
+    interpreter.
+    """
+    prefix = _fake_interpreter_prefix(tmp_path)
+    _fake_musl_loader(prefix)
+    _fake_musl_loader(prefix, "ld-musl-aarch64.so.1")
+    with pytest.raises(OwnPythonError, match="more than one musl loader"):
+        find_musl_loader(prefix)
+
+
+def test_interpreter_argv_starts_a_musl_prefix_through_its_own_loader(tmp_path: Path) -> None:
+    """
+    A dynamically musl-linked interpreter cannot be executed directly on a host with
+    no musl installed -- its `PT_INTERP` names a file that is not there -- so smelt's
+    own probes have to go through the loader shipped in the prefix.
+    """
+    prefix = _fake_interpreter_prefix(tmp_path)
+    loader = _fake_musl_loader(prefix)
+
+    assert interpreter_argv(assert_path_exists(prefix)) == [
+        str(loader),
+        str(prefix / INTERPRETER_REL_PATH),
+    ]
+
+
+def test_stage_interpreter_ships_the_musl_loader_behind_a_stub(tmp_path: Path) -> None:
+    """
+    A musl distribution's `bin/python` is a compiled stub that starts the real
+    interpreter through the loader in `lib/`; the real one moves aside rather than the
+    stub taking a new name, because `bin/python` is what everything else starts
+    (`sys.executable`, the folder launcher, the onefile trailer).
+    """
+    prefix = _fake_interpreter_prefix(tmp_path)
+    _fake_musl_loader(prefix)
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+
+    staged = stage_interpreter(assert_path_exists(prefix), dist_root, bundle_dependencies=False)
+
+    assert staged.musl_loader_rel_path == Path("lib") / "ld-musl-x86_64.so.1"
+    assert staged.serialize()["musl_loader"] == "lib/ld-musl-x86_64.so.1"
+    loader = dist_root / "lib" / "ld-musl-x86_64.so.1"
+    assert loader.is_file() and loader.stat().st_mode & 0o111, "the loader must be executable"
+    # The fake prefix's `bin/python` is a shell script; the staged one is the compiled
+    # stub, so the two are told apart by what is actually in the file.
+    assert (dist_root / REAL_INTERPRETER_REL_PATH).read_text().startswith("#!/bin/sh")
+    assert (dist_root / INTERPRETER_REL_PATH).read_bytes().startswith(b"\x7fELF")
+    # Unchanged for every other consumer: the stub is what `bin/python` means now.
+    assert staged.executable_rel_path == INTERPRETER_REL_PATH
+
+
+def test_stage_interpreter_ships_no_loader_without_one(tmp_path: Path) -> None:
+    prefix = _fake_interpreter_prefix(tmp_path)
+    dist_root = tmp_path / "myapp.dist"
+    dist_root.mkdir()
+
+    staged = stage_interpreter(assert_path_exists(prefix), dist_root, bundle_dependencies=False)
+
+    assert staged.musl_loader_rel_path is None
+    assert not (dist_root / REAL_INTERPRETER_REL_PATH).exists()
+    assert not list((dist_root / "lib").glob(MUSL_LOADER_GLOB))
+
+
+def test_unprovided_modules_ignores_what_the_interpreter_has(tmp_path: Path) -> None:
+    """
+    A module the interpreter can resolve from its own tree never reaches the import
+    probe -- the file-level pass is there precisely to keep that cheap.
+    """
+    prefix = assert_path_exists(_fake_interpreter_prefix(tmp_path))
+    assert unprovided_modules(prefix, ["json", "os"]) == []
+
+
+def test_unprovided_modules_reports_what_the_host_has_and_the_target_does_not(
+    tmp_path: Path,
+) -> None:
+    """
+    The case this exists for: discovery answered "the interpreter brings its own"
+    against the interpreter running smelt, and the one being shipped does not have it.
+    """
+    prefix = assert_path_exists(_fake_interpreter_prefix(tmp_path))
+    # `_socket` is an extension module of the interpreter running the tests, and the
+    # stand-in prefix has no `lib-dynload` at all -- so it is exactly a module the host
+    # provides and the target does not. The stand-in answers the import probe with the
+    # name it was built to report as missing.
+    assert unprovided_modules(prefix, ["_socket"]) == ["missing_extension"]
+
+
+def test_unprovided_modules_ignores_what_the_host_cannot_import_either(
+    tmp_path: Path,
+) -> None:
+    """
+    A module missing from both interpreters is not a regression this check should
+    report: `_winapi` turns up in any closure that reaches `subprocess`, and nothing on
+    Linux has it.
+    """
+    prefix = assert_path_exists(_fake_interpreter_prefix(tmp_path))
+    assert unprovided_modules(prefix, ["_winapi"]) == []

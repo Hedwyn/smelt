@@ -11,13 +11,13 @@ embeds CPython behind a thin `main()` (meta-python's `Programs/python.c`, callin
 `Py_BytesMain`); this module replaces that `main()` with one carrying the extra
 `PyImport_AppendInittab` calls and the modules' own object code linked straight in.
 
-Deliberately built on nothing meta-python does not already provide: a mode `own`
-prefix's `libpythonX.Y.so` is a real, ordinarily-linkable shared library (see
-`own_python.build_own_python`'s `python-linkage=dynamic`), so the replacement `main()`
-is just another program smelt compiles and links against it -- through the same
-`ZigCompiler` every other smelt-built extension goes through, not a second toolchain.
-No change to meta-python's own build is needed: it already builds everything this
-module links against, unmodified.
+A mode `own` prefix built with `python-linkage=dynamic` ships a real, ordinarily-
+linkable `libpythonX.Y.so` (see `own_python.build_own_python`) to link the replacement
+`main()` against -- through the same `ZigCompiler` every other smelt-built extension
+goes through, not a second toolchain. A prefix built `linkage="static"` (static-PIE,
+no `.so` at all) ships a linkable `libpythonX.Y.a` instead, which meta-python's
+`off`-mode build produces for exactly this purpose; `_find_libpython` picks whichever
+of the two is present.
 
 @date: 08.09.2026
 @author: Baptiste Pestourie
@@ -35,11 +35,15 @@ from pathlib import Path
 from typing import Final
 
 from distutils.compilers.C.unix import Compiler
-from setuptools import Extension
 
-from smelt.compiler import ZigCompiler, _compile_extension_sources
-from smelt.native_deps import ldd_dependencies, set_rpath
-from smelt.own_python import INTERPRETER_HOST_DLL_PREFIXES, INTERPRETER_REL_PATH
+from smelt.compiler import ZigCompiler
+from smelt.native_deps import elf_dynamic_entries, set_rpath
+from smelt.own_python import (
+    INTERPRETER_HOST_DLL_PREFIXES,
+    INTERPRETER_REL_PATH,
+    REAL_INTERPRETER_REL_PATH,
+    is_musl_zig_target,
+)
 from smelt.utils import PathExists, SmeltError, assert_path_exists
 
 _logger = logging.getLogger(__name__)
@@ -101,40 +105,55 @@ def generate_inittab_shim(module_names: Iterable[str]) -> str:
     return _SHIM_TEMPLATE.format(externs=externs, appends=appends)
 
 
-def _find_libpython(prefix: PathExists) -> PathExists:
+def _find_libpython(prefix: PathExists) -> tuple[PathExists, bool]:
     """
-    The real `libpythonX.Y.so` a mode `own` prefix built with `python-linkage=dynamic`
-    ships at `lib/` (see `own_python.build_own_python`), to link the replacement
-    `main()` against. Picks the shortest matching name (`libpython3.12.so`, not one of
-    its versioned-suffix siblings): the one every other consumer in this codebase
-    treats as the canonical one (see e.g. `own_python.py`'s own `libpython*.so*` globs).
+    The library a mode `own` prefix ships at `lib/` to link the replacement `main()`
+    against, and whether it is a static archive rather than a shared library.
+
+    A `python-linkage=dynamic` prefix (`own_python.build_own_python`'s default) ships a
+    real `libpythonX.Y.so`, picked by the shortest matching name (`libpython3.12.so`,
+    not one of its versioned-suffix siblings: the one every other consumer in this
+    codebase treats as the canonical one, see e.g. `own_python.py`'s own
+    `libpython*.so*` globs) -- preferred when present. A `linkage="static"` prefix
+    (`own_python_static`, static-PIE, no `.so` at all) ships `libpythonX.Y.a` instead:
+    meta-python's `off`-mode build produces this archive alongside the monolithic exe
+    for exactly this purpose.
     """
-    candidates = sorted((Path(prefix) / "lib").glob("libpython*.so*"), key=lambda p: len(p.name))
-    if not candidates:
-        raise StaticPythonError(
-            f"No libpythonX.Y.so under {Path(prefix) / 'lib'}: static linking needs a "
-            "real shared libpython to link against (python-linkage=dynamic), which is "
-            "what own_python.build_own_python always builds -- was a different prefix "
-            "passed in?"
-        )
-    return assert_path_exists(candidates[0])
+    lib_dir = Path(prefix) / "lib"
+    so_candidates = sorted(lib_dir.glob("libpython*.so*"), key=lambda p: len(p.name))
+    if so_candidates:
+        return assert_path_exists(so_candidates[0]), False
+    archive_candidates = sorted(lib_dir.glob("libpython*.a"), key=lambda p: len(p.name))
+    if archive_candidates:
+        return assert_path_exists(archive_candidates[0]), True
+    raise StaticPythonError(
+        f"No libpythonX.Y.so or libpythonX.Y.a under {lib_dir}: static linking needs "
+        "one of the two to link the replacement main() against -- was a different "
+        "prefix passed in?"
+    )
 
 
 def _unexpected_dependencies(binary_path: PathExists) -> list[str]:
     """
     Tier 2 (authoritative, after the trial static link) of the static-linking
-    eligibility check described in `compiling_pipeline_refactor.md`: every
-    `ldd`-resolved dependency of `binary_path` that is neither host-supplied
+    eligibility check described in `compiling_pipeline_refactor.md`: every shared
+    library `binary_path` declares that is neither host-supplied
     (`INTERPRETER_HOST_DLL_PREFIXES`) nor `libpython` itself.
 
     Tier 1 (`smelt.backend.is_static_link_eligible`) only catches a module that
     *declares* an external library via `Extension.libraries`/`extra_link_args`; this
     catches one pulled in implicitly, which Tier 1's purely structural check cannot
     see by construction.
+
+    Read out of the binary's own `DT_NEEDED` entries rather than resolved against this
+    machine: what matters is that the interpreter would demand a library at startup,
+    not whether the build host happens to have a copy -- and for a cross-built
+    interpreter it would not.
     """
+    needed, _rpaths = elf_dynamic_entries(binary_path)
     return sorted(
         name
-        for name in ldd_dependencies(binary_path)
+        for name in needed
         if not name.startswith(INTERPRETER_HOST_DLL_PREFIXES) and not name.startswith("libpython")
     )
 
@@ -144,6 +163,8 @@ def build_static_interpreter(
     static_modules: Mapping[str, Iterable[PathExists]],
     *,
     compiler: Compiler | None = None,
+    zig_target: str | None = None,
+    include_dirs: Iterable[str] = (),
 ) -> PathExists:
     """
     Replaces `prefix`'s `bin/python` (see `own_python.INTERPRETER_REL_PATH`) with a
@@ -165,27 +186,72 @@ def build_static_interpreter(
     linked in is a property of one application, and baking it into the cache meta-python
     builds are reused from would corrupt that cache for every other project.
 
-    Returns the path to the replacement `bin/python`. A no-op (returns the existing
-    `bin/python` unchanged) when `static_modules` is empty.
+    `zig_target` is the target the prefix was built for, and must be passed whenever it
+    is not the host: the replacement is a fresh link, so it has to be produced for the
+    same target as the interpreter it replaces. For a musl target it additionally
+    decides libc linkage -- `zig cc` links musl *statically* by default, which would
+    quietly cost the interpreter its `dlopen()` (see `own_python.is_musl_zig_target`
+    and meta-python's `build/musl.zig`), so the link is forced dynamic to match.
+
+    `include_dirs` is prepended to the shim's own include path. A cross-built prefix
+    needs its own `pyconfig.h` there -- the header describes the *target*, while
+    `Python.h` comes from the running interpreter.
+
+    Returns the path to the replacement interpreter: `REAL_INTERPRETER_REL_PATH` for a
+    staged prefix that has one (the stub at `bin/python` starts whatever is there, so
+    it needs no rebuilding), `bin/python` otherwise. A no-op (returns the existing
+    interpreter unchanged) when `static_modules` is empty.
     """
     prefix = assert_path_exists(prefix)
-    bin_path = Path(prefix) / INTERPRETER_REL_PATH
+    real_path = Path(prefix) / REAL_INTERPRETER_REL_PATH
+    bin_path = real_path if real_path.is_file() else Path(prefix) / INTERPRETER_REL_PATH
     if not static_modules:
         return assert_path_exists(bin_path)
     if not bin_path.is_file():
         raise StaticPythonError(f"No interpreter at {bin_path}.")
 
-    libpython = _find_libpython(prefix)
+    libpython, is_static_archive = _find_libpython(prefix)
     compiler = compiler or ZigCompiler()
-    include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
+    header_dirs = [
+        *(str(entry) for entry in include_dirs),
+        sysconfig.get_path("include"),
+        sysconfig.get_path("platinclude"),
+    ]
+
+    # The same flags on both the compile and the link: this is one small C file
+    # (`generate_inittab_shim`) compiled and linked back-to-back, so `compiler.compile`
+    # is called directly rather than through `compiler`'s Extension-shaped path -- that
+    # one only understands `SupportedPlatforms`, while a mode `own` target is any zig
+    # triple (see `own_python.build_own_python`).
+    extra_preargs = [f"--target={zig_target}"] if zig_target is not None else []
 
     with tempfile.TemporaryDirectory() as build_folder:
         shim_source = Path(build_folder) / "_smelt_static_main.c"
         shim_source.write_text(generate_inittab_shim(static_modules.keys()))
-        shim_extension = Extension(name="_smelt_static_main", sources=[str(shim_source)])
-        shim_objects, extra_preargs = _compile_extension_sources(
-            compiler, shim_extension, include_dirs, None, build_folder
+        shim_objects = compiler.compile(
+            sources=[str(shim_source)],
+            output_dir=build_folder,
+            include_dirs=header_dirs,
+            extra_preargs=extra_preargs,
         )
+        if is_musl_zig_target(zig_target) and not is_static_archive:
+            # `zig cc` links musl *statically* by default, and a statically linked musl
+            # program has no working `dlopen()` at all -- so the replacement has to be
+            # told to keep the dynamic linkage (and the shipped musl loader) the
+            # interpreter it replaces was built with.
+            extra_preargs = [*extra_preargs, "-dynamic"]
+        if is_static_archive:
+            # Mirrors meta-python's own `off`-mode executable (`build.zig`, built with
+            # `libc-linkage=static` + `exe.pie = true`): the replacement is just as
+            # monolithic as the one it replaces, so it needs the same shape.
+            # `-static-pie` rather than plain `-static` to match it exactly, and
+            # `-rdynamic` so anything still resolving Python C-API symbols against the
+            # executable keeps working. What this shape cannot do is `dlopen()` -- a
+            # statically linked program has no loader to do it with, whichever libc it
+            # was built against -- which is why every native module has to be linked in
+            # here (`dist._assert_static_interpreter_needs_no_dlopen` refuses a folder
+            # where one was left out).
+            extra_preargs = [*extra_preargs, "-static-pie", "-rdynamic"]
 
         objects = [
             *shim_objects,

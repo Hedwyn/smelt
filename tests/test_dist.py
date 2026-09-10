@@ -8,12 +8,16 @@ from pathlib import Path
 
 import pytest
 
+from smelt.bytecode import PycTargetTag
 from smelt.config import SmeltConfig
 from smelt.dist import (
     INSTRUCTIONS_NAME,
     MANIFEST_NAME,
     PAYLOAD_DIR_NAME,
     DistError,
+    DistReport,
+    _assert_static_interpreter_needs_no_dlopen,
+    _shared_objects,
     build_dist,
     collect_closure,
     collect_distribution_metadata,
@@ -25,6 +29,7 @@ from smelt.dist import (
     trace_imported_modules,
 )
 from smelt.explorer import ModuleKind
+from smelt.own_python import StagedInterpreter
 from smelt.utils import PackageRootPath, PathSolver, assert_is_valid_import_path, assert_path_exists
 
 
@@ -622,3 +627,70 @@ def test_isolation_guard_is_omitted_when_not_asked_for(tmp_path: Path) -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert "isolated=False no_site=False" in completed.stdout
+
+
+def _dist_with_shared_objects(tmp_path: Path, *rel_paths: str) -> DistReport:
+    """
+    A finished-distribution stand-in: only what the static-interpreter check looks at
+    -- the folder's contents and whether a musl loader is part of them.
+    """
+    dist_root = tmp_path / "myapp.dist"
+    for rel_path in rel_paths:
+        target = dist_root / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"")
+    dist_root.mkdir(parents=True, exist_ok=True)
+    return DistReport(
+        dist_root=dist_root,
+        onefile_path=None,
+        entrypoint="pkg.cli:main",
+        entrypoint_module="pkg.cli",
+        tag=PycTargetTag(python_version=(3, 12), magic_number=b"", optimize=0),
+        interpreter=StagedInterpreter(prefix_rel_path=Path("."), version=(3, 12)),
+    )
+
+
+def test_shared_objects_finds_every_flavour_of_name(tmp_path: Path) -> None:
+    report = _dist_with_shared_objects(
+        tmp_path,
+        "app/pkg/fib.cpython-312-x86_64-linux-gnu.so",
+        "lib/libz.so.1",
+        "lib/python3.12/lib-dynload/zlib.cpython-312-x86_64-linux-gnu.so",
+        "app/pkg/notes.txt",
+        "lib/python3.12/os.pyc",
+    )
+    assert _shared_objects(report.dist_root) == [
+        "app/pkg/fib.cpython-312-x86_64-linux-gnu.so",
+        "lib/libz.so.1",
+        "lib/python3.12/lib-dynload/zlib.cpython-312-x86_64-linux-gnu.so",
+    ]
+
+
+def test_static_interpreter_check_refuses_a_distribution_holding_a_shared_object(
+    tmp_path: Path,
+) -> None:
+    """
+    A statically linked interpreter has no working `dlopen()`, so a `.so` left in the
+    folder is a module that cannot be imported on the target machine.
+    """
+    report = _dist_with_shared_objects(tmp_path, "app/pkg/fib.cpython-312-x86_64-linux-gnu.so")
+    with pytest.raises(DistError, match="statically linked"):
+        _assert_static_interpreter_needs_no_dlopen(report)
+
+
+def test_static_interpreter_check_passes_a_distribution_without_shared_objects(
+    tmp_path: Path,
+) -> None:
+    report = _dist_with_shared_objects(tmp_path, "app/pkg/__init__.pyc", "bin/python")
+    _assert_static_interpreter_needs_no_dlopen(report)  # must not raise
+
+
+def test_static_interpreter_check_ignores_the_musl_loader(tmp_path: Path) -> None:
+    """
+    The loader is a shared object but not a `dlopen()` target -- it is what performs
+    the loading -- so its presence is not what this check is about.
+    """
+    report = _dist_with_shared_objects(tmp_path, "lib/ld-musl-x86_64.so.1")
+    assert report.interpreter is not None
+    report.interpreter.musl_loader_rel_path = Path("lib") / "ld-musl-x86_64.so.1"
+    _assert_static_interpreter_needs_no_dlopen(report)  # must not raise

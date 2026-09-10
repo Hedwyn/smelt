@@ -19,7 +19,11 @@ from setuptools import Extension
 
 from smelt.compiler import compile_extension_objects
 from smelt.native_deps import is_supported_platform
-from smelt.own_python import INTERPRETER_REL_PATH, own_python_cache_dir
+from smelt.own_python import (
+    INTERPRETER_REL_PATH,
+    REAL_INTERPRETER_REL_PATH,
+    own_python_cache_dir,
+)
 from smelt.static_python import (
     StaticPythonError,
     _check_module_name,
@@ -74,6 +78,25 @@ def test_build_static_interpreter_is_a_noop_without_static_modules(tmp_path: Pat
     assert result == fake_python
 
 
+def test_build_static_interpreter_targets_the_real_interpreter_behind_a_stub(
+    tmp_path: Path,
+) -> None:
+    """
+    A musl distribution's `bin/python` is a stub that starts `bin/python-real` (see
+    `own_python._stage_musl_runtime`); it is the latter that a relink has to replace,
+    and the stub needs no rebuilding since it starts whatever is at that path.
+    """
+    prefix = tmp_path / "prefix"
+    bin_dir = prefix / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "python").write_bytes(b"stub")
+    real = prefix / REAL_INTERPRETER_REL_PATH
+    real.write_text("#!/bin/sh\necho fake\n")
+    real.chmod(0o755)
+
+    assert build_static_interpreter(assert_path_exists(prefix), {}) == real
+
+
 def test_build_static_interpreter_refuses_a_missing_interpreter(tmp_path: Path) -> None:
     prefix = tmp_path / "prefix"
     prefix.mkdir()
@@ -91,8 +114,9 @@ def test_unexpected_dependencies_ignores_the_current_interpreter() -> None:
 
 @needs_own_python
 def test_find_libpython_locates_the_shared_library() -> None:
-    libpython = _find_libpython(assert_path_exists(_CACHED_PREFIX))
+    libpython, is_static_archive = _find_libpython(assert_path_exists(_CACHED_PREFIX))
     assert libpython.name.startswith("libpython")
+    assert is_static_archive is False
 
 
 @needs_own_python

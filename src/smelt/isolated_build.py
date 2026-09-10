@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.metadata
 import re
 import shutil
+import sys
 import zipfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -224,6 +225,7 @@ def fetch_wheel(
     target: str | None,
     *,
     cache_dir: Path | None = None,
+    python_version: tuple[int, int] = sys.version_info[:2],
 ) -> PathExists:
     """
     Resolves and downloads the wheel satisfying `version_requirement` (see
@@ -231,6 +233,14 @@ def fetch_wheel(
     spelling as `own_python_target`; `None` means the host's own platform) via
     `unearth`'s finder API, targeted at that platform's wheel tags (see
     `wheel_platform_tags`) rather than the running interpreter's own.
+
+    `python_version` is the interpreter the wheel has to be *importable by*, and it is
+    as load-bearing as the platform: an extension module is named after the interpreter
+    it was built for (`.cpython-312-x86_64-linux-musl.so`) and is invisible to any
+    other one. Left unset it is the running interpreter's, which a distribution's own
+    interpreter has to match anyway (`dist.assert_no_version_skew`). Without it,
+    unearth treats the version as unconstrained and picks whatever the index published
+    last -- a `cp314` wheel for a 3.12 distribution, silently unimportable.
 
     Cached under `isolated_build_cache_dir()` when `version_requirement` already pins
     an exact version (`"==...")`; a range specifier (the `"pyproject"` strategy's
@@ -263,7 +273,10 @@ def fetch_wheel(
 
     platforms = wheel_platform_tags(target) if target is not None else None
     finder = PackageFinder(
-        target_python=TargetPython(platforms=platforms),
+        # `abis`/`impl` deliberately left to unearth: from `py_ver` alone it derives the
+        # whole tag set an interpreter accepts, `abi3` wheels (this version's and every
+        # older one's) included, which spelling them out by hand would exclude.
+        target_python=TargetPython(py_ver=python_version, platforms=platforms),
         only_binary=[":all:"],
     )
     best_match = finder.find_best_match(f"{dist_name}{version_requirement}")
@@ -271,7 +284,9 @@ def fetch_wheel(
     if package is None or package.version is None:
         raise IsolatedBuildError(
             f"No wheel satisfies {dist_name + version_requirement!r} for target "
-            f"{target or 'the host'!r} -- {dist_name} cannot be reinstalled for it."
+            f"{target or 'the host'!r} and Python "
+            f"{python_version[0]}.{python_version[1]} -- {dist_name} cannot be "
+            "reinstalled for it."
         )
     dest_dir = cache_dir or isolated_build_cache_dir(dist_name, package.version, target)
     dest_dir.mkdir(parents=True, exist_ok=True)

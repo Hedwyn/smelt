@@ -117,14 +117,17 @@ from smelt.onefile import (
 )
 from smelt.own_python import (
     DEFAULT_OWN_PYTHON_TARGET,
+    REAL_INTERPRETER_REL_PATH,
     InterpreterRequirements,
     StagedInterpreter,
     build_own_python,
     interpreter_version,
+    is_musl_zig_target,
     is_windows_zig_target,
     plan_disabled_libraries,
     resolve_requirements,
     stage_interpreter,
+    unprovided_modules,
 )
 from smelt.process import call_command
 from smelt.static_python import build_static_interpreter
@@ -236,10 +239,12 @@ DEFAULT_USE_INITTAB: Final[bool] = False
 
 #: Whether the `python = "own"` interpreter is built as one monolithic, static-PIE
 #: executable (`own_python.OwnPythonLinkage` "static") instead of the default
-#: dynamic-libc/dynamic-libpython shape. **Off by default**: verified only for
-#: `x86_64-linux-musl` (see `static_pie_musl_plan.md`), and incompatible with
-#: `static_modules`/`use_inittab` (see `build_dist`'s own doc) -- not something to turn
-#: on the moment it lands.
+#: dynamic-libc/dynamic-libpython shape. **Off by default**, and it costs the
+#: distribution `dlopen()` entirely: a statically linked interpreter cannot import a
+#: single `.so`, so every native module has to be compiled into it (see
+#: `_assert_static_interpreter_needs_no_dlopen`, which refuses a folder where that did
+#: not happen). The default shape ships musl's own loader instead and keeps `dlopen()`
+#: working, which is what a distribution carrying third-party extensions needs.
 DEFAULT_OWN_PYTHON_STATIC: Final[bool] = False
 
 #: How long the tracing subprocess is given before it is given up on. Importing an
@@ -1064,6 +1069,8 @@ def collect_optional_modules(
     search_paths: Iterable[str] = (),
     extra_modules: Iterable[str] = (),
     extra_packages: Iterable[str] = (),
+    *,
+    required: set[ImportPath] | None = None,
 ) -> set[ImportPath]:
     """
     The modules the closure reaches *only* through imports whose failure the importing
@@ -1079,19 +1086,60 @@ def collect_optional_modules(
     Decided from the source alone: a runtime trace records the accelerator its own
     fully equipped interpreter happened to load, which says nothing about whether the
     application needs it.
+
+    `required` is `collect_required_modules`' answer, which this needs to subtract;
+    pass it when it has already been computed, to save the walk it costs.
     """
     with _search_paths_prepended(search_paths):
         roots = _closure_roots(entrypoint_module, extra_modules, extra_packages)
-        optional: set[ImportPath] = set()
+        collected: set[ImportPath] = set()
         for root in roots:
-            optional.update(explorer_optional_modules(root))
+            collected.update(explorer_optional_modules(root))
+    # A module another root needs outright is not optional, however this one got to it.
+    needed = (
+        required
+        if required is not None
+        else collect_required_modules(entrypoint_module, search_paths, extra_modules, extra_packages)
+    )
+    return collected - needed - _closure_roots_in(entrypoint_module, extra_modules, extra_packages, search_paths)
+
+
+def _closure_roots_in(
+    entrypoint_module: ImportPath,
+    extra_modules: Iterable[str],
+    extra_packages: Iterable[str],
+    search_paths: Iterable[str],
+) -> set[ImportPath]:
+    """
+    `_closure_roots`, with the search paths it needs importable put in place first.
+    """
+    with _search_paths_prepended(search_paths):
+        return _closure_roots(entrypoint_module, extra_modules, extra_packages)
+
+
+def collect_required_modules(
+    entrypoint_module: ImportPath,
+    search_paths: Iterable[str] = (),
+    extra_modules: Iterable[str] = (),
+    extra_packages: Iterable[str] = (),
+) -> set[ImportPath]:
+    """
+    The modules the closure reaches through imports whose failure *nothing* handles --
+    the ones an application cannot start without, on the authority of its own source
+    and the source of everything it imports.
+
+    The counterpart of `collect_optional_modules`, and the same two walks seen from the
+    other side. Statically decided, deliberately: a runtime trace records what the
+    interpreter running the build happened to load, `try: import _hashlib` included,
+    and cannot tell a fallback from a requirement.
+    """
+    with _search_paths_prepended(search_paths):
+        roots = _closure_roots(entrypoint_module, extra_modules, extra_packages)
         required: set[ImportPath] = set()
         for root in roots:
             graph = build_dependency_graph(root, follow_optional=False)
             required.update(node.name for node in flatten_dependency_graph(graph))
-        # A module another root needs outright is not optional, however this one got
-        # to it.
-        return optional - required - roots
+        return required
 
 
 def _native_dest_rel_path(import_path: ImportPath, artifact: Path) -> Path:
@@ -1322,6 +1370,63 @@ def write_entrypoint_module(
     return dest
 
 
+def _shared_objects(dist_root: Path, ignore: Iterable[Path] = ()) -> list[str]:
+    """
+    Every shared object in an assembled distribution, distribution-relative and sorted
+    -- `.so` as well as versioned `.so.N` names, wherever they sit (the payload's own
+    extension modules, the interpreter's `lib-dynload`, bundled libraries).
+
+    `ignore` drops paths that are shared objects but not `dlopen()` targets; the musl
+    loader is one (it is what *performs* the loading).
+    """
+    ignored = {Path(entry) for entry in ignore}
+    found = {
+        entry.relative_to(dist_root).as_posix()
+        for entry in dist_root.rglob("*")
+        # `.so` anywhere in the suffix chain, so a versioned `libz.so.1` and an
+        # `EXT_SUFFIX`-named `zlib.cpython-312-x86_64-linux-gnu.so` both count.
+        if entry.is_file()
+        and ".so" in entry.suffixes
+        and entry.relative_to(dist_root) not in ignored
+    }
+    return sorted(found)
+
+
+def _assert_static_interpreter_needs_no_dlopen(report: DistReport) -> None:
+    """
+    Refuses an `own_python_static` distribution that still contains a shared object.
+
+    A statically linked interpreter has no `dlopen()`: not as a limitation of this
+    toolchain's musl (whose static build simply has no ELF loader compiled in) and not
+    fixably under glibc either, whose static `dlopen()` fails categorically. So every
+    `.so` left in the folder is a module that cannot be imported on the target machine
+    -- a wheel-shipped extension, one of smelt's own that was not inittab-linked, or a
+    standard library accelerator that was not built as a builtin.
+
+    Checked here, over the finished folder, rather than per source: this is the one
+    place that sees everything that actually landed, whichever path put it there.
+    """
+    if report.interpreter is None:
+        return
+    loader = report.interpreter.musl_loader_rel_path
+    leftovers = _shared_objects(report.dist_root, ignore=[loader] if loader else [])
+    if not leftovers:
+        return
+    shown = leftovers[:10]
+    more = f" (and {len(leftovers) - len(shown)} more)" if len(leftovers) > len(shown) else ""
+    raise DistError(
+        f"This distribution ships {len(leftovers)} shared object(s) but its "
+        f"interpreter is statically linked, so none of them can be imported: "
+        f"{shown}{more}. A static interpreter has no working `dlopen()` at all. "
+        "Either compile them into the interpreter -- `use_inittab=True` "
+        "(CLI: `--use-inittab`) for smelt's own extension modules, "
+        "`own_python_static_modules` (CLI: `--own-python-static-module`) for standard "
+        "library accelerators -- or drop `own_python_static` (CLI: "
+        "`--no-own-python-static`), which ships the interpreter linked against libc "
+        "dynamically, with its loader, and keeps `dlopen()` working."
+    )
+
+
 def run_instructions(report: DistReport) -> str:
     """
     How to run the assembled distribution: what to install first, how to invoke it,
@@ -1472,6 +1577,31 @@ worked in an untailored build. `--include-module <name>` puts it back, and
 `--no-tailor-interpreter` ships the whole standard library again."""
 
 
+def _libc_note(interpreter: StagedInterpreter) -> str:
+    """
+    The paragraph saying where the C library comes from -- the one thing a mode `own`
+    folder either takes from the target machine or ships itself, depending on which
+    libc its interpreter was built against.
+    """
+    if interpreter.musl_loader_rel_path is None:
+        return """\
+What is still taken from the target machine is **the C library and its dynamic
+loader** (`libc`, `libm`, `ld-linux`). That is not an oversight: `ld.so` and `libc.so`
+are a tightly ABI-coupled pair, and a build that shipped its own copy of them
+segfaulted inside the loader before any Python ran. Any Linux new enough to have a
+compatible glibc will do; a genuinely libc-independent build means targeting musl,
+which `--own-python-target x86_64-linux-musl` does and this folder does not."""
+    return f"""\
+**The C library travels with the folder too**: `{interpreter.musl_loader_rel_path}` is
+musl, loader and libc in one file, so nothing at all is taken from the target machine.
+That is what targeting musl buys, and it is why `bin/python` here is a small stub
+rather than the interpreter itself -- it starts `{REAL_INTERPRETER_REL_PATH}` through
+that loader, since an executable's own loader path is absolute and baked in at link
+time. Run `bin/python` and everything downstream of it (subprocesses,
+`multiprocessing`) goes through the same stub; the real interpreter is not meant to be
+started directly."""
+
+
 def _own_python_run_instructions(report: DistReport, interpreter: StagedInterpreter) -> str:
     """
     How to run a mode `own` distribution: nothing to install, with the libc caveat.
@@ -1540,12 +1670,7 @@ The shared libraries the extension modules need -- the application's and the
 interpreter's own -- travel with them ({libraries} of them here), found through paths
 relative to this folder.
 
-What is still taken from the target machine is **the C library and its dynamic
-loader** (`libc`, `libm`, `ld-linux`). That is not an oversight: `ld.so` and `libc.so`
-are a tightly ABI-coupled pair, and a build that shipped its own copy of them
-segfaulted inside the loader before any Python ran. Any Linux new enough to have a
-compatible glibc will do; a genuinely libc-independent build means targeting musl,
-which is a separate mode and not what this folder is.
+{_libc_note(interpreter)}
 
 Current limitations
 -------------------
@@ -1773,15 +1898,19 @@ def build_dist(
 
     `own_python_static` builds the mode `own` interpreter with `own_python`'s
     `OwnPythonLinkage` `"static"`: one monolithic, static-PIE `bin/python` with no
-    `libpythonX.Y.so`, verified only for a musl `own_python_target` (see
-    `static_pie_musl_plan.md`). `own_python_static_modules` names CPython stdlib
-    modules (e.g. `_socket`, `zlib`) to compile as builtins under it -- without this,
-    a `linkage="static"` interpreter can still `import sys`/`os`/the frozen stdlib,
-    but every module that would otherwise need `dlopen()` is unusable. Mutually
-    exclusive with `static_modules`/`use_inittab` (smelt's own extensions): a
-    `linkage="static"` interpreter has no `libpythonX.Y.so` for
-    `smelt.static_python.build_static_interpreter` to relink against, so combining
-    both raises `DistError` rather than failing deep inside that relink.
+    `libpythonX.Y.so`. It has no working `dlopen()` at all, so everything native has to
+    be compiled into it: `own_python_static_modules` names CPython stdlib modules (e.g.
+    `_socket`, `zlib`) to build as builtins, and `static_modules`/`use_inittab` does
+    the same for smelt's own extension modules -- the two compose, since meta-python's
+    `off`-mode build also produces a linkable `libpythonX.Y.a` for
+    `smelt.static_python.build_static_interpreter` to relink against. Anything native
+    that is left over as a `.so` (a wheel-shipped extension, a stdlib accelerator not
+    named above) would simply fail to import on the target, so the finished folder is
+    checked for exactly that (`_assert_static_interpreter_needs_no_dlopen`).
+
+    Left off (the default), a musl distribution instead ships musl's own loader and
+    starts the interpreter through it (see `own_python._stage_musl_runtime`), which
+    keeps `dlopen()` -- and with it any third-party native module -- working.
 
     An existing distribution folder of the same name is replaced.
     """
@@ -1805,13 +1934,6 @@ def build_dist(
     resolved_own_python_static_modules = resolve_own_python_static_modules(
         entrypoint_options, own_python_static_modules
     )
-    if resolved_own_python_static and (static_modules or resolved_use_inittab):
-        raise DistError(
-            "own_python_static and static_modules/use_inittab (smelt's own compiled "
-            "extensions) cannot be combined: a linkage=\"static\" interpreter has no "
-            "libpythonX.Y.so for smelt.static_python.build_static_interpreter to "
-            "relink against. See static_pie_musl_plan.md."
-        )
     # Auto-discovery (`run_backend(static_link=True)`, see `compiling_pipeline_refactor.md`)
     # only kicks in when the caller left `static_modules` for us to fill in ourselves --
     # one who hand-supplies it already did their own eligibility judgment, and gets the
@@ -1896,8 +2018,18 @@ def build_dist(
     # interpreter a mode `own` folder ships -- `_hashlib` is 5.1 MB there and a builtin
     # here -- so a `ModuleKind` from this interpreter says nothing about the cost in the
     # folder.
-    optional = collect_optional_modules(
+    # The hard closure -- what nothing offers a fallback for -- is what the
+    # interpreter must actually be able to provide (see the `unprovided_modules` check
+    # below); the optional set is its complement, and the two share their walks.
+    required_modules = collect_required_modules(
         entrypoint_module, search_paths, forced_modules, forced_packages
+    )
+    optional = collect_optional_modules(
+        entrypoint_module,
+        search_paths,
+        forced_modules,
+        forced_packages,
+        required=required_modules,
     ).intersection(closure)
     if drop_optional:
         closure = {
@@ -1908,10 +2040,15 @@ def build_dist(
 
     built_interpreter: PathExists | None = None
     interpreter_requirements: InterpreterRequirements | None = None
+    #: The zig target the mode `own` interpreter is built for, kept for the staging
+    #: pass further down (the stub a musl distribution needs, and any relink of the
+    #: interpreter, are produced for the same target as the interpreter itself).
+    interpreter_target: str | None = None
     if resolved_python == "own":
         target = own_python_target or entrypoint_options.get(
             "own-python-target", DEFAULT_OWN_PYTHON_TARGET
         )
+        interpreter_target = target
         if static_modules and is_windows_zig_target(target):
             raise DistError(
                 f"static_modules names {sorted(static_modules)}, but target {target!r} "
@@ -1959,6 +2096,26 @@ def build_dist(
             static_modules=resolved_own_python_static_modules,
         )
         assert_no_version_skew(tag, interpreter_version(built_interpreter))
+        # Discovery answered "the interpreter brings its own" for every standard
+        # library module, having asked the interpreter running smelt. For a mode `own`
+        # target that is a different interpreter, and for a cross target it can be one
+        # missing extension modules that did not compile there -- so the two module
+        # sets are compared before anything is assembled, rather than left to fail on
+        # the target machine at import time.
+        missing_stdlib = unprovided_modules(
+            built_interpreter, [name for name in stdlib_modules if name in required_modules]
+        )
+        if missing_stdlib:
+            raise DistError(
+                f"The interpreter built for {target or 'this machine'} does not provide "
+                f"{missing_stdlib}, which this application needs: nothing in its import "
+                "graph handles their absence, the interpreter running smelt has them, "
+                "and the one being shipped does not -- an extension module that does "
+                "not compile for this target, typically. The distribution would fail on "
+                "the target machine with ModuleNotFoundError. Either keep the code path "
+                "that reaches them out of the closure (`--exclude-module`), or build "
+                "for a target where they exist."
+            )
         if tailor:
             interpreter_requirements = resolve_requirements(
                 stdlib_modules,
@@ -2095,6 +2252,9 @@ def build_dist(
     report.native_deps = bundle_native_dependencies(
         payload_root,
         {artifact.dest_rel_path: artifact.source for artifact in report.natives},
+        # For a musl interpreter, this machine's libraries are the wrong libc: a
+        # dependency has to come from the distribution's own folders or not at all.
+        include_system_dirs=not is_musl_zig_target(interpreter_target),
     )
 
     data_specs = [
@@ -2138,7 +2298,10 @@ def build_dist(
 
     if built_interpreter is not None:
         report.interpreter = stage_interpreter(
-            built_interpreter, dist_root, requirements=interpreter_requirements
+            built_interpreter,
+            dist_root,
+            requirements=interpreter_requirements,
+            zig_target=interpreter_target,
         )
         if static_modules:
             # Operates on the *staged* prefix (inside `dist_root`), never on
@@ -2146,7 +2309,18 @@ def build_dist(
             # are statically linked in is a property of this one distribution, and
             # baking it into the cache would corrupt it for every other project
             # reusing the same cached interpreter (see `static_python`'s docstring).
-            build_static_interpreter(dist_root / report.interpreter.prefix_rel_path, static_modules)
+            build_static_interpreter(
+                dist_root / report.interpreter.prefix_rel_path,
+                static_modules,
+                zig_target=interpreter_target,
+                # The built prefix holds the `pyconfig.h` describing the *target*
+                # (meta-python generates one per target, see
+                # `own_python._resolve_pyconfig_header`); `Python.h` still comes from
+                # the running interpreter. Only for a cross target: a native build has
+                # a matching pair already and there is no reason to prefer a second
+                # copy of it.
+                include_dirs=[str(built_interpreter)] if interpreter_target else (),
+            )
         if static_build_dir is not None:
             # Only ever set by `run_backend(static_link=True)` staging its own scratch
             # directory (see `BackendResult`'s doc) -- ours to clean up once consumed,
@@ -2155,6 +2329,9 @@ def build_dist(
         report.launcher = write_launcher_shim(
             launcher_name(config, entrypoint_spec), dist_root, report.interpreter
         )
+
+    if resolved_own_python_static:
+        _assert_static_interpreter_needs_no_dlopen(report)
 
     (dist_root / MANIFEST_NAME).write_text(json.dumps(report.serialize(), indent=2))
     (dist_root / INSTRUCTIONS_NAME).write_text(run_instructions(report))

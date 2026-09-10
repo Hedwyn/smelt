@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import struct
+import sys
 import sysconfig
 from pathlib import Path
 
@@ -14,7 +15,8 @@ from smelt.native_deps import (
     bundled_patchelf_dir,
     collect_native_dependencies,
     is_supported_platform,
-    ldd_dependencies,
+    elf_dependencies,
+    elf_dynamic_entries,
     nested_rpath,
     package_rpath_dirs,
     pe_dependencies,
@@ -73,7 +75,10 @@ def test_collect_native_dependencies_walks_transitively(monkeypatch: pytest.Monk
         "/usr/lib/liba.so": {"libb.so": "/usr/lib/libb.so", "libc.so.6": "/usr/lib/libc.so.6"},
         "/usr/lib/libb.so": {},
     }
-    monkeypatch.setattr("smelt.native_deps.ldd_dependencies", lambda path: graph.get(str(path), {}))
+    monkeypatch.setattr(
+        "smelt.native_deps.elf_dependencies",
+        lambda path, search_dirs, include_system_dirs=True: graph.get(str(path), {}),
+    )
     collected = collect_native_dependencies(["/app/mod.so"])
     # transitive: libb is only reachable through liba
     assert collected == {"liba.so": "/usr/lib/liba.so", "libb.so": "/usr/lib/libb.so"}
@@ -93,19 +98,56 @@ def test_collect_native_dependencies_keeps_the_first_of_conflicting_names(
         "/app/mod.so": {"libdup.so": "/opt/one/libdup.so"},
         "/opt/one/libdup.so": {"libdup.so": "/opt/two/libdup.so"},
     }
-    monkeypatch.setattr("smelt.native_deps.ldd_dependencies", lambda path: graph.get(str(path), {}))
+    monkeypatch.setattr(
+        "smelt.native_deps.elf_dependencies",
+        lambda path, search_dirs, include_system_dirs=True: graph.get(str(path), {}),
+    )
     assert collect_native_dependencies(["/app/mod.so"]) == {"libdup.so": "/opt/one/libdup.so"}
 
 
-@pytest.mark.skipif(not is_supported_platform(), reason="ldd is Linux-only")
-def test_ldd_on_a_non_elf_file_reports_no_dependencies(tmp_path: Path) -> None:
+def test_a_non_elf_file_reports_no_dependencies(tmp_path: Path) -> None:
     """
-    A distribution holds plenty of files that are not ELF objects; `ldd` refusing one
-    is not a build failure.
+    A distribution holds plenty of files that are not ELF objects; one of them turning
+    up in the walk is not a build failure.
     """
     data_file = tmp_path / "data.json"
     data_file.write_text("{}\n")
-    assert ldd_dependencies(data_file) == {}
+    assert elf_dynamic_entries(data_file) == ([], [])
+    assert elf_dependencies(data_file, []) == {}
+
+
+@pytest.mark.skipif(not is_supported_platform(), reason="ELF binaries are Linux-only here")
+def test_elf_dependencies_agree_with_the_running_interpreter() -> None:
+    """
+    The reader is checked against a binary whose answer is known independently: the
+    interpreter running this test links libc, and every name it declares has to resolve
+    to a real file of the same architecture.
+    """
+    needed, _rpaths = elf_dynamic_entries(sys.executable)
+    assert any(name.startswith("libc.so") for name in needed), needed
+    resolved = elf_dependencies(sys.executable, [])
+    assert set(resolved) == set(needed)
+    for name, path in resolved.items():
+        assert Path(path).is_file(), name
+
+
+@pytest.mark.skipif(not is_supported_platform(), reason="ELF binaries are Linux-only here")
+def test_elf_dependencies_refuse_a_library_of_another_architecture(tmp_path: Path) -> None:
+    """
+    A same-named library built for another architecture cannot satisfy a dependency,
+    and taking it would be worse than finding nothing: the distribution would look
+    complete and fail to start on the target.
+    """
+    resolved = elf_dependencies(sys.executable, [])
+    name, path = next(iter(resolved.items()))
+    decoy_dir = tmp_path / "decoy"
+    decoy_dir.mkdir()
+    data = bytearray(Path(path).read_bytes())
+    data[0x12] = 0xB7  # e_machine: aarch64, whatever this host actually is
+    (decoy_dir / name).write_bytes(bytes(data))
+
+    found = elf_dependencies(sys.executable, [decoy_dir], include_system_dirs=False)
+    assert name not in found, "an aarch64 library must not satisfy a native binary"
 
 
 def _build_minimal_pe(dll_names: list[str]) -> bytes:
@@ -258,7 +300,9 @@ def test_bundle_native_dependencies_on_windows_copies_into_every_package_dir(
 
     monkeypatch.setattr(
         "smelt.native_deps.collect_native_dependencies",
-        lambda seeds, ignore_prefixes, *, binary_format=None: {"liba.dll": str(dependency)},
+        lambda seeds, ignore_prefixes, *, binary_format=None, include_system_dirs=True: {
+            "liba.dll": str(dependency)
+        },
     )
 
     bundled = bundle_native_dependencies(
@@ -295,6 +339,6 @@ def test_bundle_rewrites_rpaths_to_be_origin_relative(tmp_path: Path) -> None:
         assert (dist_root / basename).is_file()
     assert dest_rel_path in bundled.rewritten
     # nothing the copy needs points outside the folder any more
-    resolved = ldd_dependencies(dist_root / dest_rel_path)
+    resolved = elf_dependencies(dist_root / dest_rel_path, [])
     for basename in bundled.dependencies:
         assert Path(resolved[basename]).resolve().is_relative_to(dist_root.resolve())

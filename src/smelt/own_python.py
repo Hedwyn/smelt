@@ -46,6 +46,8 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
@@ -66,11 +68,11 @@ from smelt.native_deps import (
     WINDOWS_SYSTEM_DLL_IGNORE_PREFIXES,
     BundledNatives,
     collect_native_dependencies,
+    describe_command_failure,
     is_supported_platform,
     set_rpath,
 )
 from smelt.process import call_command
-from smelt.pyconfig import PYCONFIG_DIR, resolve_pyconfig_header
 from smelt.utils import (
     PathExists,
     SmeltError,
@@ -122,6 +124,23 @@ DEFAULT_OWN_PYTHON_LINKAGE: Final[OwnPythonLinkage] = "dynamic"
 #: The interpreter executable inside a built (or staged) prefix, prefix-relative.
 INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python")
 
+#: Where the real interpreter goes when the distribution needs a stub at
+#: `INTERPRETER_REL_PATH` instead -- i.e. for a musl target, see `_stage_musl_runtime`.
+#: `bin/python` has to stay the file everything starts (`sys.executable`, the folder
+#: launcher, the onefile trailer), so it is the *real* one that moves aside.
+REAL_INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python-real")
+
+#: The musl loader (loader and libc in one file) a `*-linux-musl` prefix ships in its
+#: `lib/`, built by meta-python (`build/musl.zig`). The architecture is part of the
+#: name -- `ld-musl-x86_64.so.1` -- and the name itself is whatever Zig wrote into the
+#: interpreter's `PT_INTERP`, so it is matched rather than composed here.
+MUSL_LOADER_GLOB: Final[str] = "ld-musl-*.so.1"
+
+#: The stub installed as `bin/python` for a musl target (see `_stage_musl_runtime`).
+INTERPRETER_SHIM_SOURCE: Final[Path] = (
+    Path(__file__).parent / "launcher" / "interpreter_shim.zig"
+)
+
 #: The Windows counterpart of `INTERPRETER_REL_PATH`. meta-python's `buildWindows`
 #: installs the executable and the DLL implementing the interpreter side by side under
 #: `bin/` -- Windows' DLL search order covers a binary's own directory, which is the
@@ -147,6 +166,18 @@ WINDOWS_VERSION_MARKER_NAME: Final[str] = "_smelt_cpython_version.txt"
 #: standard library directory. Sourceless is fine, absent is not -- see this module's
 #: docstring.
 STDLIB_LANDMARK: Final[str] = "os"
+
+
+def is_musl_zig_target(zig_target: str | None) -> bool:
+    """
+    Whether a `-target` string passed to `zig build`/`zig build-exe` names a musl
+    target.
+
+    Exact for the same reason `is_windows_zig_target` is: every musl triple spells its
+    ABI component with a `musl` prefix (`x86_64-linux-musl`, `arm-linux-musleabihf`,
+    `x86_64-linux-muslx32`), and nothing else does.
+    """
+    return zig_target is not None and "musl" in zig_target
 
 
 def is_windows_zig_target(zig_target: str | None) -> bool:
@@ -603,110 +634,51 @@ def _ensure_metapython_installed() -> None:
         ) from exc
 
 
-# `#define NAME 1` -> `/* #undef NAME */`: autoconf's own "not available" spelling for
-# a plain `#ifdef`-tested `HAVE_*` macro (must be genuinely undefined, not just falsy).
-_MUSL_UNDEF_OVERRIDES: Final[tuple[str, ...]] = (
-    "HAVE_CLOSE_RANGE",
-    "HAVE_SEM_CLOCKWAIT",
-    "HAVE_SYS_PIDFD_H",
-    "HAVE_SCHED_SETAFFINITY",
-    # SysV STREAMS -- a glibc/legacy-Unix-only header, musl never provided it.
-    "HAVE_STROPTS_H",
-)
-# `#define NAME 1` -> `#define NAME 0`: autoconf's `AC_CHECK_DECLS`-style macros are
-# always defined (0 or 1), tested via plain `#if`, so `0` -- not an `#undef` -- is the
-# "not available" spelling here.
-_MUSL_ZERO_OVERRIDES: Final[tuple[str, ...]] = ("HAVE_DECL_RTLD_DEEPBIND",)
-
-
-def _patch_musl_pyconfig(pyconfig_path: Path, dest: Path) -> None:
+def _resolve_pyconfig_header(target: str | None, *, debug: bool, dest: Path) -> PathExists:
     """
-    Copies `pyconfig_path` to `dest`, flipping the specific `HAVE_*` macros
-    `./configure` gets wrong for a musl target (see `build_own_python`'s docstring):
-    it feature-detects against whatever libc the *build machine* actually has, and on
-    a glibc build machine that means these come back "available" even though musl's
-    headers do not provide them -- `Modules/posixmodule.c`,
-    `Python/thread_pthread.h` and `Python/fileutils.c` then fail to compile against
-    musl's actual `<sched.h>`/`<unistd.h>`/(missing) `<sys/pidfd.h>`. Each override
-    was found empirically, one real compiler error at a time -- there is no general
-    "musl mode" flag to flip.
+    A known-good pyconfig.h for `target`, via meta-python's `configure` build step
+    (see `metapython.compile.BuildStep.CONFIGURE`): real `./configure`, through the
+    exact same harness the actual interpreter build uses (`CC=zig cc -target target`,
+    matching CPython version, matching `optimize` mode), plus meta-python's own
+    automatic musl-macro patch -- no compiling, so it costs seconds (`./configure`
+    itself), not the minutes a real build would. This is what makes it worth running
+    on every `build_own_python` call that reaches here (a cache miss), rather than
+    something to run once and check in: it is always target-correct, for whatever
+    target is actually being built this time, at a cost small enough not to matter.
+
+    Mutates meta-python's shared checkout the same way a real build does (deletes
+    `cpython/Makefile`/`pyconfig.h`, clears `.zig-cache`), so the result is copied out
+    to `dest` (the caller's own build cache directory, not meta-python's shared one)
+    before the real build's *own* cleanup would remove it again. Like
+    `_build_interpreter`, assumes the caller already holds `interpreter_build_lock` --
+    it does *not* take the lock itself, since it is only ever called from inside a
+    `with interpreter_build_lock():` block already (`fcntl.flock` is not reentrant
+    within one process: a second acquisition here would deadlock waiting on itself).
     """
-    text = pyconfig_path.read_text()
-    for macro in _MUSL_UNDEF_OVERRIDES:
-        text = re.sub(rf"^#define {macro} 1$", f"/* #undef {macro} */", text, flags=re.MULTILINE)
-    for macro in _MUSL_ZERO_OVERRIDES:
-        text = re.sub(rf"^#define {macro} 1$", f"#define {macro} 0", text, flags=re.MULTILINE)
-    dest.write_text(text)
-
-
-def _is_musl_target(target: str | None) -> bool:
-    """
-    Whether `target` (a Zig target triple, `None` for native) names a musl libc.
-    """
-    return target is not None and "musl" in target
-
-
-def generate_pyconfig_template(target: str) -> PathExists:
-    """
-    Captures a known-good pyconfig.h for `target` and writes it to
-    `smelt.pyconfig.PYCONFIG_DIR / target / "pyconfig.h"` -- what
-    `smelt.pyconfig.resolve_pyconfig_header` then serves to every later
-    `build_own_python(target=target)` call, with no `./configure` run involved at all.
-
-    A maintenance tool, **not** part of an ordinary build -- `build_own_python` never
-    calls this itself. Run it once per target, review the diff against the previous
-    checked-in file (if there is one), and commit the result.
-
-    Only implemented for a musl target today: `./configure`'s own native,
-    non-cross-aware detection (see this module's docstring, and `smelt.pyconfig`'s) is
-    the one case actually known to be wrong, not merely redundant -- a glibc target's
-    `pyconfig.h` is not obviously wrong the same way, so capturing one would only buy
-    the "no `./configure` at all" property itself, not correctness. Raises
-    `OwnPythonError` for anything else.
-
-    Mechanism: lets `./configure` run natively against `target` once (`zig_build`,
-    deliberately expected to fail -- its only purpose is producing a base pyconfig.h
-    for `_patch_musl_pyconfig` to start from; the musl-specific compile errors that
-    failure comes from are exactly what every build *after* this one sidesteps),
-    then applies the same `HAVE_*` fixups meta-python's own `build.zig` already
-    applies automatically at build time (kept here too, so the checked-in file is
-    correct standalone -- readable and diffable on its own, not only when it happens
-    to be fed through that path).
-    """
-    if not _is_musl_target(target):
-        raise OwnPythonError(
-            f"generate_pyconfig_template({target!r}): only implemented for a musl "
-            "target -- ./configure's own detection is not known to be wrong for "
-            "anything else yet."
-        )
-    _ensure_metapython_installed()
-    from metapython.compile import VENDORED_PROJECT_DIR, BuildOptions, zig_build
+    from metapython.compile import VENDORED_PROJECT_DIR, BuildOptions, BuildStep, OptimizeMode, zig_build
 
     cpython_dir = VENDORED_PROJECT_DIR / "cpython"
-    with interpreter_build_lock():
-        for stale in ("Makefile", "pyconfig.h"):
-            (cpython_dir / stale).unlink(missing_ok=True)
-        shutil.rmtree(VENDORED_PROJECT_DIR / ".zig-cache", ignore_errors=True)
-        try:
-            zig_build(
-                BuildOptions(target=target),
-                cwd=VENDORED_PROJECT_DIR,
-                extra_args=["-p", str(VENDORED_PROJECT_DIR / "_smelt_pyconfig_scratch")],
-            )
-        except subprocess.CalledProcessError:
-            pass
-        unpatched_pyconfig = cpython_dir / "pyconfig.h"
-        if not unpatched_pyconfig.exists():
-            raise OwnPythonError(
-                f"{unpatched_pyconfig} is missing after the bootstrap build for target "
-                f"{target!r}: ./configure itself failed, rather than just the "
-                "musl-specific compile errors this bootstrap expects to see."
-            )
-        dest_dir = PYCONFIG_DIR / target
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / "pyconfig.h"
-        _patch_musl_pyconfig(unpatched_pyconfig, dest)
-    return assert_path_exists(dest)
+    for stale in ("Makefile", "pyconfig.h"):
+        (cpython_dir / stale).unlink(missing_ok=True)
+    shutil.rmtree(VENDORED_PROJECT_DIR / ".zig-cache", ignore_errors=True)
+    zig_build(
+        BuildOptions(
+            target=target,
+            optimize=OptimizeMode.DEBUG if debug else OptimizeMode.RELEASE_FAST,
+        ),
+        step=BuildStep.CONFIGURE,
+        cwd=VENDORED_PROJECT_DIR,
+    )
+    produced = cpython_dir / "pyconfig.h"
+    if not produced.is_file():
+        raise OwnPythonError(
+            f"./configure (via meta-python's 'configure' step) did not produce "
+            f"{produced} for target {target or 'native'!r}."
+        )
+    dest.mkdir(parents=True, exist_ok=True)
+    resolved = dest / "pyconfig.h"
+    shutil.copy2(produced, resolved)
+    return assert_path_exists(resolved)
 
 
 def own_python_cache_dir(
@@ -859,8 +831,15 @@ def build_own_python(
 
     A `linkage="static"` interpreter has no `libpythonX.Y.so` for
     `smelt.static_python.build_static_interpreter` (`dist.py`'s own `static_modules`/
-    `use_inittab`, for smelt's *own* compiled extensions) to relink against -- the two
-    mechanisms do not compose today; see `static_pie_musl_plan.md`.
+    `use_inittab`, for smelt's *own* compiled extensions) to relink against -- it links
+    against the `libpythonX.Y.a` meta-python's `off`-mode build produces alongside the
+    monolithic executable instead, so the two mechanisms do compose.
+
+    For a musl target, `linkage="dynamic"` additionally means the built prefix carries
+    musl's own loader in `lib/` (meta-python builds it: Zig links musl but ships no
+    musl runtime). It is what makes such an interpreter runnable at all on a machine
+    with no musl installed -- see `_stage_musl_runtime` for how a distribution starts
+    it through that file, and `interpreter_argv` for how smelt's own probes do.
 
     `disabled_libraries` names meta-python libraries to compile *without*
     (`-D<library>-linkage=off`), one of the two levers a tailored interpreter pulls
@@ -923,17 +902,19 @@ def build_own_python(
     an entrypoint declaration exposes: pass an explicit `pyconfig.h` to use verbatim
     (copied in *after* `./configure` runs, overriding its own output -- same mechanism
     `metapython.compile.BuildOptions.pyconfig_header` has always had). Left `None` (the
-    default), `smelt.pyconfig.resolve_pyconfig_header(target, debug=debug)` picks one
-    automatically: the pyconfig.h of the interpreter currently running smelt for a
-    native build (nothing `./configure` could tell us that a real, already-built file
-    for this exact machine doesn't already answer), or a checked-in, target-specific
-    file for an explicit target (never derived from the host -- whatever libc the venv
-    running smelt happens to use, a musl target always gets the musl file, see
-    `generate_pyconfig_template`) -- falling back to `None` (i.e. `./configure`'s own
-    detection, unchanged) when neither is available. Either way, meta-python's own
-    `build.zig` still auto-patches the musl-specific macros it knows about on top of
-    whatever ends up on disk, so a target with no checked-in template yet is workable,
-    just less robust against a mismatch nobody has hit yet than one with a template.
+    default), `_resolve_pyconfig_header` derives one instead: it runs meta-python's
+    `configure` build step (`BuildStep.CONFIGURE`) -- real `./configure`, through the
+    exact same harness this build itself uses (`CC=zig cc -target target`, matching
+    CPython version, matching `debug`), plus meta-python's automatic musl-macro patch
+    -- and copies the resulting `cpython/pyconfig.h` out before this build's own
+    checkout cleanup would remove it. Costs seconds (`./configure` alone, no compiling)
+    rather than the minutes a real build would, and is always target-correct: unlike
+    copying some unrelated, already-installed Python's pyconfig.h (an earlier version
+    of this used exactly that shortcut, and it does not stand up to scrutiny -- a
+    different CPython version, a different original compiler, different build flags
+    all add variance the empirically-found musl fixups were never validated against),
+    this is generated by the same project, for the exact CPython version and target
+    actually being built, every time.
     """
     static = tuple(static_modules)
     if static and linkage != "static":
@@ -962,7 +943,47 @@ def build_own_python(
     bin_path = dest / (
         WINDOWS_INTERPRETER_REL_PATH if is_windows_zig_target(target) else INTERPRETER_REL_PATH
     )
-    if not no_cache and bin_path.exists():
+
+    def cached() -> bool:
+        """
+        Whether `dest` holds a usable build of this configuration.
+
+        The executable's presence is the question, plus one more for a musl target
+        linked against libc dynamically: such an interpreter is unrunnable without the
+        musl loader beside it (see `_stage_musl_runtime`), and a tree built before
+        meta-python started producing that loader has none. Rebuilding is the only way
+        to get one, so a prefix missing it is not a cache hit.
+        """
+        if not bin_path.exists():
+            return False
+        if not is_musl_zig_target(target):
+            return True
+        if linkage == "dynamic" and find_musl_loader(dest) is None:
+            _logger.info(
+                "The interpreter at %s has no %s: it predates the musl loader being "
+                "built, and cannot run without it. Rebuilding.",
+                dest,
+                MUSL_LOADER_GLOB,
+            )
+            return False
+        # A musl interpreter names its extension modules `...-linux-musl.so`, and looks
+        # for exactly that suffix when importing one -- which is what makes a
+        # `musllinux` wheel loadable. A prefix built before that was true is named
+        # `-gnu` throughout: it runs, so nothing else notices, and every third-party
+        # extension module is silently invisible to it.
+        stale = next(_stdlib_dir(dest).glob("lib-dynload/*-linux-gnu.so"), None)
+        if stale is not None:
+            _logger.info(
+                "The interpreter at %s names its extension modules after glibc (%s) "
+                "though it is a musl build: it predates that being fixed, and no "
+                "musllinux wheel could be imported by it. Rebuilding.",
+                dest,
+                stale.name,
+            )
+            return False
+        return True
+
+    if not no_cache and cached():
         _logger.info("Reusing the interpreter already built at %s", dest)
         return assert_path_exists(dest)
 
@@ -972,10 +993,19 @@ def build_own_python(
         # is nothing left to do. Without this, two processes asked for the same
         # interpreter at the same time would build it twice, the second one over the
         # first one's output.
-        if not no_cache and bin_path.exists():
+        if not no_cache and cached():
             _logger.info("Reusing the interpreter built at %s while waiting", dest)
             return assert_path_exists(dest)
-        resolved_pyconfig_header = pyconfig_header or resolve_pyconfig_header(target, debug=debug)
+        # A (re)build starts from an empty prefix. `zig build install` merges into
+        # whatever is already there, and two builds of the same configuration are not
+        # necessarily compatible: change the extension suffix (a musl target now spells
+        # it `-musl`, see meta-python's `runConfigure`) and the tree ends up holding
+        # both namings of every extension module and of `_sysconfigdata`, with the old
+        # one shipped as dead weight.
+        shutil.rmtree(dest, ignore_errors=True)
+        resolved_pyconfig_header = pyconfig_header or _resolve_pyconfig_header(
+            target, debug=debug, dest=dest
+        )
         return _build_interpreter(
             dest,
             bin_path,
@@ -1030,13 +1060,12 @@ def _build_interpreter(
         libc_linkage=LibCLinkage.STATIC if linkage == "static" else LibCLinkage.DYNAMIC,
         python_linkage=Linkage.OFF if linkage == "static" else Linkage.DYNAMIC,
         static_modules=static,
-        # A known-good pyconfig.h (see `smelt.pyconfig`), when one was resolved --
-        # `None` here (a target with no checked-in template and no matching host
-        # build) leaves `./configure`'s own detection in place, exactly as before this
-        # existed. Either way, meta-python's own `build.zig` still auto-patches the
-        # musl-specific macros it knows about on top of whatever ends up on disk
-        # (idempotent against an already-correct value), so this is additive, not the
-        # only thing standing between a musl build and a wrong `pyconfig.h`.
+        # Always resolved by now (`_resolve_pyconfig_header`, or the caller's own
+        # explicit override) -- see `build_own_python`'s docstring. Meta-python's own
+        # `build.zig` still auto-patches the musl-specific macros it knows about on top
+        # of whatever ends up on disk regardless (idempotent against an
+        # already-correct value), so this is additive, not the only thing standing
+        # between a musl build and a wrong `pyconfig.h`.
         pyconfig_header=pyconfig_header,
     )
 
@@ -1113,6 +1142,33 @@ def _windows_interpreter_version(prefix: Path) -> tuple[int, int]:
     return int(major_str), int(minor_str)
 
 
+def interpreter_argv(prefix: PathExists) -> list[str]:
+    """
+    The command that starts the interpreter installed at `prefix` -- on *this* machine,
+    for smelt's own probes (`interpreter_version`, `_probe_interpreter`).
+
+    A musl interpreter linked against libc dynamically cannot be executed directly:
+    its `PT_INTERP` names an absolute `/lib/ld-musl-<arch>.so.1` that a glibc host does
+    not have, and the kernel refuses to start it. Its own loader, shipped in the
+    prefix, runs it instead -- the same indirection the staged distribution ends up
+    doing through a stub (see `_stage_musl_runtime`). Only same-architecture prefixes
+    can be probed at all either way; a cross-architecture one is as unrunnable here as
+    a cross-compiled `python.exe`.
+    """
+    prefix = assert_path_exists(prefix)
+    # A staged prefix has a stub at `INTERPRETER_REL_PATH` and the real interpreter
+    # beside it; the stub is static and cannot be handed to the loader itself.
+    executable = Path(prefix) / (
+        REAL_INTERPRETER_REL_PATH
+        if (Path(prefix) / REAL_INTERPRETER_REL_PATH).is_file()
+        else INTERPRETER_REL_PATH
+    )
+    if not path_exists(executable):
+        raise OwnPythonError(f"No interpreter at {executable}.")
+    loader = find_musl_loader(Path(prefix))
+    return [str(loader), str(executable)] if loader is not None else [str(executable)]
+
+
 def interpreter_version(prefix: PathExists) -> tuple[int, int]:
     """
     The `(major, minor)` version of the interpreter installed at `prefix`, asked of
@@ -1129,13 +1185,12 @@ def interpreter_version(prefix: PathExists) -> tuple[int, int]:
     """
     if path_exists(Path(prefix) / WINDOWS_INTERPRETER_REL_PATH):
         return _windows_interpreter_version(Path(prefix))
-    executable = prefix / INTERPRETER_REL_PATH
-    if not path_exists(executable):
-        raise OwnPythonError(f"No interpreter at {executable}.")
+    argv = interpreter_argv(prefix)
+    executable = Path(prefix) / INTERPRETER_REL_PATH
     # `-I`: the probe must report the interpreter's own version, not be steered by a
     # `PYTHONPATH`/`sitecustomize` inherited from whatever environment smelt runs in.
     cmd_trace = call_command(
-        str(executable),
+        *argv,
         "-I",
         "-c",
         "import sys; print(sys.version_info[0], sys.version_info[1])",
@@ -1164,10 +1219,9 @@ def _probe_interpreter(prefix: PathExists, script: str, what: str) -> str:
     in. `-S` on top of that, because `site` is exactly one of the things a tailored
     interpreter may end up without.
     """
-    executable = prefix / INTERPRETER_REL_PATH
-    if not path_exists(executable):
-        raise OwnPythonError(f"No interpreter at {executable}.")
-    cmd_trace = call_command(str(executable), "-I", "-S", "-c", script)
+    argv = interpreter_argv(prefix)
+    executable = Path(prefix) / INTERPRETER_REL_PATH
+    cmd_trace = call_command(*argv, "-I", "-S", "-c", script)
     if cmd_trace.exit_code != 0 or not cmd_trace.stdout:
         raise OwnPythonError(
             f"Could not read {what} from the interpreter at {executable} "
@@ -1532,6 +1586,11 @@ class StagedInterpreter:
     #: (see `MINIMAL_VIABLE_STDLIB`). Recorded so the folder states what it gave up,
     #: rather than leaving a reader to infer it from what is missing.
     dropped_stdlib_groups: list[str] = field(default_factory=list)
+    #: The musl loader shipped with the interpreter, distribution-relative, when there
+    #: is one (see `_stage_musl_runtime`). Its presence is what says
+    #: `interpreter_rel_path` is a stub that starts the real interpreter through this
+    #: file rather than the interpreter itself.
+    musl_loader_rel_path: Path | None = None
 
     @property
     def version_string(self) -> str:
@@ -1585,6 +1644,11 @@ class StagedInterpreter:
             "pruned_extensions": self.pruned_extensions,
             "dropped_stdlib_groups": self.dropped_stdlib_groups,
             "bundled_libraries": sorted(self.native_deps.dependencies),
+            "musl_loader": (
+                self.musl_loader_rel_path.as_posix()
+                if self.musl_loader_rel_path is not None
+                else None
+            ),
         }
 
 
@@ -1816,6 +1880,90 @@ def _resolvable_modules(
     return frozenset(resolvable)
 
 
+def unprovided_modules(prefix: PathExists, modules: Iterable[str]) -> list[str]:
+    """
+    Of `modules`, the ones the interpreter installed at `prefix` cannot import while
+    the interpreter running smelt can.
+
+    This is the question nothing else in the pipeline asks. Discovery resolves an
+    application's imports against the interpreter *running smelt*, and a standard
+    library module found there is written off as "the target interpreter brings its
+    own" -- which stops being true the moment the target interpreter is one smelt built
+    itself, for a platform where some extension modules do not compile. `_ssl` is the
+    live example: a musl build does not produce it, `ssl.py` ships regardless, and the
+    distribution fails with `ModuleNotFoundError: No module named '_ssl'` on the target
+    machine unless somebody compares the two module sets. This does.
+
+    Two passes, because neither alone is right. The file-level pass (`_resolvable_modules`)
+    is cheap but only sees files, so it flags things that import perfectly well
+    (`os.path` is `posixpath` under another name, and no file at all); the import pass
+    is exact but runs code, so it is spent only on what the first pass suspects. And a
+    module the *host* cannot import either (`_winapi` on Linux, reached through
+    `subprocess`'s Windows branch) is nobody's regression: it is dropped before either
+    pass, since the application evidently does not need it here.
+    """
+    names = [name for name in modules if _host_can_import(name)]
+    if not names:
+        return []
+    stdlib = _stdlib_dir(Path(prefix))
+    provided = _interpreter_provided_modules(prefix)
+    suspects = sorted(set(names) - _resolvable_modules(stdlib, names, provided))
+    if not suspects:
+        return []
+    return _unimportable_modules(prefix, suspects)
+
+
+def _host_can_import(name: str) -> bool:
+    """
+    Whether the interpreter running smelt can import `name` at all -- asked of the
+    import system rather than by importing, since the answer is only used to decide
+    whether a *missing* module in the target interpreter is a regression or simply a
+    module nobody has on this platform.
+    """
+    from importlib.util import find_spec
+
+    try:
+        return find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _unimportable_modules(prefix: PathExists, names: Iterable[str]) -> list[str]:
+    """
+    Of `names`, the ones the interpreter at `prefix` actually fails to import, asked by
+    importing them there.
+
+    Only ever called with a handful of already-suspect names (see
+    `unprovided_modules`): importing a standard library module is harmless but not
+    free, and doing it for a whole closure would be neither.
+    """
+    script = (
+        "import json\n"
+        f"names = {sorted(names)!r}\n"
+        "failed = []\n"
+        "for name in names:\n"
+        "    try:\n"
+        "        __import__(name)\n"
+        "    except Exception:\n"
+        "        failed.append(name)\n"
+        "print(json.dumps(failed))"
+    )
+    answer = _probe_interpreter(prefix, script, "importable module set")
+    try:
+        failed = json.loads(answer)
+    except json.JSONDecodeError as error:
+        raise OwnPythonError(
+            f"The interpreter at {prefix} answered unreadably when asked which modules "
+            f"it can import: {answer!r} ({error})"
+        ) from error
+    if not isinstance(failed, list):
+        raise OwnPythonError(
+            f"The interpreter at {prefix} answered with {type(failed).__name__} rather "
+            "than a list when asked which modules it can import."
+        )
+    return sorted(str(name) for name in failed)
+
+
 def _tree_size(*roots: Path) -> int:
     """
     Total size in bytes of every regular file under `roots`.
@@ -1827,6 +1975,126 @@ def _tree_size(*roots: Path) -> int:
         for entry in root.rglob("*")
         if entry.is_file() and not entry.is_symlink()
     )
+
+
+def find_musl_loader(prefix: Path) -> Path | None:
+    """
+    The musl loader a prefix ships in its `lib/`, or None when there is none.
+
+    Only a `libc-linkage=dynamic` musl build has one (meta-python installs it there,
+    see `MUSL_LOADER_GLOB`), so its presence is also the answer to "does this prefix
+    need a stub interpreter?" -- which is why staging asks the prefix rather than
+    re-deriving it from the target triple.
+    """
+    candidates = sorted((Path(prefix) / "lib").glob(MUSL_LOADER_GLOB))
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        raise OwnPythonError(
+            f"{Path(prefix) / 'lib'} holds more than one musl loader "
+            f"({[path.name for path in candidates]}), so it cannot be a prefix for one "
+            "architecture. Rebuild the interpreter into a clean prefix."
+        )
+    return candidates[0]
+
+
+def build_interpreter_shim(dest: Path, *, zig_target: str | None = None) -> PathExists:
+    """
+    Compiles `launcher/interpreter_shim.zig` to `dest`, the stub that becomes
+    `bin/python` for a musl distribution (see `_stage_musl_runtime`).
+
+    Statically linked, like `onefile.build_launcher`'s stub and for the same reason:
+    it is the first thing that runs, so it cannot itself need a loader to start. That
+    is safe here despite `libc-linkage=static` having no working `dlopen()` -- the stub
+    only execs.
+
+    Zig's build cache goes next to `dest` rather than into the current directory,
+    which is where `zig build-exe` would otherwise leave a `.zig-cache` behind.
+    """
+    if not INTERPRETER_SHIM_SOURCE.is_file():
+        raise OwnPythonError(
+            f"The interpreter stub source is missing from the installation: "
+            f"{INTERPRETER_SHIM_SOURCE}"
+        )
+    cmd = [
+        sys.executable,
+        "-m",
+        "ziglang",
+        "build-exe",
+        "-O",
+        "ReleaseSmall",
+        f"-femit-bin={dest}",
+        "--cache-dir",
+        str(dest.parent / ".zig-cache"),
+    ]
+    if zig_target is not None:
+        cmd.extend(["-target", zig_target])
+    cmd.append(str(INTERPRETER_SHIM_SOURCE))
+    _logger.info("Building the interpreter stub: %s", " ".join(cmd))
+    cmd_trace = call_command(*cmd)
+    if cmd_trace.exit_code != 0 or not dest.is_file():
+        raise OwnPythonError(
+            "Could not compile the interpreter stub.\n" + describe_command_failure(cmd_trace, cmd)
+        )
+    dest.chmod(0o755)
+    return assert_path_exists(dest)
+
+
+def _stage_musl_runtime(
+    built_prefix: Path, dist_root: Path, *, zig_target: str | None
+) -> Path | None:
+    """
+    Makes a musl-linked interpreter staged at `dist_root` runnable on a machine with no
+    musl installed: copies the prefix's musl loader into `lib/`, moves the real
+    interpreter to `REAL_INTERPRETER_REL_PATH`, and puts the stub that starts it
+    through that loader at `INTERPRETER_REL_PATH`. Returns the loader's
+    distribution-relative path, or None for a prefix that has no loader (every
+    non-musl target, and a `linkage="static"` musl build, which has no dynamic section
+    to satisfy).
+
+    Why any of this is needed: the interpreter's `PT_INTERP` is the absolute
+    `/lib/ld-musl-<arch>.so.1`, baked in at link time, and that file is precisely what
+    the target machine does not have. The kernel refuses to start the executable at
+    all -- so the *folder's* loader has to be invoked as a program instead, with the
+    interpreter as its argument, which is a thing musl's loader supports. See
+    `launcher/interpreter_shim.zig` for why the stub has to be `bin/python` itself
+    rather than something the folder launcher does once.
+    """
+    built_loader = find_musl_loader(built_prefix)
+    if built_loader is None:
+        if is_musl_zig_target(zig_target):
+            _logger.info(
+                "No %s in %s: the interpreter is not dynamically linked against musl, "
+                "so it needs no loader shipped with it.",
+                MUSL_LOADER_GLOB,
+                Path(built_prefix) / "lib",
+            )
+        return None
+
+    loader_rel_path = Path("lib") / built_loader.name
+    dest_loader = dist_root / loader_rel_path
+    shutil.copy2(built_loader, dest_loader)
+    # The onefile payload is a tar extracted with the executable bit as its only mode
+    # information (see `launcher/launcher.zig`), so the bit has to be right here.
+    dest_loader.chmod(0o755)
+
+    real = dist_root / REAL_INTERPRETER_REL_PATH
+    (dist_root / INTERPRETER_REL_PATH).replace(real)
+    # Compiled outside the distribution and copied in: `zig build-exe` leaves a
+    # `.zig-cache` next to whatever it emits, and the distribution is not the place
+    # for it.
+    with tempfile.TemporaryDirectory() as build_folder:
+        shim = build_interpreter_shim(Path(build_folder) / "python", zig_target=zig_target)
+        dest_shim = dist_root / INTERPRETER_REL_PATH
+        shutil.copy2(shim, dest_shim)
+        dest_shim.chmod(0o755)
+    _logger.info(
+        "Staged the musl runtime: %s, with %s starting %s through it",
+        loader_rel_path,
+        INTERPRETER_REL_PATH,
+        REAL_INTERPRETER_REL_PATH,
+    )
+    return loader_rel_path
 
 
 def _interpreter_elf_files(prefix: Path) -> list[Path]:
@@ -1841,7 +2109,15 @@ def _interpreter_elf_files(prefix: Path) -> list[Path]:
     would.
     """
     found: list[Path] = []
-    for pattern in (INTERPRETER_REL_PATH.as_posix(), "lib/libpython*.so*", "lib/python3.*/**/*.so"):
+    # The stub `bin/python` a musl distribution ships is statically linked and has no
+    # dynamic section to rewrite; the real interpreter behind it is the ELF that needs
+    # one (see `_stage_musl_runtime`).
+    interpreter = (
+        REAL_INTERPRETER_REL_PATH
+        if (prefix / REAL_INTERPRETER_REL_PATH).is_file()
+        else INTERPRETER_REL_PATH
+    )
+    for pattern in (interpreter.as_posix(), "lib/libpython*.so*", "lib/python3.*/**/*.so"):
         for entry in sorted(prefix.glob(pattern)):
             if entry.is_file() and not entry.is_symlink():
                 found.append(entry.relative_to(prefix))
@@ -1865,7 +2141,7 @@ def _library_rpath(rel_path: Path, library_dir: Path = Path("lib")) -> str:
     return ":".join(entries)
 
 
-def _bundle_interpreter_dependencies(prefix: Path) -> BundledNatives:
+def _bundle_interpreter_dependencies(prefix: Path, *, foreign_libc: bool = False) -> BundledNatives:
     """
     Copies every shared library the interpreter staged at `prefix` needs into its
     `lib/` directory, and rewrites the RPATHs so they resolve there.
@@ -1876,6 +2152,13 @@ def _bundle_interpreter_dependencies(prefix: Path) -> BundledNatives:
     nothing needs to be installed on the target, and a minimal one has none of those.
     libc and its loader are the deliberate exception, for the reasons in
     `INTERPRETER_HOST_DLL_PREFIXES`.
+
+    `foreign_libc` keeps this machine's libraries out of the walk entirely: a musl
+    interpreter's `libz.so.1` is not this glibc host's `libz.so.1`, and copying the
+    latter in would produce a folder that fails on the target instead of one that is
+    honestly missing a library. What such an interpreter needs is already inside its
+    own prefix -- meta-python links its dependencies in statically -- plus the musl
+    loader, which is staged by name (see `_stage_musl_runtime`).
 
     Not `native_deps.bundle_native_dependencies`, which places dependencies flat at
     the distribution root and gives every artifact an RPATH walking up to it: at the
@@ -1900,7 +2183,9 @@ def _bundle_interpreter_dependencies(prefix: Path) -> BundledNatives:
     dependencies = {
         basename: assert_path_exists(resolved)
         for basename, resolved in collect_native_dependencies(
-            [prefix / rel_path for rel_path in elf_files], _INTERPRETER_WALK_IGNORE_PREFIXES
+            [prefix / rel_path for rel_path in elf_files],
+            _INTERPRETER_WALK_IGNORE_PREFIXES,
+            include_system_dirs=not foreign_libc,
         ).items()
         # `libpythonX.Y.so` is shipped by the interpreter itself, at the very
         # destination a copy would land at.
@@ -2026,6 +2311,7 @@ def stage_interpreter(
     sourceless: bool = True,
     bundle_dependencies: bool = True,
     requirements: InterpreterRequirements | None = None,
+    zig_target: str | None = None,
 ) -> StagedInterpreter:
     """
     Copies the interpreter built at `built_prefix` into `dist_root` and returns what
@@ -2066,6 +2352,12 @@ def stage_interpreter(
       *after* pruning on purpose: an extension module that is gone does not get its
       libraries copied in behind it, which is where most of tailoring's win is.
 
+    A prefix shipping a musl loader (a `libc-linkage=dynamic` musl build) additionally
+    gets that loader copied into `lib/`, its interpreter moved to
+    `REAL_INTERPRETER_REL_PATH`, and a stub that starts it through the loader installed
+    as `bin/python` -- see `_stage_musl_runtime`. `zig_target` is only needed to
+    compile that stub for the right architecture; every other target ignores it.
+
     A Windows-built prefix (`bin/python.exe` present) is staged by
     `_stage_windows_interpreter` instead: no `prune`/`sourceless`/`requirements` pass
     over the stdlib yet, and no tailoring -- see that function's docstring for why.
@@ -2097,6 +2389,13 @@ def stage_interpreter(
 
     dest_stdlib = dest_lib / built_stdlib.name
     shutil.copytree(built_stdlib, dest_stdlib, symlinks=True, dirs_exist_ok=True)
+
+    # Before anything else looks at `bin/python`: from here on it is the stub, and the
+    # real interpreter is `REAL_INTERPRETER_REL_PATH` (see `_interpreter_elf_files`,
+    # `static_python.build_static_interpreter`).
+    musl_loader_rel_path = _stage_musl_runtime(
+        Path(built_prefix), dist_root, zig_target=zig_target
+    )
 
     # Measured on the untouched copy, so the verification below covers the `prune`
     # patterns too and not just the closure-driven pass: a pattern that happens to
@@ -2169,7 +2468,9 @@ def stage_interpreter(
             )
 
     native_deps = (
-        _bundle_interpreter_dependencies(dist_root) if bundle_dependencies else BundledNatives()
+        _bundle_interpreter_dependencies(dist_root, foreign_libc=is_musl_zig_target(zig_target))
+        if bundle_dependencies
+        else BundledNatives()
     )
 
     staged = StagedInterpreter(
@@ -2190,6 +2491,7 @@ def stage_interpreter(
             requirements.dropped_stdlib_groups if requirements is not None else ()
         ),
         size_before_prune_bytes=size_before_prune,
+        musl_loader_rel_path=musl_loader_rel_path,
     )
     _logger.info("Staged interpreter into %s: %s", dist_root, staged.render())
     return staged
