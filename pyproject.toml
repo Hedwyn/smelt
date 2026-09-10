@@ -46,9 +46,7 @@ cython = ["Cython"]
 # `configure` build step (`BuildStep.CONFIGURE`) -- `own_python.py`'s
 # `_resolve_pyconfig_header` imports it directly, so anything older than this fails
 # with `AttributeError: type object 'BuildStep' has no attribute 'CONFIGURE'`.
-metapython = [
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@27183a9",
-]
+metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git"]
 # unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
 # without needing to actually run there. packaging: listed explicitly (not just relied
