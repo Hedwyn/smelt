@@ -1273,32 +1273,40 @@ def collect_distribution_metadata(
             extra_distributions
         )
 
-        collected: list[DataFile] = []
-        for name in sorted(wanted):
-            try:
-                distribution = importlib.metadata.distribution(name)
-            except importlib.metadata.PackageNotFoundError:
-                _logger.warning("Skipping metadata for %r: distribution not found", name)
+    # Resolved outside the prepended `sys.path`: `search_paths` exists so module
+    # discovery can see the project's own, not-yet-installed packages, but a project's
+    # source tree can carry a stale `*.egg-info` (a leftover setuptools build) that
+    # `MetadataPathFinder` matches *before* the real, complete `*.dist-info` normally
+    # found in site-packages -- silently shadowing it with an incomplete one. Metadata
+    # lookup only wants the real, installed distribution, so it should not share that
+    # search context.
+    collected: list[DataFile] = []
+    for name in sorted(wanted):
+        try:
+            distribution = importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            _logger.warning("Skipping metadata for %r: distribution not found", name)
+            continue
+        files = distribution.files
+        if not files:
+            # `None`: no RECORD (a legacy or partially installed distribution). `[]`:
+            # a RECORD-less `*.egg-info` matched instead of the real distribution.
+            # Either way there is no reliable way to enumerate its metadata files.
+            _logger.warning("Skipping metadata for %r: distribution lists no files", name)
+            continue
+        for entry in files:
+            if not entry.parts or not entry.parts[0].endswith((".dist-info", ".egg-info")):
                 continue
-            files = distribution.files
-            if files is None:
-                # No RECORD (a legacy or partially installed distribution): there is
-                # no reliable way to enumerate its metadata files.
-                _logger.debug("Skipping metadata for %r: distribution lists no files", name)
+            if entry.name not in DISTRIBUTION_METADATA_FILES:
                 continue
-            for entry in files:
-                if not entry.parts or not entry.parts[0].endswith((".dist-info", ".egg-info")):
-                    continue
-                if entry.name not in DISTRIBUTION_METADATA_FILES:
-                    continue
-                source = Path(str(distribution.locate_file(entry)))
-                if not path_exists(source):
-                    continue
-                dest_rel_path = Path(*entry.parts)
-                dest = dist_root / dest_rel_path
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, dest)
-                collected.append(DataFile(source, dest_rel_path))
+            source = Path(str(distribution.locate_file(entry)))
+            if not path_exists(source):
+                continue
+            dest_rel_path = Path(*entry.parts)
+            dest = dist_root / dest_rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+            collected.append(DataFile(source, dest_rel_path))
     return collected
 
 
