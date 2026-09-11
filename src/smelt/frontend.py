@@ -444,6 +444,14 @@ def build_standalone_binary(
     "is what zipimport reads.",
 )
 @click.option(
+    "--onefile-cache/--no-onefile-cache",
+    "onefile_cache",
+    default=None,
+    help="Whether a shape that has to extract itself reuses a previous extraction "
+    "found at its cache directory (the default) instead of always re-extracting. Set "
+    "SMELT_ONEFILE_VERBOSE=1 on the built artifact to see this decision at runtime.",
+)
+@click.option(
     "--use-inittab/--no-use-inittab",
     "use_inittab",
     default=None,
@@ -559,6 +567,7 @@ def build_dist_folder(
     onefile: bool | None,
     onefile_only: bool,
     onefile_compression: Literal["xz", "gzip", "none"] | None,
+    onefile_cache: bool | None,
     use_inittab: bool | None,
     own_python_static: bool | None,
     own_python_static_modules: tuple[str, ...],
@@ -616,6 +625,7 @@ def build_dist_folder(
         onefile=onefile,
         onefile_only=onefile_only,
         onefile_compression=onefile_compression,
+        onefile_cache=onefile_cache,
         use_inittab=use_inittab,
         own_python_static=own_python_static,
         own_python_static_modules=own_python_static_modules,

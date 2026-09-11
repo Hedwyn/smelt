@@ -695,6 +695,36 @@ def isolation_guard() -> EntrypointGuard:
     )
 
 
+def onefile_cleanup_guard(env_var: str) -> EntrypointGuard:
+    """
+    A guard that deletes the directory a non-reusing onefile run extracted itself
+    into, once this process is done with it, successfully or not.
+
+    Both onefile launchers (`smelt.onefile`'s extracting `__main__` and the compiled
+    `launcher.zig`) replace their own process to start this one -- exactly what makes
+    `python <folder>/app` and `./launcher` behave like ordinary, single-process
+    programs -- and a replaced process leaves nothing running behind it to clean up
+    afterwards. `atexit` here is what still can, from *inside* the one process that
+    lives on: it covers a normal return, `sys.exit`, and an unhandled exception alike.
+
+    `env_var` is read (and removed, so it never leaks into the program's own view of
+    its environment) rather than hardcoded, because the path is only known at
+    extraction time -- a launcher sets it right before handing off, precisely when it
+    decided not to reuse its cache directory (see `onefile.CLEANUP_ENV_VAR`). Must run
+    after `isolation_guard` in the guard list: that guard's own re-exec, when it
+    fires, has to carry the variable across unconsumed, which only holds if this one
+    has not popped it yet.
+    """
+    return EntrypointGuard(
+        imports=("atexit", "os", "shutil"),
+        code=(
+            f'_cleanup_dir = os.environ.pop("{env_var}", None)\n'
+            "if _cleanup_dir:\n"
+            "    atexit.register(shutil.rmtree, _cleanup_dir, ignore_errors=True)"
+        ),
+    )
+
+
 def create_entrypoint_script(
     entrypoint: str,
     dest_dir: str | os.PathLike[str],

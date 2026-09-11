@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import sysconfig
@@ -27,6 +28,7 @@ from smelt.dist import (
     project_search_paths,
     resolve_entrypoint_spec,
     trace_imported_modules,
+    write_entrypoint_module,
 )
 from smelt.explorer import ModuleKind
 from smelt.own_python import StagedInterpreter
@@ -627,6 +629,65 @@ def test_isolation_guard_is_omitted_when_not_asked_for(tmp_path: Path) -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert "isolated=False no_site=False" in completed.stdout
+
+
+def test_onefile_cleanup_env_var_deletes_its_directory_once_done(tmp_path: Path) -> None:
+    """
+    `onefile_cleanup_env_var` is how a non-reusing onefile run still gets its
+    extracted directory deleted, even though the launcher that put it there already
+    replaced its own process to start this one and cannot come back to do it (see
+    `smelt.backend.onefile_cleanup_guard`).
+    """
+    payload_root = tmp_path / "payload"
+    payload_root.mkdir()
+    (payload_root / "app.py").write_text("def main() -> int:\n    return 0\n")
+    write_entrypoint_module(
+        "app:main",
+        payload_root,
+        tag=PycTargetTag(python_version=sys.version_info[:2], magic_number=b"", optimize=-1),
+        guard_version=False,
+        isolate=False,
+        onefile_cleanup_env_var="SMELT_TEST_CLEANUP",
+    )
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+    (extracted / "marker").write_text("x")
+    completed = subprocess.run(
+        [sys.executable, str(payload_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "SMELT_TEST_CLEANUP": str(extracted)},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert not extracted.exists()
+
+
+def test_onefile_cleanup_guard_is_a_noop_without_the_variable(tmp_path: Path) -> None:
+    """
+    The guard is unconditionally safe to embed: a normal folder run, or a onefile run
+    that is reusing its cache, never sets the variable, and the guard must not treat
+    its absence as anything to clean up.
+    """
+    payload_root = tmp_path / "payload"
+    payload_root.mkdir()
+    (payload_root / "app.py").write_text("def main() -> int:\n    return 0\n")
+    write_entrypoint_module(
+        "app:main",
+        payload_root,
+        tag=PycTargetTag(python_version=sys.version_info[:2], magic_number=b"", optimize=-1),
+        guard_version=False,
+        isolate=False,
+        onefile_cleanup_env_var="SMELT_TEST_CLEANUP",
+    )
+    completed = subprocess.run(
+        [sys.executable, str(payload_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={k: v for k, v in os.environ.items() if k != "SMELT_TEST_CLEANUP"},
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def _dist_with_shared_objects(tmp_path: Path, *rel_paths: str) -> DistReport:

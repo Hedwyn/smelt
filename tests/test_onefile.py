@@ -65,11 +65,18 @@ def _trailer_field(trailer: bytes, offset: int) -> str:
     return raw.split(b"\x00", 1)[0].decode()
 
 
+def _running_from(stderr: str) -> str:
+    match = re.search(r"running from (\S+)", stderr)
+    assert match is not None, stderr
+    return match.group(1)
+
+
 def test_trailer_carries_what_the_launcher_needs() -> None:
     trailer = encode_trailer(
         payload_offset=1234,
         payload_size=5678,
         compression="xz",
+        reuse_cache=True,
         cache_directory="myapp-0123456789abcdef",
         exec_rel_path="bin/python",
         payload_dir="app",
@@ -79,9 +86,23 @@ def test_trailer_carries_what_the_launcher_needs() -> None:
     assert int.from_bytes(trailer[8:16], "little") == 1234
     assert int.from_bytes(trailer[16:24], "little") == 5678
     assert trailer[24] == 1
+    assert trailer[25] == 1
     assert _trailer_field(trailer, 32) == "myapp-0123456789abcdef"
     assert _trailer_field(trailer, 96) == "bin/python"
     assert _trailer_field(trailer, 160) == "app"
+
+
+def test_trailer_carries_whether_the_cache_is_reused() -> None:
+    disabled = encode_trailer(
+        payload_offset=0,
+        payload_size=0,
+        compression="xz",
+        reuse_cache=False,
+        cache_directory="myapp-0123456789abcdef",
+        exec_rel_path="bin/python",
+        payload_dir="app",
+    )
+    assert disabled[25] == 0
 
 
 def test_trailer_refuses_a_field_that_would_not_survive_the_round_trip() -> None:
@@ -94,6 +115,7 @@ def test_trailer_refuses_a_field_that_would_not_survive_the_round_trip() -> None
             payload_offset=0,
             payload_size=0,
             compression="xz",
+            reuse_cache=True,
             cache_directory="x" * 65,
             exec_rel_path="bin/python",
             payload_dir="app",
@@ -116,12 +138,13 @@ def test_the_launcher_reads_the_trailer_this_module_writes() -> None:
         "payload_offset_off": 8,
         "payload_size_off": 16,
         "compression_off": 24,
+        "reuse_cache_off": 25,
         "cache_name_off": 32,
         "exec_rel_off": 96,
         "payload_dir_off": 160,
         "field_size": 64,
     }
-    assert 'const MAGIC = "SMELTPK\\x01"' in source
+    assert 'const MAGIC = "SMELTPK\\x02"' in source
     assert f"const TRAILER_SIZE = {TRAILER_SIZE};" in source
     assert f'const SENTINEL = "{SENTINEL_NAME}";' in source
 
@@ -234,6 +257,8 @@ def test_extracting_main_guards_before_it_unpacks() -> None:
     assert source.index("_REQUIRED_VERSION") < source.index("def _extract")
     assert "mode=_TAR_MODE" in source
     assert '"r:xz"' in source
+    assert "_REUSE_CACHE = True" in source
+    assert "SMELT_ONEFILE_VERBOSE" in source
 
 
 # --------------------------------------------------------------------------------
@@ -305,6 +330,135 @@ def test_zip_application_extracts_when_it_has_to(tmp_path: Path) -> None:
     assert (target / SENTINEL_NAME).stat().st_mtime_ns == stamp
 
 
+@pytest.mark.skipif(not is_linux, reason="the /bin/sh preamble is POSIX-only")
+def test_zip_application_extracts_to_a_private_temp_dir_when_not_reusing(tmp_path: Path) -> None:
+    """
+    A non-reusing run never touches the persistent, digest-named cache directory:
+    it extracts under the system temp dir (here, `SMELT_ONEFILE_CACHE`, which still
+    overrides the root either way) and tells the payload where to delete it from
+    afterwards -- actually deleting it is `onefile_cleanup_guard`'s job, exercised
+    end to end in `test_dist.py`, since that guard is not part of this synthetic
+    distribution.
+    """
+    root = _distribution(
+        tmp_path / "dist",
+        executable=(
+            "import os\n"
+            "_target = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n"
+            "print('target=%s cleanup=%s' % (_target, os.environ.get('SMELT_ONEFILE_CLEANUP')))\n"
+        ),
+    )
+    artifact = pack_zip_application(
+        assert_path_exists(root),
+        tmp_path / "myapp",
+        name="myapp",
+        payload_dir="app",
+        python_version=sys.version_info[:2],
+        magic_number=importlib.util.MAGIC_NUMBER,
+        extract=True,
+        reuse_cache=False,
+    )
+    temp_root = tmp_path / "temp"
+    environment = {**os.environ, "SMELT_ONEFILE_CACHE": str(temp_root)}
+    runs = [
+        subprocess.run(
+            [sys.executable, str(artifact.path)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=environment,
+        )
+        for _ in range(2)
+    ]
+    targets = []
+    for run in runs:
+        match = re.search(r"target=(\S+) cleanup=(\S+)", run.stdout)
+        assert match is not None, run.stdout
+        target, cleanup = match.group(1), match.group(2)
+        assert target == cleanup
+        assert Path(target).is_relative_to(temp_root)
+        targets.append(target)
+    # private to each run: nothing here is ever reused, so two runs must not collide
+    assert targets[0] != targets[1]
+
+
+@pytest.mark.skipif(not is_linux, reason="the /bin/sh preamble is POSIX-only")
+def test_zip_application_reports_cache_decisions_when_verbose_and_not_reusing(
+    tmp_path: Path,
+) -> None:
+    root = _distribution(tmp_path / "dist")
+    artifact = pack_zip_application(
+        assert_path_exists(root),
+        tmp_path / "myapp",
+        name="myapp",
+        payload_dir="app",
+        python_version=sys.version_info[:2],
+        magic_number=importlib.util.MAGIC_NUMBER,
+        extract=True,
+        reuse_cache=False,
+    )
+    temp_root = tmp_path / "temp"
+    environment = {
+        **os.environ,
+        "SMELT_ONEFILE_CACHE": str(temp_root),
+        "SMELT_ONEFILE_VERBOSE": "1",
+    }
+    answer = subprocess.run(
+        [sys.executable, str(artifact.path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=environment,
+    )
+    assert "cache reuse disabled" in answer.stderr
+    assert "cache dir" not in answer.stderr
+    target = _running_from(answer.stderr)
+    assert f"extracted {target}" in answer.stderr
+    assert Path(target).is_relative_to(temp_root)
+
+
+@pytest.mark.skipif(not is_linux, reason="the /bin/sh preamble is POSIX-only")
+def test_zip_application_reports_cache_decisions_when_verbose(tmp_path: Path) -> None:
+    root = _distribution(tmp_path / "dist")
+    artifact = pack_zip_application(
+        assert_path_exists(root),
+        tmp_path / "myapp",
+        name="myapp",
+        payload_dir="app",
+        python_version=sys.version_info[:2],
+        magic_number=importlib.util.MAGIC_NUMBER,
+        extract=True,
+    )
+    assert artifact.cache_name is not None
+    cache = tmp_path / "cache"
+    environment = {
+        **os.environ,
+        "SMELT_ONEFILE_CACHE": str(cache),
+        "SMELT_ONEFILE_VERBOSE": "1",
+    }
+    first = subprocess.run(
+        [sys.executable, str(artifact.path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=environment,
+    )
+    target = cache / artifact.cache_name
+    assert "cache reuse enabled" in first.stderr
+    assert f"cache dir {artifact.cache_name}" in first.stderr
+    assert f"extracted {target}" in first.stderr
+    assert f"running from {target}" in first.stderr
+
+    second = subprocess.run(
+        [sys.executable, str(artifact.path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=environment,
+    )
+    assert f"reused {target}" in second.stderr
+
+
 @pytest.mark.skipif(not is_linux, reason="the compiled launcher is verified on Linux only")
 def test_compiled_launcher_unpacks_and_starts_the_bundled_interpreter(tmp_path: Path) -> None:
     """
@@ -353,6 +507,100 @@ def test_compiled_launcher_unpacks_and_starts_the_bundled_interpreter(tmp_path: 
         env={"SMELT_ONEFILE_CACHE": str(cache)},
     )
     assert relocated.stdout.strip() == f"interpreter argv: {target / 'app'} gamma"
+
+
+@pytest.mark.skipif(not is_linux, reason="the compiled launcher is verified on Linux only")
+def test_compiled_launcher_extracts_to_a_private_temp_dir_when_not_reusing(tmp_path: Path) -> None:
+    """
+    Same contract as the zip application's, but harder to get right: this launcher
+    replaces its own process (`std.process.replace`) to start the bundled
+    interpreter, so the cleanup path has to survive that `exec` as an environment
+    variable rather than a function argument (see `launcher.zig`'s `main`).
+    """
+    root = _distribution(tmp_path / "dist")
+    interpreter = root / "bin" / "python"
+    # stands in for the bundled interpreter; a real one would run the generated
+    # `app/__main__.py`'s `onefile_cleanup_guard`, exercised end to end in
+    # `test_dist.py` -- this only checks what the launcher itself hands down.
+    interpreter.write_text('#!/bin/sh\necho "cleanup: ${SMELT_ONEFILE_CLEANUP:-<unset>}"\n')
+    interpreter.chmod(0o755)
+    artifact = pack_executable(
+        assert_path_exists(root),
+        tmp_path / "myapp",
+        name="myapp",
+        payload_dir="app",
+        exec_rel_path=Path("bin/python"),
+        reuse_cache=False,
+    )
+    temp_root = tmp_path / "temp"
+    environment = {"SMELT_ONEFILE_CACHE": str(temp_root)}
+    runs = [
+        subprocess.run(
+            [str(artifact.path)], capture_output=True, text=True, check=True, env=environment
+        )
+        for _ in range(2)
+    ]
+    targets = []
+    for run in runs:
+        match = re.search(r"cleanup: (\S+)", run.stdout)
+        assert match is not None, run.stdout
+        assert match.group(1) != "<unset>"
+        assert Path(match.group(1)).is_relative_to(temp_root)
+        targets.append(match.group(1))
+    assert targets[0] != targets[1]
+
+
+@pytest.mark.skipif(not is_linux, reason="the compiled launcher is verified on Linux only")
+def test_compiled_launcher_reports_cache_decisions_when_verbose(tmp_path: Path) -> None:
+    root = _distribution(tmp_path / "dist")
+    artifact = pack_executable(
+        assert_path_exists(root),
+        tmp_path / "myapp",
+        name="myapp",
+        payload_dir="app",
+        exec_rel_path=Path("bin/python"),
+    )
+    assert artifact.cache_name is not None
+    cache = tmp_path / "cache"
+    environment = {"SMELT_ONEFILE_CACHE": str(cache), "SMELT_ONEFILE_VERBOSE": "1"}
+    first = subprocess.run(
+        [str(artifact.path)], capture_output=True, text=True, check=True, env=environment
+    )
+    target = cache / artifact.cache_name
+    assert "cache reuse enabled" in first.stderr
+    assert f"cache dir {artifact.cache_name}" in first.stderr
+    assert f"extracted {target}" in first.stderr
+    assert f"running from {target}" in first.stderr
+
+    second = subprocess.run(
+        [str(artifact.path)], capture_output=True, text=True, check=True, env=environment
+    )
+    assert f"reused {target}" in second.stderr
+
+
+@pytest.mark.skipif(not is_linux, reason="the compiled launcher is verified on Linux only")
+def test_compiled_launcher_reports_cache_decisions_when_verbose_and_not_reusing(
+    tmp_path: Path,
+) -> None:
+    root = _distribution(tmp_path / "dist")
+    artifact = pack_executable(
+        assert_path_exists(root),
+        tmp_path / "myapp",
+        name="myapp",
+        payload_dir="app",
+        exec_rel_path=Path("bin/python"),
+        reuse_cache=False,
+    )
+    temp_root = tmp_path / "temp"
+    environment = {"SMELT_ONEFILE_CACHE": str(temp_root), "SMELT_ONEFILE_VERBOSE": "1"}
+    answer = subprocess.run(
+        [str(artifact.path)], capture_output=True, text=True, check=True, env=environment
+    )
+    assert "cache reuse disabled" in answer.stderr
+    assert "cache dir" not in answer.stderr
+    target = _running_from(answer.stderr)
+    assert f"extracted {target}" in answer.stderr
+    assert Path(target).is_relative_to(temp_root)
 
 
 @pytest.mark.skipif(not is_linux, reason="the compiled launcher is verified on Linux only")

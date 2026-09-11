@@ -65,6 +65,7 @@ from smelt.backend import (
     collect_built_artifacts,
     create_entrypoint_script,
     isolation_guard,
+    onefile_cleanup_guard,
     python_version_guard,
     run_backend,
 )
@@ -105,7 +106,9 @@ from smelt.native_deps import (
 from smelt.nuitkaify import Stdout, import_path_search_root
 from smelt.onefile import (
     CACHE_ENV_VAR,
+    CLEANUP_ENV_VAR,
     DEFAULT_ONEFILE,
+    DEFAULT_ONEFILE_CACHE,
     DEFAULT_ONEFILE_COMPRESSION,
     PYTHON_ENV_VAR,
     OnefileArtifact,
@@ -803,6 +806,28 @@ def resolve_onefile_compression(
     )
 
 
+def resolve_onefile_cache(
+    entrypoint_options: EntrypointOptions,
+    onefile_cache: bool | None = None,
+) -> bool:
+    """
+    Whether an extracting single file reuses a previous extraction found at its
+    cache directory, resolved the same way as every other option here: `onefile_cache`
+    where the caller decided (the CLI wins over the declaration), then the
+    entrypoint's own `onefile-cache` option, then `DEFAULT_ONEFILE_CACHE`.
+    """
+    if onefile_cache is not None:
+        return onefile_cache
+    declared = entrypoint_options.get("onefile-cache", DEFAULT_ONEFILE_CACHE)
+    if not isinstance(declared, bool):
+        raise DistError(
+            f"Invalid onefile-cache {declared!r}, expected a boolean: true (the "
+            "default, reuse a previous extraction found at the cache directory) or "
+            "false (always re-extract)."
+        )
+    return declared
+
+
 def assert_no_version_skew(tag: PycTargetTag, interpreter_version: tuple[int, int]) -> None:
     """
     Refuses a shipped interpreter whose minor version differs from the one that
@@ -1318,6 +1343,7 @@ def write_entrypoint_module(
     guard_version: bool = True,
     isolate: bool = True,
     optimize: int = -1,
+    onefile_cleanup_env_var: str | None = None,
 ) -> Path:
     """
     Writes the distribution's `__main__` module into `dist_root` (the payload
@@ -1328,6 +1354,13 @@ def write_entrypoint_module(
     ask for (`backend.python_version_guard`, `backend.isolation_guard`). An entrypoint
     given as a bare module path has no function to call, so it is run the way
     `python -m` would run it.
+
+    `onefile_cleanup_env_var`, set only for a onefile build packed with reuse off
+    (see `resolve_onefile_cache`), adds `backend.onefile_cleanup_guard`: the folder
+    is agnostic to onefile otherwise (see `smelt.onefile`'s module docstring), but
+    the deletion this guard performs can only happen from inside the process the
+    launcher replaced itself with, which makes the folder's own generated entrypoint
+    the one place left to put it.
 
     **Shipped as source when guarded, as bytecode otherwise.** A version guard held in
     a `.pyc` could never run: the interpreter checks the bytecode magic before
@@ -1342,6 +1375,11 @@ def write_entrypoint_module(
         guards.append(python_version_guard(tag.python_version, tag.magic_number))
     if isolate:
         guards.append(isolation_guard())
+    if onefile_cleanup_env_var is not None:
+        # Last: `isolation_guard`'s own re-exec, when it fires, must carry the
+        # variable across unconsumed, which only holds while nothing ahead of it in
+        # this list has popped it yet.
+        guards.append(onefile_cleanup_guard(onefile_cleanup_env_var))
 
     module_path, sep, _ = entrypoint_spec.partition(":")
     if guards:
@@ -1809,6 +1847,7 @@ def build_dist(
     onefile: bool | None = None,
     onefile_only: bool = False,
     onefile_compression: str | None = None,
+    onefile_cache: bool | None = None,
     static_modules: Mapping[str, Iterable[PathExists]] = {},
     use_inittab: bool | None = None,
     isolated_build: bool | None = None,
@@ -1859,7 +1898,9 @@ def build_dist(
     `smelt.onefile`): an executable zip application in mode `byo`, a compiled launcher
     carrying the compressed folder in mode `own`. `onefile_compression` chooses how
     that payload is compressed, and `onefile_only` deletes the folder afterwards --
-    for a build whose output is published rather than inspected.
+    for a build whose output is published rather than inspected. `onefile_cache`
+    (default on) makes a shape that has to extract itself reuse a previous extraction
+    found at its cache directory; off, it always re-extracts.
 
     `static_modules` names modules from `built` (smelt's own compiled extensions) to
     link straight into the interpreter instead of shipping as a loose `.so` (see
@@ -1997,6 +2038,7 @@ def build_dist(
     drop_optional = resolve_drop_optional_imports(entrypoint_options, drop_optional_imports)
     pack_onefile = resolve_onefile(entrypoint_options, onefile)
     compression = resolve_onefile_compression(entrypoint_options, onefile_compression)
+    reuse_cache = resolve_onefile_cache(entrypoint_options, onefile_cache)
     if onefile_only and not pack_onefile:
         raise DistError(
             "--onefile-only asks for the distribution folder to be deleted once it is "
@@ -2301,6 +2343,7 @@ def build_dist(
         guard_version=guard_version,
         isolate=isolate,
         optimize=optimize,
+        onefile_cleanup_env_var=CLEANUP_ENV_VAR if (pack_onefile and not reuse_cache) else None,
     )
     report.entrypoint_file = entrypoint_file.relative_to(payload_root)
 
@@ -2354,7 +2397,9 @@ def build_dist(
         # cross-compiled. `interpreter_target` is the one every other cross-aware step
         # here already uses (see its own declaration above), and is `None` in `byo`
         # mode too, where `pack_dist` ignores `zig_target` entirely regardless.
-        report.onefile = pack_dist(report, zig_target=interpreter_target, compression=compression)
+        report.onefile = pack_dist(
+            report, zig_target=interpreter_target, compression=compression, reuse_cache=reuse_cache
+        )
         # Rewritten now that there is something more to say. The copy *inside* the
         # single file is the one written above and does not describe the packing --
         # a manifest cannot record the digest of an archive it is itself part of.
@@ -2370,6 +2415,7 @@ def pack_dist(
     report: DistReport,
     *,
     compression: OnefileCompression = DEFAULT_ONEFILE_COMPRESSION,
+    reuse_cache: bool = DEFAULT_ONEFILE_CACHE,
     zig_target: str | None = None,
 ) -> OnefileArtifact:
     """
@@ -2391,6 +2437,7 @@ def pack_dist(
             payload_dir=PAYLOAD_DIR_NAME,
             exec_rel_path=report.interpreter.executable_rel_path,
             compression=compression,
+            reuse_cache=reuse_cache,
             zig_target=zig_target,
         )
     return pack_zip_application(
@@ -2406,5 +2453,6 @@ def pack_dist(
             has_namespace_packages=bool(report.namespace_packages),
         ),
         compression=compression,
+        reuse_cache=reuse_cache,
         extra_root_files=[dist_root / MANIFEST_NAME],
     )

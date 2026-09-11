@@ -1,8 +1,10 @@
 //! Onefile launcher for a mode `own` smelt distribution.
 //!
 //! The whole distribution folder is appended to this executable as a compressed
-//! archive; this program inflates it into a content-addressed cache directory the
-//! first time it runs, then replaces itself with the bundled interpreter.
+//! archive; this program inflates it -- into a content-addressed cache directory
+//! reused across runs, or a private one under the system temp dir cleaned up after
+//! this run, depending on `Trailer.reuse_cache` -- then replaces itself with the
+//! bundled interpreter.
 //!
 //! Deliberately small in scope: everything a distribution has to *enforce* -- the
 //! isolation flags, the interpreter version check -- already lives in the generated
@@ -17,7 +19,7 @@ const native_os = builtin.os.tag;
 
 /// Trailer magic. The final byte is the trailer format version: a stub and a payload
 /// built by different smelt versions must not silently half-understand each other.
-const MAGIC = "SMELTPK\x01";
+const MAGIC = "SMELTPK\x02";
 
 /// Size of the fixed-layout trailer at the very end of the file. Read backwards from
 /// the end so that neither the ELF nor the PE header has to be parsed to find it.
@@ -38,6 +40,9 @@ const Trailer = struct {
     payload_offset: u64,
     payload_size: u64,
     compression: Compression,
+    /// Whether a cache directory found already `SENTINEL`-complete is reused, or
+    /// this run always re-extracts over it. Set at pack time (`onefile-cache`).
+    reuse_cache: bool,
     /// Directory name the payload is extracted under, `<app>-<digest>`.
     cache_name: []const u8,
     /// The interpreter to exec, relative to the extracted directory.
@@ -51,6 +56,7 @@ const Trailer = struct {
     const payload_offset_off = 8;
     const payload_size_off = 16;
     const compression_off = 24;
+    const reuse_cache_off = 25;
     const cache_name_off = 32;
     const exec_rel_off = 96;
     const payload_dir_off = 160;
@@ -62,6 +68,7 @@ const Trailer = struct {
             .payload_offset = std.mem.readInt(u64, bytes[payload_offset_off..][0..8], .little),
             .payload_size = std.mem.readInt(u64, bytes[payload_size_off..][0..8], .little),
             .compression = @enumFromInt(bytes[compression_off]),
+            .reuse_cache = bytes[reuse_cache_off] != 0,
             .cache_name = field(bytes, cache_name_off),
             .exec_rel = field(bytes, exec_rel_off),
             .payload_dir = field(bytes, payload_dir_off),
@@ -96,12 +103,39 @@ pub fn main(init: std.process.Init) !void {
     const trailer = Trailer.parse(&raw_trailer) orelse
         fatal("this executable carries no smelt payload, or one this launcher is too old to read", .{});
 
-    const cache_root = try cacheRoot(arena, environ);
-    const target = try std.fs.path.join(arena, &.{ cache_root, trailer.cache_name });
+    const verbose = verboseEnabled(environ);
+    if (verbose) {
+        std.log.info("smelt: onefile: cache reuse {s}", .{if (trailer.reuse_cache) "enabled" else "disabled"});
+    }
 
-    const sentinel = try std.fs.path.join(arena, &.{ target, SENTINEL });
-    const cached = Io.Dir.accessAbsolute(io, sentinel, .{}) != error.FileNotFound;
-    if (!cached) try extract(io, gpa, arena, self, trailer, cache_root, target);
+    // Reused extractions are content-addressed and persistent (`~/.cache/smelt` by
+    // default); a non-reused one is private to this run and lives under the system
+    // temp dir instead, cleaned up once the bundled interpreter is done with it (see
+    // the exec/spawn split below, and `smelt.backend.onefile_cleanup_guard`).
+    var target: []const u8 = undefined;
+    var cached = false;
+    if (trailer.reuse_cache) {
+        const cache_root = try cacheRoot(arena, environ);
+        target = try std.fs.path.join(arena, &.{ cache_root, trailer.cache_name });
+        if (verbose) std.log.info("smelt: onefile: cache dir {s}", .{trailer.cache_name});
+        const sentinel = try std.fs.path.join(arena, &.{ target, SENTINEL });
+        const found = Io.Dir.accessAbsolute(io, sentinel, .{}) != error.FileNotFound;
+        cached = found;
+        if (!found) try extract(io, gpa, arena, self, trailer, cache_root, target);
+    } else {
+        const temp_root = try tempRoot(arena, environ);
+        // Unique per run, not per payload: nothing here is ever reused, so the name
+        // only has to not collide with another instance running right now, which the
+        // pid already guarantees.
+        target = try std.fmt.allocPrint(arena, "{s}{c}{s}-{d}", .{
+            temp_root, std.fs.path.sep, trailer.cache_name, currentPid(),
+        });
+        try extract(io, gpa, arena, self, trailer, temp_root, target);
+    }
+    if (verbose) {
+        std.log.info("smelt: onefile: {s} {s}", .{ if (cached) "reused" else "extracted", target });
+        std.log.info("smelt: onefile: running from {s}", .{target});
+    }
 
     const interpreter = try std.fs.path.join(arena, &.{ target, trailer.exec_rel });
     const payload = try std.fs.path.join(arena, &.{ target, trailer.payload_dir });
@@ -120,16 +154,34 @@ pub fn main(init: std.process.Init) !void {
     while (args.next()) |arg| try argv.append(arena, arg);
 
     if (std.process.can_replace) {
+        if (!trailer.reuse_cache) {
+            // This process is about to be replaced, which is exactly why the
+            // deletion cannot happen here: nothing of this launcher survives past
+            // `replace`. Handing the path down as an environment variable is what
+            // lets the payload's own generated entrypoint delete it once it is
+            // actually done (`smelt.backend.onefile_cleanup_guard`) -- `replace`
+            // otherwise inherits the parent's environment unchanged, so this is the
+            // one thing about it worth overriding.
+            var env_map = std.process.Environ.createMap(environ, arena) catch |err|
+                fatal("cannot prepare the bundled interpreter's environment: {t}", .{err});
+            env_map.put("SMELT_ONEFILE_CLEANUP", target) catch |err|
+                fatal("cannot prepare the bundled interpreter's environment: {t}", .{err});
+            const err = std.process.replace(io, .{ .argv = argv.items, .environ_map = &env_map });
+            fatal("cannot start the bundled interpreter {s}: {t}", .{ interpreter, err });
+        }
         const err = std.process.replace(io, .{ .argv = argv.items });
         fatal("cannot start the bundled interpreter {s}: {t}", .{ interpreter, err });
     }
     // Windows has no exec(): the closest equivalent is spawning the bundled
     // interpreter as a child, waiting for it, and exiting with its own code. Argv[0]
-    // stays lost either way, same as the POSIX branch above.
+    // stays lost either way, same as the POSIX branch above. Unlike that branch, this
+    // process is still here once the child exits, so a non-reused extraction is
+    // deleted directly rather than handed down for the payload to clean up itself.
     var child = std.process.spawn(io, .{ .argv = argv.items }) catch |err|
         fatal("cannot start the bundled interpreter {s}: {t}", .{ interpreter, err });
     const term = child.wait(io) catch |err|
         fatal("cannot wait for the bundled interpreter {s}: {t}", .{ interpreter, err });
+    if (!trailer.reuse_cache) Io.Dir.cwd().deleteTree(io, target) catch {};
     std.process.exit(switch (term) {
         .exited => |code| code,
         else => 1,
@@ -165,6 +217,37 @@ fn cacheRoot(arena: std.mem.Allocator, environ: std.process.Environ) ![]const u8
     // No HOME at all -- `env -i` is a case this is verified against, and failing there
     // would defeat the point of a distribution that needs nothing installed.
     return "/tmp/smelt";
+}
+
+/// Where a non-reused extraction goes: the system temp dir, never `~/.cache` --
+/// there is nothing here worth a user stumbling on later, and nothing to keep past
+/// this run. `SMELT_ONEFILE_CACHE` still wins, for the same reason it does above.
+fn tempRoot(arena: std.mem.Allocator, environ: std.process.Environ) ![]const u8 {
+    if (native_os == .windows) {
+        if (try envGetWindows(arena, environ, "SMELT_ONEFILE_CACHE")) |dir| return dir;
+        if (try envGetWindows(arena, environ, "TEMP")) |dir|
+            return std.fs.path.join(arena, &.{ dir, "smelt" });
+        if (try envGetWindows(arena, environ, "TMP")) |dir|
+            return std.fs.path.join(arena, &.{ dir, "smelt" });
+        return "C:/Windows/Temp/smelt";
+    }
+    if (environ.getPosix("SMELT_ONEFILE_CACHE")) |dir| return dir;
+    if (environ.getPosix("TMPDIR")) |dir| return std.fs.path.join(arena, &.{ dir, "smelt" });
+    return "/tmp/smelt";
+}
+
+/// Whether `SMELT_ONEFILE_VERBOSE` is set to anything non-empty -- the toggle for the
+/// cache-reuse diagnostic this launcher writes to stderr (see `smelt.onefile`'s module
+/// docstring).
+fn verboseEnabled(environ: std.process.Environ) bool {
+    if (native_os == .windows) {
+        var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena_state.deinit();
+        const value = envGetWindows(arena_state.allocator(), environ, "SMELT_ONEFILE_VERBOSE") catch return false;
+        return value != null and value.?.len > 0;
+    }
+    const value = environ.getPosix("SMELT_ONEFILE_VERBOSE") orelse return false;
+    return value.len > 0;
 }
 
 /// Inflates the payload into `target`, atomically: it is written to a sibling
@@ -218,9 +301,10 @@ fn extract(
         fatal("cannot finalize {s}: {t}", .{ scratch, err });
 
     cwd.rename(scratch, cwd, target, io) catch |err| switch (err) {
-        // Another process extracted the same payload first. Its copy is as good as
-        // ours by construction -- the directory name is a digest of the payload -- so
-        // there is nothing to reconcile, only our own scratch tree to remove.
+        // Reused (digest-named) targets only: another process extracted the same
+        // payload first, and its copy is as good as ours by construction, so there is
+        // nothing to reconcile, only our own scratch tree to remove. A non-reused
+        // target is pid-suffixed and cannot lose this race.
         error.DirNotEmpty, error.AccessDenied, error.PermissionDenied => cwd.deleteTree(io, scratch) catch {},
         else => fatal("cannot move the extracted payload into {s}: {t}", .{ target, err }),
     };

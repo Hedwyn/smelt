@@ -27,6 +27,15 @@ goes to a scratch sibling and is `rename`d into place, so a half-extracted tree 
 never visible -- not to a later run, and not to a second process starting
 concurrently.
 
+Reuse is a build-time choice (`reuse_cache`, on by default). Off, a run does not
+touch the persistent cache at all: it extracts to a private directory under the
+system temp dir instead (never `~/.cache`), and that directory is deleted once the
+program is done with it -- see `smelt.backend.onefile_cleanup_guard` for why that
+deletion happens from *inside* the payload rather than here. Set
+`SMELT_ONEFILE_VERBOSE` at runtime to see, on stderr, whether reuse is on, the cache
+directory it maps to (when it is), whether this run found and reused it, and where
+it ended up running from.
+
 Nothing here is a *policy* decision point: the isolation flags and the interpreter
 version check live in the generated `app/__main__.py` (see
 `smelt.backend.isolation_guard` / `python_version_guard`) and run whichever way the
@@ -82,6 +91,12 @@ DEFAULT_ONEFILE_COMPRESSION: Final[OnefileCompression] = "xz"
 #: the artifact has to travel rather than be looked at.
 DEFAULT_ONEFILE: Final[bool] = False
 
+#: Whether an extracting shape reuses a previous extraction found at its cache
+#: directory, instead of always re-extracting. On by default -- that is the entire
+#: point of the cache directory being content-addressed; off is for a run that must
+#: not trust whatever is already on disk under that name.
+DEFAULT_ONEFILE_CACHE: Final[bool] = True
+
 #: `lzma` preset used for the payload. Deliberately the library default rather than
 #: `9`: on a 30 MB interpreter tree the extra presets buy single-digit percentages of
 #: size for several times the packing time, and the inflation cost is paid on the
@@ -104,6 +119,19 @@ CACHE_ENV_VAR: Final[str] = "SMELT_ONEFILE_CACHE"
 #: Environment variable naming the interpreter a mode `byo` single file should use,
 #: ahead of anything it would find on `PATH`.
 PYTHON_ENV_VAR: Final[str] = "SMELT_PYTHON"
+
+#: Environment variable that, set to anything non-empty, makes a run report to
+#: stderr whether cache reuse is on, the cache directory it maps to, whether this
+#: run found and reused it, and the directory it ended up running from.
+VERBOSE_ENV_VAR: Final[str] = "SMELT_ONEFILE_VERBOSE"
+
+#: Environment variable carrying the directory a non-reusing run should delete once
+#: it is done with it, set by the launcher right before it hands off to the payload
+#: (see `smelt.backend.onefile_cleanup_guard`). Read from inside that payload rather
+#: than acted on by the launcher itself: mode `own`'s launcher and mode `byo`'s
+#: extracting `__main__` both replace their own process to start it, and a replaced
+#: process has no code left running to clean up afterwards.
+CLEANUP_ENV_VAR: Final[str] = "SMELT_ONEFILE_CLEANUP"
 
 #: Characters kept in the cache directory name. Everything else is replaced, so that a
 #: distribution named after a package with unusual characters cannot produce a path
@@ -128,13 +156,14 @@ _DIGEST_CHARS: Final[int] = 16
 #: Magic bytes opening the trailer. The last byte is the trailer's format version, so
 #: a launcher and a payload built by different smelt versions refuse each other
 #: instead of half-understanding each other.
-TRAILER_MAGIC: Final[bytes] = b"SMELTPK\x01"
+TRAILER_MAGIC: Final[bytes] = b"SMELTPK\x02"
 
 TRAILER_SIZE: Final[int] = 256
 
 _TRAILER_PAYLOAD_OFFSET: Final[int] = 8
 _TRAILER_PAYLOAD_SIZE: Final[int] = 16
 _TRAILER_COMPRESSION: Final[int] = 24
+_TRAILER_REUSE_CACHE: Final[int] = 25
 _TRAILER_CACHE_NAME: Final[int] = 32
 _TRAILER_EXEC_REL: Final[int] = 96
 _TRAILER_PAYLOAD_DIR: Final[int] = 160
@@ -376,6 +405,7 @@ def encode_trailer(
     payload_offset: int,
     payload_size: int,
     compression: OnefileCompression,
+    reuse_cache: bool,
     cache_directory: str,
     exec_rel_path: str,
     payload_dir: str,
@@ -393,6 +423,7 @@ def encode_trailer(
     )
     trailer[_TRAILER_PAYLOAD_SIZE : _TRAILER_PAYLOAD_SIZE + 8] = payload_size.to_bytes(8, "little")
     trailer[_TRAILER_COMPRESSION] = _COMPRESSION_CODES[compression]
+    trailer[_TRAILER_REUSE_CACHE] = 1 if reuse_cache else 0
     for offset, value, what in (
         (_TRAILER_CACHE_NAME, cache_directory, "cache directory name"),
         (_TRAILER_EXEC_REL, exec_rel_path, "interpreter path"),
@@ -510,11 +541,14 @@ _CACHE_NAME = "{cache_name}"
 _PAYLOAD_DIR = "{payload_dir}"
 _SENTINEL = "{sentinel}"
 _TAR_MODE = "{tar_mode}"
+_REUSE_CACHE = {reuse_cache}
+_VERBOSE_ENV_VAR = "{verbose_env}"
+_CLEANUP_ENV_VAR = "{cleanup_env}"
 
 
 def _cache_root() -> str:
     """
-    Where payloads are extracted. Kept in step with the compiled launcher's own
+    Where a reused extraction is kept. Kept in step with the compiled launcher's own
     `cacheRoot`, deliberately including the last resort: a distribution that has to
     work under `env -i` cannot require HOME to be set.
     """
@@ -527,6 +561,18 @@ def _cache_root() -> str:
     home = os.environ.get("HOME")
     if home:
         return os.path.join(home, ".cache", "smelt")
+    return os.path.join(tempfile.gettempdir(), "smelt")
+
+
+def _temp_root() -> str:
+    """
+    Where a non-reused extraction goes: the system temp dir, never `~/.cache` --
+    there is nothing here worth a user stumbling on later, and nothing to keep past
+    this run. Still overridable, for the same reason `_cache_root` is.
+    """
+    override = os.environ.get("{cache_env}")
+    if override:
+        return override
     return os.path.join(tempfile.gettempdir(), "smelt")
 
 
@@ -547,9 +593,10 @@ def _extract(target: str) -> None:
         try:
             os.rename(scratch, target)
         except OSError:
-            # Another process unpacked the same payload first. The directory is named
-            # after a digest of that payload, so its copy and ours are the same tree
-            # by construction and there is nothing to reconcile.
+            # Reused (digest-named) targets only: another process unpacked the same
+            # payload first, and its copy is the same tree as ours by construction,
+            # so there is nothing to reconcile. A non-reused target is a directory
+            # this run alone just reserved and cannot lose this race.
             shutil.rmtree(scratch, ignore_errors=True)
     except BaseException:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -557,9 +604,38 @@ def _extract(target: str) -> None:
 
 
 if __name__ == "__main__":
-    _target = os.path.join(_cache_root(), _CACHE_NAME)
-    if not os.path.exists(os.path.join(_target, _SENTINEL)):
+    _verbose = bool(os.environ.get(_VERBOSE_ENV_VAR))
+    if _verbose:
+        sys.stderr.write(
+            "smelt: onefile: cache reuse %s\\n" % ("enabled" if _REUSE_CACHE else "disabled")
+        )
+    if _REUSE_CACHE:
+        _target = os.path.join(_cache_root(), _CACHE_NAME)
+        if _verbose:
+            sys.stderr.write("smelt: onefile: cache dir %s\\n" % _CACHE_NAME)
+        _found = os.path.exists(os.path.join(_target, _SENTINEL))
+        if not _found:
+            _extract(_target)
+        if _verbose:
+            sys.stderr.write(
+                "smelt: onefile: %s %s\\n" % ("reused" if _found else "extracted", _target)
+            )
+    else:
+        # Private to this run, never the shared cache dir: two non-reusing runs of
+        # the same payload must not race over one directory the way two reusing ones
+        # safely can (that one is a digest, this one only has to be unique here).
+        _root = _temp_root()
+        os.makedirs(_root, exist_ok=True)
+        _target = tempfile.mkdtemp(prefix=_CACHE_NAME + "-", dir=_root)
         _extract(_target)
+        # Read from inside the payload (see `smelt.backend.onefile_cleanup_guard`):
+        # `os.execv` below replaces this process, which is why the deletion cannot
+        # happen here -- there is no code left running afterwards to do it.
+        os.environ[_CLEANUP_ENV_VAR] = _target
+        if _verbose:
+            sys.stderr.write("smelt: onefile: extracted %s\\n" % _target)
+    if _verbose:
+        sys.stderr.write("smelt: onefile: running from %s\\n" % _target)
     os.execv(
         sys.executable,
         [
@@ -584,6 +660,7 @@ def extracting_main(
     compression: OnefileCompression,
     python_version: tuple[int, int],
     magic_number: bytes,
+    reuse_cache: bool = DEFAULT_ONEFILE_CACHE,
 ) -> str:
     """
     Source of the bootstrap `__main__` an extracting zip application ships.
@@ -598,6 +675,9 @@ def extracting_main(
         payload_dir=payload_dir,
         sentinel=SENTINEL_NAME,
         tar_mode=_TAR_MODES[compression],
+        reuse_cache=reuse_cache,
+        verbose_env=VERBOSE_ENV_VAR,
+        cleanup_env=CLEANUP_ENV_VAR,
         cache_env=CACHE_ENV_VAR,
     )
 
@@ -672,6 +752,7 @@ def pack_zip_application(
     magic_number: bytes,
     extract: bool,
     compression: OnefileCompression = DEFAULT_ONEFILE_COMPRESSION,
+    reuse_cache: bool = DEFAULT_ONEFILE_CACHE,
     extra_root_files: Iterable[Path] = (),
 ) -> OnefileArtifact:
     """
@@ -734,6 +815,7 @@ def pack_zip_application(
                         compression=compression,
                         python_version=python_version,
                         magic_number=magic_number,
+                        reuse_cache=reuse_cache,
                     ),
                 )
             ],
@@ -762,6 +844,7 @@ def pack_executable(
     payload_dir: str,
     exec_rel_path: Path,
     compression: OnefileCompression = DEFAULT_ONEFILE_COMPRESSION,
+    reuse_cache: bool = DEFAULT_ONEFILE_CACHE,
     zig_target: str | None = None,
 ) -> OnefileArtifact:
     """
@@ -795,6 +878,7 @@ def pack_executable(
                     payload_offset=payload_offset,
                     payload_size=archive.size,
                     compression=compression,
+                    reuse_cache=reuse_cache,
                     cache_directory=directory,
                     exec_rel_path=exec_rel_path.as_posix(),
                     payload_dir=payload_dir,
