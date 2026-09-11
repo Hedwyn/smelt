@@ -435,13 +435,20 @@ def build_standalone_binary(
 )
 @click.option(
     "--onefile-compression",
-    type=click.Choice(["xz", "gzip", "none"]),
+    type=click.Choice(["xz", "gzip"]),
     default=None,
     help="How the single file's payload is compressed. 'xz' (the default) is the "
     "smallest and the slowest to inflate on the target's first run, 'gzip' trades size "
-    "for that, 'none' stores it as-is. Note a payload imported straight out of its zip "
-    "-- a pure-Python --python byo distribution -- is deflated either way, since that "
-    "is what zipimport reads.",
+    "for that. Note a payload imported straight out of its zip -- a pure-Python --python "
+    "byo distribution -- is deflated either way, since that is what zipimport reads.",
+)
+@click.option(
+    "--onefile-compression-preset",
+    type=int,
+    default=None,
+    help="Compression preset (1-9 for gzip, 0-9 for xz). Defaults to 6. Higher values "
+    "reduce file size but increase compression time (paid at build time) and decompression "
+    "time (paid on target's first run).",
 )
 @click.option(
     "--onefile-cache/--no-onefile-cache",
@@ -566,7 +573,8 @@ def build_dist_folder(
     drop_stdlib_groups: tuple[str, ...],
     onefile: bool | None,
     onefile_only: bool,
-    onefile_compression: Literal["xz", "gzip", "none"] | None,
+    onefile_compression: Literal["xz", "gzip"] | None,
+    onefile_compression_preset: int | None,
     onefile_cache: bool | None,
     use_inittab: bool | None,
     own_python_static: bool | None,
@@ -625,6 +633,7 @@ def build_dist_folder(
         onefile=onefile,
         onefile_only=onefile_only,
         onefile_compression=onefile_compression,
+        onefile_compression_preset=onefile_compression_preset,
         onefile_cache=onefile_cache,
         use_inittab=use_inittab,
         own_python_static=own_python_static,

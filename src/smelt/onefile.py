@@ -77,14 +77,18 @@ class OnefileError(SmeltError):
 
 
 #: How the payload is compressed. `"xz"` is the smallest and the slowest to inflate,
-#: `"gzip"` roughly halves the inflation time for a larger file, `"none"` stores the
-#: payload as-is -- worth having for a payload that is already compressed at rest, and
-#: for telling a packing problem apart from a compression one.
-type OnefileCompression = Literal["xz", "gzip", "none"]
+#: `"gzip"` roughly halves the inflation time for a larger file.
+type OnefileCompression = Literal["xz", "gzip"]
 
-ONEFILE_COMPRESSIONS: Final[tuple[OnefileCompression, ...]] = ("xz", "gzip", "none")
+ONEFILE_COMPRESSIONS: Final[tuple[OnefileCompression, ...]] = ("xz", "gzip")
 
 DEFAULT_ONEFILE_COMPRESSION: Final[OnefileCompression] = "xz"
+
+#: Compression preset for xz (0-9) and gzip (1-9). Deliberately 6 for xz rather than
+#: 9: on a 30 MB interpreter tree the extra presets buy single-digit percentages of
+#: size for several times the packing time, and the inflation cost is paid on the
+#: target machine's first run.
+DEFAULT_ONEFILE_COMPRESSION_PRESET: Final[int] = 6
 
 #: Whether a distribution is additionally packed into a single file. Off by default:
 #: the folder is the shape that is inspectable, and packing is what you ask for when
@@ -97,11 +101,6 @@ DEFAULT_ONEFILE: Final[bool] = False
 #: not trust whatever is already on disk under that name.
 DEFAULT_ONEFILE_CACHE: Final[bool] = True
 
-#: `lzma` preset used for the payload. Deliberately the library default rather than
-#: `9`: on a 30 MB interpreter tree the extra presets buy single-digit percentages of
-#: size for several times the packing time, and the inflation cost is paid on the
-#: target machine's first run.
-XZ_PRESET: Final[int] = 6
 
 #: Name of the archive member holding the payload in an extracting zip application.
 #: Stored (never deflated) inside the zip: it is already compressed.
@@ -141,9 +140,10 @@ _CACHE_NAME_ALLOWED: Final[str] = (
 )
 
 #: How much of the payload digest goes into the cache directory name. 16 hex
-#: characters of SHA-256: the digest identifies a build, and does not have to resist
-#: anything -- a payload is only ever compared against payloads of the same
-#: application on the same machine.
+#: characters from Blake2b(8 bytes): the digest identifies a build, and does not
+#: have to resist anything -- a payload is only ever compared against payloads of
+#: the same application on the same machine. Blake2b is faster than SHA-256 while
+#: retaining sufficient collision resistance for content-addressed caching.
 _DIGEST_CHARS: Final[int] = 16
 
 # --------------------------------------------------------------------------------
@@ -296,29 +296,30 @@ def _write_tar(root: PathExists, dest: Path) -> int:
     return entries
 
 
-def _compress(source: PathExists, dest: Path, compression: OnefileCompression) -> None:
+def _compress(
+    source: PathExists,
+    dest: Path,
+    compression: OnefileCompression,
+    preset: int = DEFAULT_ONEFILE_COMPRESSION_PRESET,
+) -> None:
     """
-    Compresses `source` into `dest`.
+    Compresses `source` into `dest` with the given preset.
+    Validates that preset is in range for the selected algorithm.
+    """
+    if compression == "xz" and not (0 <= preset <= 9):
+        raise OnefileError(f"xz preset must be 0-9, got {preset}")
+    if compression == "gzip" and not (1 <= preset <= 9):
+        raise OnefileError(f"gzip preset must be 1-9, got {preset}")
 
-    Done as a second pass over a finished tar rather than through a compressing
-    fileobj underneath `tarfile`, for one reason worth recording: `tarfile`'s own
-    `w:gz` mode stamps the current time into the gzip header, and a build whose output
-    depends on when it ran gives up the byte-for-byte reproducibility the archive is
-    deliberately built to have (`_normalized`). `mtime=0` here is the fix, and it is
-    only reachable by driving `gzip` directly.
-    """
     with source.open("rb") as handle:
         match compression:
             case "xz":
-                with lzma.open(dest, "wb", format=lzma.FORMAT_XZ, preset=XZ_PRESET) as xz_sink:
+                with lzma.open(dest, "wb", format=lzma.FORMAT_XZ, preset=preset) as xz_sink:
                     shutil.copyfileobj(handle, xz_sink)
             case "gzip":
                 with dest.open("wb") as raw:
-                    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as gzip_sink:
+                    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, compresslevel=preset) as gzip_sink:
                         shutil.copyfileobj(handle, gzip_sink)
-            case "none":
-                with dest.open("wb") as raw:
-                    shutil.copyfileobj(handle, raw)
 
 
 def _normalized(entry: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -362,6 +363,7 @@ def build_payload_archive(
     dest: Path,
     *,
     compression: OnefileCompression = DEFAULT_ONEFILE_COMPRESSION,
+    compression_preset: int = DEFAULT_ONEFILE_COMPRESSION_PRESET,
 ) -> PayloadArchive:
     """
     Archives the contents of `root` into `dest` and returns what went in.
@@ -373,10 +375,10 @@ def build_payload_archive(
     with tempfile.TemporaryDirectory() as scratch:
         plain = Path(scratch) / "payload.tar"
         entries = _write_tar(root, plain)
-        _compress(assert_path_exists(plain), dest, compression)
+        _compress(assert_path_exists(plain), dest, compression, compression_preset)
         uncompressed_size = plain.stat().st_size
 
-    digest = hashlib.sha256()
+    digest = hashlib.blake2b(digest_size=8)
     with dest.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
@@ -576,11 +578,14 @@ def _temp_root() -> str:
     return os.path.join(tempfile.gettempdir(), "smelt")
 
 
-def _extract(target: str) -> None:
+def _extract(target: str) -> tuple[None, float]:
     """
     Unpacks into a scratch directory and renames it into place, so that neither a
     later run nor a concurrent one can ever see a half-extracted tree.
+    Returns timing in milliseconds.
     """
+    import time
+    start = time.perf_counter()
     root = os.path.dirname(target)
     os.makedirs(root, exist_ok=True)
     scratch = tempfile.mkdtemp(prefix=".tmp-", dir=root)
@@ -601,6 +606,7 @@ def _extract(target: str) -> None:
     except BaseException:
         shutil.rmtree(scratch, ignore_errors=True)
         raise
+    return None, (time.perf_counter() - start) * 1000
 
 
 if __name__ == "__main__":
@@ -614,12 +620,14 @@ if __name__ == "__main__":
         if _verbose:
             sys.stderr.write("smelt: onefile: cache dir %s\\n" % _CACHE_NAME)
         _found = os.path.exists(os.path.join(_target, _SENTINEL))
+        _timing = 0.0
         if not _found:
-            _extract(_target)
+            _, _timing = _extract(_target)
         if _verbose:
-            sys.stderr.write(
-                "smelt: onefile: %s %s\\n" % ("reused" if _found else "extracted", _target)
-            )
+            _msg = "smelt: onefile: %s %s" % ("reused" if _found else "extracted", _target)
+            if not _found:
+                _msg += " (%.1f ms)" % _timing
+            sys.stderr.write(_msg + "\\n")
     else:
         # Private to this run, never the shared cache dir: two non-reusing runs of
         # the same payload must not race over one directory the way two reusing ones
@@ -627,13 +635,13 @@ if __name__ == "__main__":
         _root = _temp_root()
         os.makedirs(_root, exist_ok=True)
         _target = tempfile.mkdtemp(prefix=_CACHE_NAME + "-", dir=_root)
-        _extract(_target)
+        _, _timing = _extract(_target)
         # Read from inside the payload (see `smelt.backend.onefile_cleanup_guard`):
         # `os.execv` below replaces this process, which is why the deletion cannot
         # happen here -- there is no code left running afterwards to do it.
         os.environ[_CLEANUP_ENV_VAR] = _target
         if _verbose:
-            sys.stderr.write("smelt: onefile: extracted %s\\n" % _target)
+            sys.stderr.write("smelt: onefile: extracted %s (%.1f ms)\\n" % (_target, _timing))
     if _verbose:
         sys.stderr.write("smelt: onefile: running from %s\\n" % _target)
     os.execv(
@@ -650,7 +658,7 @@ if __name__ == "__main__":
 '''
 
 #: Tar mode the extracting `__main__` opens the payload with, per compression.
-_TAR_MODES: Final[dict[OnefileCompression, str]] = {"xz": "r:xz", "gzip": "r:gz", "none": "r:"}
+_TAR_MODES: Final[dict[OnefileCompression, str]] = {"xz": "r:xz", "gzip": "r:gz"}
 
 
 def extracting_main(
@@ -752,6 +760,7 @@ def pack_zip_application(
     magic_number: bytes,
     extract: bool,
     compression: OnefileCompression = DEFAULT_ONEFILE_COMPRESSION,
+    compression_preset: int = DEFAULT_ONEFILE_COMPRESSION_PRESET,
     reuse_cache: bool = DEFAULT_ONEFILE_CACHE,
     extra_root_files: Iterable[Path] = (),
 ) -> OnefileArtifact:
@@ -798,7 +807,7 @@ def pack_zip_application(
 
     with tempfile.TemporaryDirectory() as scratch:
         archive = build_payload_archive(
-            dist_root, Path(scratch) / PAYLOAD_MEMBER_NAME, compression=compression
+            dist_root, Path(scratch) / PAYLOAD_MEMBER_NAME, compression=compression, compression_preset=compression_preset
         )
         directory = cache_name(name, archive.digest)
         _write_zip_application(
@@ -844,6 +853,7 @@ def pack_executable(
     payload_dir: str,
     exec_rel_path: Path,
     compression: OnefileCompression = DEFAULT_ONEFILE_COMPRESSION,
+    compression_preset: int = DEFAULT_ONEFILE_COMPRESSION_PRESET,
     reuse_cache: bool = DEFAULT_ONEFILE_CACHE,
     zig_target: str | None = None,
 ) -> OnefileArtifact:
@@ -863,7 +873,7 @@ def pack_executable(
         dest = dest.with_name(dest.name + ".exe")
     with tempfile.TemporaryDirectory() as scratch:
         archive = build_payload_archive(
-            dist_root, Path(scratch) / PAYLOAD_MEMBER_NAME, compression=compression
+            dist_root, Path(scratch) / PAYLOAD_MEMBER_NAME, compression=compression, compression_preset=compression_preset
         )
         launcher = build_launcher(Path(scratch) / "launcher", zig_target=zig_target)
         directory = cache_name(name, archive.digest)

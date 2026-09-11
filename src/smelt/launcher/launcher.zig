@@ -114,6 +114,7 @@ pub fn main(init: std.process.Init) !void {
     // the exec/spawn split below, and `smelt.backend.onefile_cleanup_guard`).
     var target: []const u8 = undefined;
     var cached = false;
+    var elapsed_ms: i64 = 0;
     if (trailer.reuse_cache) {
         const cache_root = try cacheRoot(arena, environ);
         target = try std.fs.path.join(arena, &.{ cache_root, trailer.cache_name });
@@ -121,7 +122,12 @@ pub fn main(init: std.process.Init) !void {
         const sentinel = try std.fs.path.join(arena, &.{ target, SENTINEL });
         const found = Io.Dir.accessAbsolute(io, sentinel, .{}) != error.FileNotFound;
         cached = found;
-        if (!found) try extract(io, gpa, arena, self, trailer, cache_root, target);
+        if (!found) {
+            const start = Io.Clock.now(.awake, io);
+            try extract(io, gpa, arena, self, trailer, cache_root, target);
+            const end = Io.Clock.now(.awake, io);
+            elapsed_ms = @divTrunc(end.toMicroseconds(), 1000) - @divTrunc(start.toMicroseconds(), 1000);
+        }
     } else {
         const temp_root = try tempRoot(arena, environ);
         // Unique per run, not per payload: nothing here is ever reused, so the name
@@ -130,10 +136,17 @@ pub fn main(init: std.process.Init) !void {
         target = try std.fmt.allocPrint(arena, "{s}{c}{s}-{d}", .{
             temp_root, std.fs.path.sep, trailer.cache_name, currentPid(),
         });
+        const start = Io.Clock.now(.awake, io);
         try extract(io, gpa, arena, self, trailer, temp_root, target);
+        const end = Io.Clock.now(.awake, io);
+        elapsed_ms = @divTrunc(end.toMicroseconds(), 1000) - @divTrunc(start.toMicroseconds(), 1000);
     }
     if (verbose) {
-        std.log.info("smelt: onefile: {s} {s}", .{ if (cached) "reused" else "extracted", target });
+        if (!cached and elapsed_ms > 0) {
+            std.log.info("smelt: onefile: extracted {s} ({d} ms)", .{ target, elapsed_ms });
+        } else {
+            std.log.info("smelt: onefile: {s} {s}", .{ if (cached) "reused" else "extracted", target });
+        }
         std.log.info("smelt: onefile: running from {s}", .{target});
     }
 

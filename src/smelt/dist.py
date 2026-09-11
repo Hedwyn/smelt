@@ -110,6 +110,7 @@ from smelt.onefile import (
     DEFAULT_ONEFILE,
     DEFAULT_ONEFILE_CACHE,
     DEFAULT_ONEFILE_COMPRESSION,
+    DEFAULT_ONEFILE_COMPRESSION_PRESET,
     PYTHON_ENV_VAR,
     OnefileArtifact,
     OnefileCompression,
@@ -804,6 +805,24 @@ def resolve_onefile_compression(
     return resolve_compression(
         onefile_compression or entrypoint_options.get("onefile-compression", None)
     )
+
+
+def resolve_onefile_compression_preset(
+    entrypoint_options: EntrypointOptions,
+    compression_preset: int | None = None,
+) -> int:
+    """
+    Compression preset (1-9 for gzip, 0-9 for xz), resolved the same way as every
+    other option here. Defaults to DEFAULT_ONEFILE_COMPRESSION_PRESET.
+    """
+    if compression_preset is not None:
+        return compression_preset
+    preset = entrypoint_options.get("onefile-compression-preset", DEFAULT_ONEFILE_COMPRESSION_PRESET)
+    if not isinstance(preset, int):
+        raise DistError(
+            f"Invalid onefile-compression-preset {preset!r}, expected an integer."
+        )
+    return preset
 
 
 def resolve_onefile_cache(
@@ -1847,6 +1866,7 @@ def build_dist(
     onefile: bool | None = None,
     onefile_only: bool = False,
     onefile_compression: str | None = None,
+    onefile_compression_preset: int | None = None,
     onefile_cache: bool | None = None,
     static_modules: Mapping[str, Iterable[PathExists]] = {},
     use_inittab: bool | None = None,
@@ -2038,6 +2058,7 @@ def build_dist(
     drop_optional = resolve_drop_optional_imports(entrypoint_options, drop_optional_imports)
     pack_onefile = resolve_onefile(entrypoint_options, onefile)
     compression = resolve_onefile_compression(entrypoint_options, onefile_compression)
+    compression_preset = resolve_onefile_compression_preset(entrypoint_options, onefile_compression_preset)
     reuse_cache = resolve_onefile_cache(entrypoint_options, onefile_cache)
     if onefile_only and not pack_onefile:
         raise DistError(
@@ -2398,7 +2419,7 @@ def build_dist(
         # here already uses (see its own declaration above), and is `None` in `byo`
         # mode too, where `pack_dist` ignores `zig_target` entirely regardless.
         report.onefile = pack_dist(
-            report, zig_target=interpreter_target, compression=compression, reuse_cache=reuse_cache
+            report, zig_target=interpreter_target, compression=compression, compression_preset=compression_preset, reuse_cache=reuse_cache
         )
         # Rewritten now that there is something more to say. The copy *inside* the
         # single file is the one written above and does not describe the packing --
@@ -2415,6 +2436,7 @@ def pack_dist(
     report: DistReport,
     *,
     compression: OnefileCompression = DEFAULT_ONEFILE_COMPRESSION,
+    compression_preset: int = DEFAULT_ONEFILE_COMPRESSION_PRESET,
     reuse_cache: bool = DEFAULT_ONEFILE_CACHE,
     zig_target: str | None = None,
 ) -> OnefileArtifact:
@@ -2437,6 +2459,7 @@ def pack_dist(
             payload_dir=PAYLOAD_DIR_NAME,
             exec_rel_path=report.interpreter.executable_rel_path,
             compression=compression,
+            compression_preset=compression_preset,
             reuse_cache=reuse_cache,
             zig_target=zig_target,
         )
@@ -2453,6 +2476,7 @@ def pack_dist(
             has_namespace_packages=bool(report.namespace_packages),
         ),
         compression=compression,
+        compression_preset=compression_preset,
         reuse_cache=reuse_cache,
         extra_root_files=[dist_root / MANIFEST_NAME],
     )
