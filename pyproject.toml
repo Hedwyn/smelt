@@ -51,6 +51,17 @@ cython = ["Cython"]
 # the resulting `CROSS_FIXUPS`/`ArchProfile` pyconfig.h patches automatically --
 # see cpu_cross_compile_pyconfig_plan.md. Anything older produces a pyconfig.h that
 # is silently wrong (not an error) for any target whose CPU differs from the host's.
+# 1b625dc replaces the single hard-coded `cpython` submodule with a
+# `-Dcpython-version=<name>` build option, fetching one of several curated CPython
+# releases (see build.zig.zon) as a lazy Zig dependency instead -- this is what lets
+# `own_python.py`'s `python_version` parameter pick a CPython other than 3.12.
+# 8046ab2 fixes 1b625dc itself, which shipped broken: the `vendoring/` dir (OpenSSL,
+# sqlite3, lzma sources) was missing from `force-include` so no packaged install ever
+# had it, `vendoring/openssl` was never committed at all despite 1b625dc's own message
+# claiming it was, both the CPython and OpenSSL fetch hashes in build.zig.zon were
+# stale for the Zig version `metapython.fetch` actually downloads (fails with
+# "hash mismatch"), and the OpenSSL build hard-coded an archive wrapper directory this
+# Zig strips. Anything between 1b625dc and 8046ab2 fails outright, for every target.
 metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git"]
 # unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
@@ -65,7 +76,7 @@ build = [
   "mypy[mypyc]",
   "hatchling",
   "editables",
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@0812d8e",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@8046ab2",
 ]
 
 [tool.setuptools]

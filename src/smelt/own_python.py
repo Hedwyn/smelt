@@ -121,6 +121,12 @@ DEFAULT_OWN_PYTHON_TARGET: Final[str | None] = None
 type OwnPythonLinkage = Literal["dynamic", "static"]
 DEFAULT_OWN_PYTHON_LINKAGE: Final[OwnPythonLinkage] = "dynamic"
 
+#: CPython version `build_own_python` builds when the caller names none -- matches
+#: meta-python's own `-Dcpython-version` default, so leaving `python_version` unset
+#: keeps building exactly the interpreter it always has. See `_cpython_source_dir`
+#: for how a non-default value is turned into an actual source tree on disk.
+DEFAULT_CPYTHON_VERSION: Final[str] = "3.12.13"
+
 #: The interpreter executable inside a built (or staged) prefix, prefix-relative.
 INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python")
 
@@ -385,6 +391,95 @@ def _cpython_source_version(cpython_dir: Path) -> tuple[int, int]:
     if "MAJOR" not in found or "MINOR" not in found:
         raise OwnPythonError(f"Cannot find PY_MAJOR_VERSION/PY_MINOR_VERSION in {patchlevel}.")
     return int(found["MAJOR"]), int(found["MINOR"])
+
+
+#: Matches one `build.zig.zon` dependency entry naming a curated CPython version, e.g.
+#: `.@"3.12.13" = .{ .url = "...", .hash = "N-V-..." , .lazy = true },` -- capturing the
+#: version name and its content hash. Non-greedy up to the first `.hash` after the
+#: name, which is safe here since entries are flat (no nested `.{` between a name and
+#: its own `.hash`).
+_CPYTHON_ZON_ENTRY_RE: Final = re.compile(
+    r'\.@"(?P<version>\d+\.\d+\.\d+)"\s*=\s*\.\{.*?\.hash\s*=\s*"(?P<hash>[^"]+)"', re.DOTALL
+)
+
+
+def _cpython_zon_hashes() -> dict[str, str]:
+    """
+    `{version: hash}` for every CPython release meta-python's `build.zig.zon` curates,
+    read from the copy it vendors into its own installed package (`VENDORED_PROJECT_DIR`,
+    the same file `-Dcpython-version=` resolves against at build time).
+    """
+    from metapython.compile import VENDORED_PROJECT_DIR
+
+    zon_path = VENDORED_PROJECT_DIR / "build.zig.zon"
+    return dict(_CPYTHON_ZON_ENTRY_RE.findall(zon_path.read_text()))
+
+
+def _fetched_cpython_source_dir(python_version: str) -> Path | None:
+    """
+    Where meta-python's `-Dcpython-version=python_version` build option actually puts
+    the CPython source tree it fetches, on disk -- or `None` if nothing has been
+    fetched for it yet.
+
+    Not something `zig build` reports back: `-Dcpython-version` resolves to a lazy
+    `build.zig.zon` dependency (see meta-python's `build/cpython_source.zig`), and this
+    pinned Zig fetches those into a project-local `zig-pkg/<hash>/` next to `build.zig`
+    (`VENDORED_PROJECT_DIR`) rather than the global package cache -- confirmed
+    empirically, and relied on by meta-python's own doc comments already, so this is a
+    real if undocumented implementation detail of the exact Zig version smelt pins,
+    not a guess. `<hash>` is looked up from `build.zig.zon` itself (`_cpython_zon_hashes`)
+    rather than hard-coded, so it tracks whatever meta-python's own pin actually curates.
+
+    A release tarball wraps its contents in one `Python-X.Y.Z/` directory that this
+    pinned Zig's fetcher sometimes strips and sometimes does not (meta-python's own
+    finding, see `cpython_source.zig`'s `descendToRoot`) -- detected the same
+    version-agnostic way here: no `configure` at the fetched root, but exactly one
+    entry and it is a directory, descend into it.
+
+    Raises `OwnPythonError` for a `python_version` outside `build.zig.zon`'s curated
+    set (same "fail on the typo now" reasoning as `disabled_libraries`), and for a
+    directory shape the descent logic above cannot make sense of -- `None` is reserved
+    for "not fetched yet", the expected outcome the first time a given version is used.
+    """
+    from metapython.compile import VENDORED_PROJECT_DIR
+
+    hashes = _cpython_zon_hashes()
+    if python_version not in hashes:
+        raise OwnPythonError(
+            f"Unknown CPython version {python_version!r}: not one of meta-python's "
+            f"curated `-Dcpython-version` choices, {sorted(hashes)}."
+        )
+    fetched = VENDORED_PROJECT_DIR / "zig-pkg" / hashes[python_version]
+    if not fetched.is_dir():
+        return None
+    if (fetched / "configure").is_file():
+        return fetched
+    entries = list(fetched.iterdir())
+    if len(entries) == 1 and entries[0].is_dir():
+        return entries[0]
+    raise OwnPythonError(
+        f"Cannot find the CPython {python_version} source root under {fetched}: no "
+        "top-level 'configure', and it does not hold exactly one wrapper directory."
+    )
+
+
+def _cpython_source_dir(python_version: str) -> Path:
+    """
+    Same as `_fetched_cpython_source_dir`, for a caller that only runs once
+    `-Dcpython-version=python_version` has actually been built (i.e. after the
+    `zig_build` call that would fetch it) -- `OwnPythonError` rather than `None` if it
+    still turns up missing, since that means the build did not do what it should have.
+    """
+    resolved = _fetched_cpython_source_dir(python_version)
+    if resolved is None:
+        from metapython.compile import VENDORED_PROJECT_DIR
+
+        raise OwnPythonError(
+            f"meta-python has not fetched CPython {python_version} into "
+            f"{VENDORED_PROJECT_DIR / 'zig-pkg'} -- expected this after a zig_build() "
+            f"call with -Dcpython-version={python_version}."
+        )
+    return resolved
 
 
 #: Stdlib directory entries pruned from a staged interpreter by default.
@@ -783,7 +878,12 @@ def _ensure_metapython_installed() -> None:
 
 
 def _resolve_pyconfig_header(
-    target: str | None, *, debug: bool, dest: Path, disabled: Iterable[str] = ()
+    target: str | None,
+    *,
+    debug: bool,
+    dest: Path,
+    disabled: Iterable[str] = (),
+    python_version: str = DEFAULT_CPYTHON_VERSION,
 ) -> PathExists:
     """
     A known-good pyconfig.h for `target`, via meta-python's `configure` build step
@@ -812,6 +912,10 @@ def _resolve_pyconfig_header(
     `_cross_unsupported_static_libraries`) -- meta-python panics on that combination
     even for this configure-only step, before any of the real build's own library
     options would otherwise apply.
+
+    `python_version` is `build_own_python`'s own, forwarded as `-Dcpython-version` so
+    this step configures the same CPython source the real build goes on to compile --
+    see `_cpython_source_dir` for where that source actually ends up on disk.
     """
     from metapython.compile import (
         VENDORED_PROJECT_DIR,
@@ -822,9 +926,10 @@ def _resolve_pyconfig_header(
         zig_build,
     )
 
-    cpython_dir = VENDORED_PROJECT_DIR / "cpython"
-    for stale in ("Makefile", "pyconfig.h"):
-        (cpython_dir / stale).unlink(missing_ok=True)
+    cpython_dir = _fetched_cpython_source_dir(python_version)
+    if cpython_dir is not None:
+        for stale in ("Makefile", "pyconfig.h"):
+            (cpython_dir / stale).unlink(missing_ok=True)
     shutil.rmtree(VENDORED_PROJECT_DIR / ".zig-cache", ignore_errors=True)
     # Same two-part construction as `_build_interpreter`'s own `libraries`: a disabled
     # library stays off (its linkage is moot), everything else that would otherwise
@@ -840,7 +945,9 @@ def _resolve_pyconfig_header(
         ),
         step=BuildStep.CONFIGURE,
         cwd=VENDORED_PROJECT_DIR,
+        extra_args=[f"-Dcpython-version={python_version}"],
     )
+    cpython_dir = _cpython_source_dir(python_version)
     produced = cpython_dir / "pyconfig.h"
     if not produced.is_file():
         raise OwnPythonError(
@@ -860,6 +967,7 @@ def own_python_cache_dir(
     disabled_libraries: Iterable[str] = (),
     linkage: OwnPythonLinkage = DEFAULT_OWN_PYTHON_LINKAGE,
     static_modules: Iterable[str] = (),
+    python_version: str = DEFAULT_CPYTHON_VERSION,
 ) -> Path:
     """
     Where `build_own_python` caches its build for `target`, build mode and library
@@ -867,11 +975,11 @@ def own_python_cache_dir(
 
     Keyed on all of these, because none of them produce interchangeable trees: a
     native and a musl build of the same CPython are not, a stripped and an unstripped
-    one are not, an `openssl=off` build is missing `_ssl.so` outright, and a
+    one are not, an `openssl=off` build is missing `_ssl.so` outright, a
     `linkage="static"` build is a different executable shape entirely (no
-    `libpythonX.Y.so`, a different set of modules built in rather than dlopen'd) --
-    sharing one directory would make whichever ran first silently satisfy the others'
-    cache check.
+    `libpythonX.Y.so`, a different set of modules built in rather than dlopen'd), and a
+    different `python_version` is not the same interpreter at all -- sharing one
+    directory would make whichever ran first silently satisfy the others' cache check.
 
     The all-defaults configuration keeps the bare `native` (or `<target>`) name it has
     always had, rather than growing an "everything on" fingerprint. That is not
@@ -889,6 +997,8 @@ def own_python_cache_dir(
     static = sorted(set(static_modules))
     if static:
         name = f"{name}-builtin-{'-'.join(static)}"
+    if python_version != DEFAULT_CPYTHON_VERSION:
+        name = f"{name}-py{python_version}"
     return _METAPYTHON_CACHE_DIR / name
 
 
@@ -962,11 +1072,13 @@ def build_own_python(
     linkage: OwnPythonLinkage = DEFAULT_OWN_PYTHON_LINKAGE,
     static_modules: Iterable[str] = (),
     pyconfig_header: PathExists | None = None,
+    python_version: str = DEFAULT_CPYTHON_VERSION,
 ) -> PathExists:
     """
     Builds smelt's own CPython through the sibling `meta-python` project (Zig-driven:
-    its `python/cpython` submodule compiled straight through `build.zig`, no `make`)
-    into `dest_dir` -- a per-user, per-target cache directory reused across builds if
+    a `-Dcpython-version`-selected CPython release compiled straight through
+    `build.zig`, no `make`) into `dest_dir` -- a per-user, per-target cache directory
+    reused across builds if
     omitted -- and returns that prefix.
 
     A build takes minutes, so the cache is the normal path: it hits on
@@ -1087,6 +1199,15 @@ def build_own_python(
     all add variance the empirically-found musl fixups were never validated against),
     this is generated by the same project, for the exact CPython version and target
     actually being built, every time.
+
+    `python_version` names the CPython release to build, as one of meta-python's own
+    curated `-Dcpython-version` choices (see its `build.zig.zon`; `OwnPythonError` for
+    anything else). Defaults to `DEFAULT_CPYTHON_VERSION`, matching meta-python's own
+    default -- so leaving it unset builds exactly the interpreter this always has.
+    Unlike every option above, this changes which CPython source tree is compiled, not
+    how: expect the stdlib layout, ABI tag and module set (`LIBRARY_MODULES`,
+    `minimal_viable_stdlib`, `bootstrap_modules`) to vary across versions the way they
+    do across any two CPython releases.
     """
     static = tuple(static_modules)
     if static and linkage != "static":
@@ -1109,7 +1230,12 @@ def build_own_python(
         Path(dest_dir)
         if dest_dir is not None
         else own_python_cache_dir(
-            target, debug=debug, disabled_libraries=disabled, linkage=linkage, static_modules=static
+            target,
+            debug=debug,
+            disabled_libraries=disabled,
+            linkage=linkage,
+            static_modules=static,
+            python_version=python_version,
         )
     )
     bin_path = dest / (
@@ -1176,7 +1302,7 @@ def build_own_python(
         # one shipped as dead weight.
         shutil.rmtree(dest, ignore_errors=True)
         resolved_pyconfig_header = pyconfig_header or _resolve_pyconfig_header(
-            target, debug=debug, dest=dest, disabled=disabled
+            target, debug=debug, dest=dest, disabled=disabled, python_version=python_version
         )
         return _build_interpreter(
             dest,
@@ -1187,6 +1313,7 @@ def build_own_python(
             linkage=linkage,
             static=static,
             pyconfig_header=resolved_pyconfig_header,
+            python_version=python_version,
         )
 
 
@@ -1200,6 +1327,7 @@ def _build_interpreter(
     linkage: OwnPythonLinkage = DEFAULT_OWN_PYTHON_LINKAGE,
     static: tuple[str, ...] = (),
     pyconfig_header: PathExists | None = None,
+    python_version: str = DEFAULT_CPYTHON_VERSION,
 ) -> PathExists:
     """
     Runs the actual meta-python build into `dest`, assuming the caller holds
@@ -1207,7 +1335,8 @@ def _build_interpreter(
 
     Split from `build_own_python` for exactly that reason: everything here mutates
     state shared with every other build on this machine -- meta-python's checkout, its
-    `.zig-cache`, `cpython/Makefile` -- and none of the option resolution above does.
+    `.zig-cache`, the fetched CPython source's own `Makefile` -- and none of the option
+    resolution above does.
     """
     from metapython.compile import (
         VENDORED_PROJECT_DIR,
@@ -1251,28 +1380,29 @@ def _build_interpreter(
         pyconfig_header=pyconfig_header,
     )
 
-    cpython_dir = VENDORED_PROJECT_DIR / "cpython"
-    # meta-python's `runConfigure` only ever runs `./configure` when `cpython/Makefile`
-    # is *absent* -- and that source tree is shared across every target and option
-    # combination, so a leftover Makefile makes it skip straight to compiling with
-    # whatever `pyconfig.h` an earlier run left behind. Force a real reconfigure for
-    # *this* target.
-    for stale in ("Makefile", "pyconfig.h"):
-        (cpython_dir / stale).unlink(missing_ok=True)
+    cpython_dir = _fetched_cpython_source_dir(python_version)
+    # meta-python's `runConfigure` only ever runs `./configure` when the resolved
+    # source tree's `Makefile` is *absent* -- and that tree is shared across every
+    # target and option combination, so a leftover Makefile makes it skip straight to
+    # compiling with whatever `pyconfig.h` an earlier run left behind. Force a real
+    # reconfigure for *this* target.
+    if cpython_dir is not None:
+        for stale in ("Makefile", "pyconfig.h"):
+            (cpython_dir / stale).unlink(missing_ok=True)
     # Also clear Zig's own local project cache: verified empirically that when a
     # `zig build` invocation's CLI options are byte-identical to a previous one, Zig
     # can skip re-executing `build.zig`'s `build()` -- and with it the deletion above
     # and `runConfigure`'s `./configure` re-run -- silently reusing a stale step graph.
     # `.zig-cache` is local and rebuildable, unlike the global package fetch cache
-    # (left untouched: no need to re-download zlib/openssl/libffi sources).
+    # (left untouched: no need to re-download zlib/openssl/libffi/CPython sources).
     shutil.rmtree(VENDORED_PROJECT_DIR / ".zig-cache", ignore_errors=True)
 
     dest.mkdir(parents=True, exist_ok=True)
     # `-p`: without an explicit install prefix, `zig build install` writes into
     # `zig-out` next to `build.zig` -- i.e. inside site-packages.
-    install_prefix = ["-p", str(dest)]
+    extra_args = ["-p", str(dest), f"-Dcpython-version={python_version}"]
     try:
-        zig_build(options, cwd=VENDORED_PROJECT_DIR, extra_args=install_prefix)
+        zig_build(options, cwd=VENDORED_PROJECT_DIR, extra_args=extra_args)
     except subprocess.CalledProcessError as exc:
         # Best-effort: Zig still installs whatever *did* build when some module failed
         # (each stdlib extension module is an independent compile step; `zig build
@@ -1295,6 +1425,7 @@ def _build_interpreter(
             f"The interpreter build for target {target or 'native'} produced no {bin_path}."
         )
     if is_windows_zig_target(target) or is_cpu_cross_target(target):
+        cpython_dir = _cpython_source_dir(python_version)
         # Recorded now because this is the one point something *can* read it: this
         # build's own executable cannot run on this host -- a Windows `.exe` never
         # can, and a POSIX CPU-arch cross target's binary can't either, emulation
