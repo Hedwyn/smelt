@@ -46,6 +46,11 @@ cython = ["Cython"]
 # `configure` build step (`BuildStep.CONFIGURE`) -- `own_python.py`'s
 # `_resolve_pyconfig_header` imports it directly, so anything older than this fails
 # with `AttributeError: type object 'BuildStep' has no attribute 'CONFIGURE'`.
+# 0812d8e is the first that makes `./configure` itself cross-aware (real
+# `--host=`/`--build=` for a CPU-arch cross target, not just for musl) and applies
+# the resulting `CROSS_FIXUPS`/`ArchProfile` pyconfig.h patches automatically --
+# see cpu_cross_compile_pyconfig_plan.md. Anything older produces a pyconfig.h that
+# is silently wrong (not an error) for any target whose CPU differs from the host's.
 metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git"]
 # unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
@@ -60,7 +65,7 @@ build = [
   "mypy[mypyc]",
   "hatchling",
   "editables",
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@27183a9",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@0812d8e",
 ]
 
 [tool.setuptools]

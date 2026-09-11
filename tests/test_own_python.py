@@ -66,9 +66,9 @@ from smelt.own_python import (
     MINIMAL_VIABLE_STDLIB,
     OPTIONAL_STDLIB_GROUPS,
     REAL_INTERPRETER_REL_PATH,
+    VERSION_MARKER_NAME,
     WINDOWS_INTERPRETER_REL_PATH,
     WINDOWS_STDLIB_REL_PATH,
-    WINDOWS_VERSION_MARKER_NAME,
     OwnPythonError,
     StagedInterpreter,
     _resolve_pyconfig_header,
@@ -176,14 +176,14 @@ def _fake_windows_interpreter_prefix(root: Path) -> Path:
     A Windows-target interpreter prefix in the shape `_stage_windows_interpreter`
     walks. Arbitrary bytes stand in for `python.exe`/its DLL -- a cross-compiled `.exe`
     cannot run on this host either, which is exactly the property this whole staging
-    path exists to work around (see `WINDOWS_VERSION_MARKER_NAME`).
+    path exists to work around (see `VERSION_MARKER_NAME`).
     """
     prefix = root / "built-windows"
     bin_dir = prefix / "bin"
     bin_dir.mkdir(parents=True)
     (bin_dir / "python.exe").write_bytes(b"not a real exe")
     (bin_dir / "python312.dll").write_bytes(b"not a real dll")
-    (prefix / WINDOWS_VERSION_MARKER_NAME).write_text("3.12\n")
+    (prefix / VERSION_MARKER_NAME).write_text("3.12\n")
     stdlib = prefix / WINDOWS_STDLIB_REL_PATH
     stdlib.mkdir()
     (stdlib / "os.py").write_text("sep = '\\\\'\n")
@@ -245,8 +245,8 @@ def test_interpreter_version_for_a_windows_prefix_reads_the_marker_without_runni
 
 def test_interpreter_version_for_a_windows_prefix_without_a_marker_raises(tmp_path: Path) -> None:
     prefix = _fake_windows_interpreter_prefix(tmp_path)
-    (prefix / WINDOWS_VERSION_MARKER_NAME).unlink()
-    with pytest.raises(OwnPythonError, match=WINDOWS_VERSION_MARKER_NAME):
+    (prefix / VERSION_MARKER_NAME).unlink()
+    with pytest.raises(OwnPythonError, match=VERSION_MARKER_NAME):
         interpreter_version(assert_path_exists(prefix))
 
 

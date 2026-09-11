@@ -154,13 +154,99 @@ WINDOWS_INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python.exe")
 #: (see `stage_interpreter`), only the frozen/builtin core.
 WINDOWS_STDLIB_REL_PATH: Final[Path] = Path("Lib")
 
-#: Written next to a Windows-target build's `bin/` once, at build time, recording the
-#: CPython version it was built from (see `_cpython_source_version`). The version of a
-#: cross-compiled `python.exe` cannot be probed the way `interpreter_version` probes
-#: every other target -- that `.exe` cannot run on the (typically Linux) host that
-#: cross-compiled it -- so it has to be recorded once, at the one point something *can*
-#: read it, rather than asked for again later.
-WINDOWS_VERSION_MARKER_NAME: Final[str] = "_smelt_cpython_version.txt"
+#: Written next to a build's `bin/` once, at build time, recording the CPython version
+#: it was built from (see `_cpython_source_version`) -- for any build this process
+#: cannot itself execute to just ask: a Windows-target `python.exe`, or a POSIX target
+#: whose CPU architecture differs from this host's (`is_cpu_cross_target`) and so
+#: cannot run here either, emulation aside. `interpreter_version` probes every other
+#: target directly instead; this one has to be recorded once, at the one point
+#: something *can* read it, rather than asked for again later.
+VERSION_MARKER_NAME: Final[str] = "_smelt_cpython_version.txt"
+
+#: Written next to a CPU-cross build's `bin/` (see `is_cpu_cross_target`), at build
+#: time: the newline-separated union of `Modules/config.c`'s builtin inittab,
+#: `Python/frozen.c`'s frozen module tables, and any `static_modules` this build used
+#: (see `_static_provided_modules`). `bootstrap_modules`/`_interpreter_provided_modules`
+#: normally get this by running the built interpreter and asking it directly -- not
+#: possible here for the same reason `VERSION_MARKER_NAME` exists, so it is derived
+#: from source instead and recorded once, the same shape of fix.
+PROVIDED_MODULES_MARKER_NAME: Final[str] = "_smelt_provided_modules.txt"
+
+#: Matches one `{"name", ...}` entry in `Modules/config.c`'s `_PyImport_Inittab` array
+#: or `Python/frozen.c`'s frozen-module arrays -- both are C initializer lists whose
+#: entries all start this way regardless of what follows (a `PyInit_*` function
+#: pointer or `NULL` for config.c, a data pointer and size for frozen.c), so matching
+#: just the leading quoted name is enough and does not need to know which file it is
+#: reading. Names may contain dots (`Python/frozen.c` freezes `"importlib.util"`, not
+#: just top-level modules).
+_C_ARRAY_ENTRY_NAME_RE: Final[re.Pattern[str]] = re.compile(r'\{"([A-Za-z_][A-Za-z0-9_.]*)"')
+
+
+def _c_array_body(text: str, array_name: str) -> str:
+    """
+    The text strictly between `<array_name>[] = {` and the next `};` in `text`.
+
+    Raises
+    ------
+    OwnPythonError
+        If `array_name` isn't found -- a typo, or an upstream CPython source layout
+        change (see `_parse_builtin_modules`/`_parse_frozen_modules`'s own reasoning
+        for why failing loudly here beats silently returning nothing).
+    """
+    marker = f"{array_name}[] = {{"
+    start = text.find(marker)
+    if start == -1:
+        raise OwnPythonError(f"{marker!r} not found -- CPython source layout changed?")
+    end = text.find("};", start)
+    if end == -1:
+        raise OwnPythonError(f"No closing '}};' found for {marker!r}.")
+    return text[start + len(marker) : end]
+
+
+def _parse_builtin_modules(config_c_text: str) -> frozenset[str]:
+    """
+    Module names in `Modules/config.c`'s `_PyImport_Inittab` array: CPython's own
+    generated table of extension modules compiled straight into the interpreter, no
+    separate `.so` -- `sys`/`builtins` included (their slot is `NULL`; the import
+    system special-cases both regardless).
+
+    Target-invariant: this file is part of meta-python's vendored CPython source and,
+    absent `-Dstatic-modules=`, is compiled in unpatched regardless of target -- see
+    `build_own_python`'s own `static_modules` docstring. `static_modules` themselves
+    are unioned in separately by `_static_provided_modules`, since a caller's request
+    is known without parsing anything.
+    """
+    return frozenset(_C_ARRAY_ENTRY_NAME_RE.findall(_c_array_body(config_c_text, "_PyImport_Inittab")))
+
+
+def _parse_frozen_modules(frozen_c_text: str) -> frozenset[str]:
+    """
+    Module names in `Python/frozen.c`'s `bootstrap_modules`/`stdlib_modules` arrays --
+    what `importlib.machinery.FrozenImporter` can resolve with no `.py` file on disk
+    anywhere, i.e. exactly what `_interpreter_provided_modules`'s own probe script asks
+    `FrozenImporter.find_spec` for. `test_modules` (`__hello__` and friends) is
+    deliberately excluded: never reachable from application code, and not part of
+    `sys.stdlib_module_names` either, so the live probe would not report it.
+
+    Target-invariant for the same reason `_parse_builtin_modules` is.
+    """
+    names: set[str] = set()
+    for array_name in ("bootstrap_modules", "stdlib_modules"):
+        names.update(_C_ARRAY_ENTRY_NAME_RE.findall(_c_array_body(frozen_c_text, array_name)))
+    return frozenset(names)
+
+
+def _static_provided_modules(cpython_dir: Path, static_modules: Iterable[str]) -> frozenset[str]:
+    """
+    `sys.builtin_module_names | <frozen module names>`, derived from `cpython_dir`'s
+    checked-out CPython source rather than by asking a built interpreter -- see
+    `PROVIDED_MODULES_MARKER_NAME` for why a CPU-cross build needs this instead of
+    `_probe_interpreter`.
+    """
+    config_c = (cpython_dir / "Modules" / "config.c").read_text()
+    frozen_c = (cpython_dir / "Python" / "frozen.c").read_text()
+    return _parse_builtin_modules(config_c) | _parse_frozen_modules(frozen_c) | frozenset(static_modules)
+
 
 #: The stdlib module whose presence CPython's prefix detection uses to recognise a
 #: standard library directory. Sourceless is fine, absent is not -- see this module's
@@ -191,6 +277,68 @@ def is_windows_zig_target(zig_target: str | None) -> bool:
     copy.
     """
     return zig_target is not None and "windows" in zig_target
+
+
+#: `platform.machine()` spellings that differ from the Zig architecture name in a
+#: target triple's own leading component. Mirrors meta-python's own (private)
+#: `metapython.pyconfig._UNAME_TO_ZIG_ARCH` -- kept as a small local copy rather than
+#: reaching across the package boundary for a name that isn't part of its public API.
+_UNAME_TO_ZIG_ARCH: Final[dict[str, str]] = {
+    "amd64": "x86_64",
+    "arm64": "aarch64",
+    "i386": "x86",
+    "i686": "x86",
+    "armv7l": "arm",
+    "armv6l": "arm",
+}
+
+
+def is_cpu_cross_target(zig_target: str | None) -> bool:
+    """
+    Whether `zig_target` names a different CPU architecture than the machine running
+    this process -- as opposed to a same-arch target (native, or a same-arch,
+    different-libc target like `x86_64-linux-musl`).
+
+    This is the distinction meta-python's own `./configure` step (`BuildStep.CONFIGURE`,
+    called from `_resolve_pyconfig_header`) cares about: a same-arch target's own test
+    binaries can still execute on this machine, so `./configure` runs its checks for
+    real; a different-arch target's cannot, so meta-python enters real `--host`/`--build`
+    cross mode instead and applies its own `CROSS_FIXUPS`/`ArchProfile` pyconfig.h
+    patches on top (see `cpu_cross_compile_pyconfig_plan.md`). Both
+    `_resolve_pyconfig_header` and `_build_interpreter` use this to know when they
+    must steer `openssl`/`sqlite` away from meta-python's static default, via
+    `_cross_unsupported_static_libraries` below -- that default isn't supported yet
+    for a CPU-arch cross build, and meta-python hard-panics rather than silently
+    building something broken.
+    """
+    if zig_target is None:
+        return False
+    arch, _, _ = zig_target.partition("-")
+    host_arch = _UNAME_TO_ZIG_ARCH.get(platform.machine(), platform.machine())
+    return arch != host_arch
+
+
+#: `LIBRARY_MODULES` entries meta-python cannot yet link statically for a CPU-arch
+#: cross target -- `openssl-linkage=static`/`sqlite-linkage=static` hard-panic there
+#: (see `cpu_cross_compile_pyconfig_plan.md`), while every other library either has
+#: no static/dynamic distinction relevant here or hasn't been observed to fail.
+_CROSS_UNSAFE_STATIC_LIBRARIES: Final[tuple[str, ...]] = ("openssl", "sqlite")
+
+
+def _cross_unsupported_static_libraries(
+    target: str | None, disabled: Iterable[str]
+) -> tuple[str, ...]:
+    """
+    Which of `_CROSS_UNSAFE_STATIC_LIBRARIES` need steering away from meta-python's
+    static default for `target` -- empty for a same-arch target (native, or musl),
+    and empty for a library already in `disabled` (turning a library off makes its
+    linkage moot, and leaves `disabled_libraries`' own validation as the one place
+    that rejects an unknown name).
+    """
+    if not is_cpu_cross_target(target):
+        return ()
+    disabled_set = set(disabled)
+    return tuple(name for name in _CROSS_UNSAFE_STATIC_LIBRARIES if name not in disabled_set)
 
 
 def _validate_windows_zig_target(zig_target: str) -> None:
@@ -634,17 +782,20 @@ def _ensure_metapython_installed() -> None:
         ) from exc
 
 
-def _resolve_pyconfig_header(target: str | None, *, debug: bool, dest: Path) -> PathExists:
+def _resolve_pyconfig_header(
+    target: str | None, *, debug: bool, dest: Path, disabled: Iterable[str] = ()
+) -> PathExists:
     """
     A known-good pyconfig.h for `target`, via meta-python's `configure` build step
     (see `metapython.compile.BuildStep.CONFIGURE`): real `./configure`, through the
     exact same harness the actual interpreter build uses (`CC=zig cc -target target`,
     matching CPython version, matching `optimize` mode), plus meta-python's own
-    automatic musl-macro patch -- no compiling, so it costs seconds (`./configure`
-    itself), not the minutes a real build would. This is what makes it worth running
-    on every `build_own_python` call that reaches here (a cache miss), rather than
-    something to run once and check in: it is always target-correct, for whatever
-    target is actually being built this time, at a cost small enough not to matter.
+    automatic musl/cross-arch macro patches -- no compiling, so it costs seconds
+    (`./configure` itself), not the minutes a real build would. This is what makes it
+    worth running on every `build_own_python` call that reaches here (a cache miss),
+    rather than something to run once and check in: it is always target-correct, for
+    whatever target is actually being built this time, at a cost small enough not to
+    matter.
 
     Mutates meta-python's shared checkout the same way a real build does (deletes
     `cpython/Makefile`/`pyconfig.h`, clears `.zig-cache`), so the result is copied out
@@ -654,17 +805,38 @@ def _resolve_pyconfig_header(target: str | None, *, debug: bool, dest: Path) -> 
     it does *not* take the lock itself, since it is only ever called from inside a
     `with interpreter_build_lock():` block already (`fcntl.flock` is not reentrant
     within one process: a second acquisition here would deadlock waiting on itself).
+
+    `disabled` is `build_own_python`'s own `disabled_libraries`, forwarded so that
+    this step's `BuildOptions` can steer `openssl`/`sqlite` away from meta-python's
+    static default for a CPU-arch cross `target` (see
+    `_cross_unsupported_static_libraries`) -- meta-python panics on that combination
+    even for this configure-only step, before any of the real build's own library
+    options would otherwise apply.
     """
-    from metapython.compile import VENDORED_PROJECT_DIR, BuildOptions, BuildStep, OptimizeMode, zig_build
+    from metapython.compile import (
+        VENDORED_PROJECT_DIR,
+        BuildOptions,
+        BuildStep,
+        Linkage,
+        OptimizeMode,
+        zig_build,
+    )
 
     cpython_dir = VENDORED_PROJECT_DIR / "cpython"
     for stale in ("Makefile", "pyconfig.h"):
         (cpython_dir / stale).unlink(missing_ok=True)
     shutil.rmtree(VENDORED_PROJECT_DIR / ".zig-cache", ignore_errors=True)
+    # Same two-part construction as `_build_interpreter`'s own `libraries`: a disabled
+    # library stays off (its linkage is moot), everything else that would otherwise
+    # panic under this target's static default gets pushed to dynamic instead.
+    libraries = {library: Linkage.OFF for library in LIBRARY_MODULES if library in disabled}
+    for library in _cross_unsupported_static_libraries(target, disabled):
+        libraries[library] = Linkage.DYNAMIC
     zig_build(
         BuildOptions(
             target=target,
             optimize=OptimizeMode.DEBUG if debug else OptimizeMode.RELEASE_FAST,
+            libraries=libraries,
         ),
         step=BuildStep.CONFIGURE,
         cwd=VENDORED_PROJECT_DIR,
@@ -1004,7 +1176,7 @@ def build_own_python(
         # one shipped as dead weight.
         shutil.rmtree(dest, ignore_errors=True)
         resolved_pyconfig_header = pyconfig_header or _resolve_pyconfig_header(
-            target, debug=debug, dest=dest
+            target, debug=debug, dest=dest, disabled=disabled
         )
         return _build_interpreter(
             dest,
@@ -1046,11 +1218,21 @@ def _build_interpreter(
         zig_build,
     )
 
+    # Iterated over `LIBRARY_MODULES` rather than over `disabled` itself, so the keys
+    # carry meta-python's own `Library` type instead of a bare `str`.
+    libraries = {library: Linkage.OFF for library in LIBRARY_MODULES if library in disabled}
+    for library in _cross_unsupported_static_libraries(target, disabled):
+        libraries[library] = Linkage.DYNAMIC
+        _logger.info(
+            "%s is a CPU-arch cross target: defaulting %s to dynamic linkage "
+            "(meta-python's static default isn't supported there yet).",
+            target,
+            library,
+        )
+
     options = BuildOptions(
         target=target,
-        # Iterated over `LIBRARY_MODULES` rather than over `disabled` itself, so the
-        # keys carry meta-python's own `Library` type instead of a bare `str`.
-        libraries={library: Linkage.OFF for library in LIBRARY_MODULES if library in disabled},
+        libraries=libraries,
         # Explicit, and load-bearing: `zig build`'s own default optimize mode is
         # `Debug`, which meta-python maps to `--with-pydebug` -- see this function's
         # docstring for why that cannot be the default here.
@@ -1112,28 +1294,39 @@ def _build_interpreter(
         raise OwnPythonError(
             f"The interpreter build for target {target or 'native'} produced no {bin_path}."
         )
-    if is_windows_zig_target(target):
-        # Recorded now because this is the one point something *can* read it: the
-        # `.exe` this build just produced cannot run on the (typically Linux) host
-        # that cross-compiled it, so `interpreter_version` cannot probe it later the
-        # way it does every other target (see `WINDOWS_VERSION_MARKER_NAME`).
+    if is_windows_zig_target(target) or is_cpu_cross_target(target):
+        # Recorded now because this is the one point something *can* read it: this
+        # build's own executable cannot run on this host -- a Windows `.exe` never
+        # can, and a POSIX CPU-arch cross target's binary can't either, emulation
+        # aside -- so `interpreter_version` cannot probe it later the way it does a
+        # same-arch target (see `VERSION_MARKER_NAME`).
         major, minor = _cpython_source_version(cpython_dir)
-        (dest / WINDOWS_VERSION_MARKER_NAME).write_text(f"{major}.{minor}\n")
+        (dest / VERSION_MARKER_NAME).write_text(f"{major}.{minor}\n")
+    if is_cpu_cross_target(target):
+        # Same reasoning, for the builtin/frozen module set `bootstrap_modules`/
+        # `_interpreter_provided_modules` would otherwise get by running this build's
+        # own executable (see `PROVIDED_MODULES_MARKER_NAME`). Not done for a
+        # Windows target: `dist.py` already takes a coarser path there (tailoring is
+        # refused outright rather than attempted with a probe substitute -- see
+        # `stage_interpreter`'s own Windows handling), so nothing reads this marker
+        # for one.
+        provided = _static_provided_modules(cpython_dir, static)
+        (dest / PROVIDED_MODULES_MARKER_NAME).write_text("\n".join(sorted(provided)) + "\n")
     return assert_path_exists(dest)
 
 
-def _windows_interpreter_version(prefix: Path) -> tuple[int, int]:
+def _marker_interpreter_version(prefix: Path) -> tuple[int, int]:
     """
-    Reads back the version `_build_interpreter` recorded for a Windows-target build
-    (see `WINDOWS_VERSION_MARKER_NAME`), since the `.exe` itself cannot be probed.
+    Reads back the version `_build_interpreter` recorded for a build whose own
+    executable cannot be probed by running it (see `VERSION_MARKER_NAME`): a
+    Windows-target `python.exe`, or a POSIX target CPU-cross from this host.
     """
-    marker = prefix / WINDOWS_VERSION_MARKER_NAME
+    marker = prefix / VERSION_MARKER_NAME
     if not marker.is_file():
         raise OwnPythonError(
-            f"No {WINDOWS_VERSION_MARKER_NAME} next to the Windows interpreter at "
-            f"{prefix / WINDOWS_INTERPRETER_REL_PATH}: its version cannot be probed "
-            "the way a POSIX interpreter's is (the .exe cannot run on this host), and "
-            "nothing recorded it at build time either."
+            f"No {VERSION_MARKER_NAME} at {prefix}: its interpreter's version cannot "
+            "be probed by running it on this host, and nothing recorded it at build "
+            "time either."
         )
     text = marker.read_text().strip()
     major_str, _, minor_str = text.partition(".")
@@ -1179,12 +1372,20 @@ def interpreter_version(prefix: PathExists) -> tuple[int, int]:
     `smelt.dist` compares against the interpreter that compiled the distribution's
     bytecode, and getting that comparison wrong ships a folder that cannot run.
 
-    A Windows-target prefix is detected by the presence of `bin/python.exe` (a POSIX
-    build never produces that name) and takes a different path entirely -- see
-    `_windows_interpreter_version`.
+    A prefix this process cannot itself execute -- Windows, or a POSIX CPU-arch
+    cross target -- carries `VERSION_MARKER_NAME` instead (`_build_interpreter`
+    writes it exactly there), and takes a different path entirely -- see
+    `_marker_interpreter_version`. `WINDOWS_INTERPRETER_REL_PATH`'s presence routes
+    there too even without a marker (a POSIX build never produces that name), so a
+    Windows prefix missing its marker still gets `_marker_interpreter_version`'s own
+    specific error instead of falling through to a POSIX probe that was never going
+    to find `bin/python` either. A same-arch POSIX prefix has neither, so this stays
+    exact rather than a heuristic.
     """
-    if path_exists(Path(prefix) / WINDOWS_INTERPRETER_REL_PATH):
-        return _windows_interpreter_version(Path(prefix))
+    if path_exists(Path(prefix) / VERSION_MARKER_NAME) or path_exists(
+        Path(prefix) / WINDOWS_INTERPRETER_REL_PATH
+    ):
+        return _marker_interpreter_version(Path(prefix))
     argv = interpreter_argv(prefix)
     executable = Path(prefix) / INTERPRETER_REL_PATH
     # `-I`: the probe must report the interpreter's own version, not be steered by a
@@ -1265,7 +1466,17 @@ def bootstrap_modules(prefix: PathExists) -> frozenset[str]:
     `keyword` and a dozen more to `sys.modules`, so a probe using it would report its
     own imports as the interpreter's startup set and quietly pin them forever.
     `__main__` is dropped for the same reason -- it is the probe itself.
+
+    A CPU-cross build cannot be executed to ask (`is_cpu_cross_target`; see
+    `PROVIDED_MODULES_MARKER_NAME`): falls back to `_interpreter_provided_modules`'s
+    own static answer, a safe superset of the live `sys.modules` startup snapshot
+    (every builtin/frozen name, not only the ones one particular startup path happened
+    to import) -- safe because this result is only ever unioned into what a tailored
+    interpreter *keeps* (`resolve_requirements`), and over-keeping costs bytes, not
+    correctness, unlike `unprovided_modules`' own use of the same provided set.
     """
+    if path_exists(Path(prefix) / PROVIDED_MODULES_MARKER_NAME):
+        return _interpreter_provided_modules(prefix)
     answer = _probe_interpreter(
         prefix,
         "import sys; print(' '.join(sorted(sys.modules)))",
@@ -1289,7 +1500,17 @@ def _interpreter_provided_modules(prefix: PathExists) -> frozenset[str]:
     Needed by the verification in `stage_interpreter`: `sys`, `_thread` and friends
     are perfectly importable in a staged tree that has no file for them, so a check
     looking only at what is on disk would report them missing.
+
+    A CPU-cross build's `PROVIDED_MODULES_MARKER_NAME` (written by `_build_interpreter`,
+    since this build's own executable cannot be run here to ask) is read back instead
+    of probing when present -- exact, not a superset, for the same reason
+    `unprovided_modules` needs an exact answer: over-reporting "provided" here would
+    silently accept an application import the target interpreter cannot actually
+    satisfy.
     """
+    marker = Path(prefix) / PROVIDED_MODULES_MARKER_NAME
+    if marker.is_file():
+        return frozenset(marker.read_text().split())
     answer = _probe_interpreter(
         prefix,
         "import json, sys\n"

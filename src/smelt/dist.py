@@ -2338,7 +2338,15 @@ def build_dist(
     _logger.info("Assembled distribution at %s", dist_root)
 
     if report.onefile_path is not None:
-        report.onefile = pack_dist(report, zig_target=own_python_target, compression=compression)
+        # `interpreter_target`, not the raw `own_python_target` parameter: the latter
+        # is only the CLI-level override and stays `None` whenever a target comes from
+        # the entrypoint's own `own-python-target` declaration instead (the common
+        # case for a pyproject.toml-configured build) -- silently building the
+        # launcher *native* while the interpreter it carries is genuinely
+        # cross-compiled. `interpreter_target` is the one every other cross-aware step
+        # here already uses (see its own declaration above), and is `None` in `byo`
+        # mode too, where `pack_dist` ignores `zig_target` entirely regardless.
+        report.onefile = pack_dist(report, zig_target=interpreter_target, compression=compression)
         # Rewritten now that there is something more to say. The copy *inside* the
         # single file is the one written above and does not describe the packing --
         # a manifest cannot record the digest of an archive it is itself part of.
