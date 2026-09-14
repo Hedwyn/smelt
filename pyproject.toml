@@ -62,7 +62,26 @@ cython = ["Cython"]
 # stale for the Zig version `metapython.fetch` actually downloads (fails with
 # "hash mismatch"), and the OpenSSL build hard-coded an archive wrapper directory this
 # Zig strips. Anything between 1b625dc and 8046ab2 fails outright, for every target.
-metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git"]
+# 04775e3 is the first that can build CPython 3.13+ at all: `Tools/build/deepfreeze.py`
+# (used by `Utils.addDeepfreeze`) needs three CPython-version-conditional patches --
+# an `isinstance` check narrowed by a since-3.13 mypy cleanup (gh-133403) that dropped
+# the `umarshal.Code` branch this project's own frozen-header input actually needs, a
+# `ROOT = os.path.dirname(...)` path assumption that only holds at the file's original
+# on-disk depth, and calls to `_PyStaticCode_Init`/`_PyStaticCode_Fini`, removed from
+# CPython itself in gh-108716 years before 3.13 shipped. Anything older produces
+# `TypeError: Cannot generate code for Code object`, a `FileNotFoundError` for
+# `pycore_global_strings.h`, or `error: call to undeclared function` for any
+# `python_version` other than 3.12.
+# 868951e adds `python_version="3.14.2"` support: `Tools/build/umarshal.py` and
+# `deepfreeze.py` gain a `slice`-constant decode/codegen path for CPython 3.14's new
+# `TYPE_SLICE` marshal type, `deepfreeze.py`'s generated `.co_framesize` initializer
+# gets the `pycore_interpframe.h` include 3.14 moved `FRAME_SPECIALS_SIZE` into, `_blake2`
+# links CPython 3.14's new HACL Blake2 SIMD source files (previously silently missing,
+# `ImportError: undefined symbol: _Py_LibHacl_Hacl_Hash_Blake2s_free`), and a Makefile
+# per-object-flags parsing bug is fixed that dropped `-DHACL_CAN_COMPILE_VEC128`/`_VEC256`
+# for those same SIMD objects (`error: unknown type name 'Lib_IntVector_Intrinsics_vec128'`).
+# Anything older cannot build `python_version="3.14.2"` at all.
+metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@868951e"]
 # unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
 # without needing to actually run there. packaging: listed explicitly (not just relied
@@ -76,7 +95,7 @@ build = [
   "mypy[mypyc]",
   "hatchling",
   "editables",
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@8046ab2",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@868951e",
 ]
 
 [tool.setuptools]
