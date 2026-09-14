@@ -397,9 +397,12 @@ def _cpython_source_version(cpython_dir: Path) -> tuple[int, int]:
 #: `.@"3.12.13" = .{ .url = "...", .hash = "N-V-..." , .lazy = true },` -- capturing the
 #: version name and its content hash. Non-greedy up to the first `.hash` after the
 #: name, which is safe here since entries are flat (no nested `.{` between a name and
-#: its own `.hash`).
+#: its own `.hash`). The optional `a\d+`/`b\d+`/`rc\d+` suffix matches CPython's own
+#: pre-release tarball naming (e.g. `3.15.0rc2`), so a curated version can track a
+#: release candidate before its final tarball exists.
 _CPYTHON_ZON_ENTRY_RE: Final = re.compile(
-    r'\.@"(?P<version>\d+\.\d+\.\d+)"\s*=\s*\.\{.*?\.hash\s*=\s*"(?P<hash>[^"]+)"', re.DOTALL
+    r'\.@"(?P<version>\d+\.\d+\.\d+(?:a\d+|b\d+|rc\d+)?)"\s*=\s*\.\{.*?\.hash\s*=\s*"(?P<hash>[^"]+)"',
+    re.DOTALL,
 )
 
 

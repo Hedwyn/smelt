@@ -81,7 +81,15 @@ cython = ["Cython"]
 # per-object-flags parsing bug is fixed that dropped `-DHACL_CAN_COMPILE_VEC128`/`_VEC256`
 # for those same SIMD objects (`error: unknown type name 'Lib_IntVector_Intrinsics_vec128'`).
 # Anything older cannot build `python_version="3.14.2"` at all.
-metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@868951e"]
+# 7b9d097 adds `python_version="3.15.0rc2"` support (no 3.15.0 final tarball exists on
+# python.org yet -- only pre-releases through rc2; re-pin once final ships).
+# `Tools/build/deepfreeze.py` gained a new `import consts_getter` for a helper CPython
+# 3.15 split out of it, needing the same-directory-sibling treatment `umarshal.py` already
+# got, and `consts_getter.py`'s own `ROOT = Path(__file__).resolve().parents[2]`
+# needed the real absolute path baked in, the same wrong-directory-depth problem
+# `deepfreeze.py` itself already had fixed. Anything older cannot build
+# `python_version="3.15.0rc2"` at all.
+metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@7b9d097"]
 # unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
 # without needing to actually run there. packaging: listed explicitly (not just relied
@@ -95,7 +103,7 @@ build = [
   "mypy[mypyc]",
   "hatchling",
   "editables",
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@868951e",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@7b9d097",
 ]
 
 [tool.setuptools]
