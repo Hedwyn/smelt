@@ -255,6 +255,12 @@ EntrypointOptions = TypedDict(
         # Zig target triple for the `python = "own"` interpreter build; omitted means
         # a native build against the host's own libc.
         "own-python-target": str,
+        # CPython release the `python = "own"` interpreter is built from, one of
+        # meta-python's curated `-Dcpython-version` choices (e.g. "3.15.0rc2").
+        # Omitted means the release matching the running interpreter's own minor
+        # version -- see `smelt.own_python.resolve_own_python_version` for why that,
+        # and not some fixed default, is the only minor version a build can ship.
+        "own-python-version": str,
         # Whether the `python = "own"` interpreter's contents follow this entrypoint's
         # dependency closure (the default) instead of being the whole standard
         # library. See `smelt.dist.DEFAULT_TAILOR_INTERPRETER` for the trade-off.

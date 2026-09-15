@@ -125,10 +125,12 @@ from smelt.own_python import (
     InterpreterRequirements,
     StagedInterpreter,
     build_own_python,
+    interpreter_magic_number,
     interpreter_version,
     is_musl_zig_target,
     is_windows_zig_target,
     plan_disabled_libraries,
+    resolve_own_python_version,
     resolve_requirements,
     stage_interpreter,
     unprovided_modules,
@@ -847,28 +849,49 @@ def resolve_onefile_cache(
     return declared
 
 
-def assert_no_version_skew(tag: PycTargetTag, interpreter_version: tuple[int, int]) -> None:
+def assert_no_version_skew(
+    tag: PycTargetTag, interpreter_version: tuple[int, int], interpreter_magic_number: bytes
+) -> None:
     """
-    Refuses a shipped interpreter whose minor version differs from the one that
-    compiled the distribution's bytecode and extension modules.
+    Refuses a shipped interpreter that cannot run the bytecode and extension modules
+    compiled for this distribution.
 
-    Both are hard couplings and neither degrades gracefully: the `.pyc` magic number
-    is checked before any code runs, and the extension modules are compiled against a
-    specific C ABI. A *patch* difference is fine and proven -- 3.12.12-built artifacts
-    run under a 3.12.13 interpreter, because the magic number is per minor version and
-    the C ABI is stable within one.
+    Two separate hard couplings, neither of which degrades gracefully: the `.pyc`
+    magic number is checked before any code runs, and the extension modules are
+    compiled against a specific C ABI. `(major, minor)` is a safe proxy for the
+    second -- the C ABI is stable within one minor version, so a *patch* difference
+    is fine and proven (3.12.12-built extension modules run under a 3.12.13
+    interpreter). It is not a safe proxy for the first: CPython bumps the magic
+    number whenever the bytecode format changes, and for a still-unreleased minor
+    that can happen *within* one `(major, minor)`, between its own alpha/beta/rc
+    pins (see `own_python._cpython_source_magic_number`'s own docstring) -- so the
+    magic number is checked exactly rather than inferred from a `(major, minor)`
+    match. Getting either check wrong ships a folder that cannot run: a same-minor,
+    different-magic-number pair fails with `ImportError: bad magic number in
+    'encodings'` at startup, with nothing said beforehand about why.
     """
-    if tag.python_version == interpreter_version:
-        return
-    major, minor = interpreter_version
-    raise DistError(
-        f"The interpreter to ship is CPython {major}.{minor}, but the distribution's "
-        f"bytecode and extension modules were built by CPython {tag.version_string}. "
-        "That combination cannot run: the bytecode magic number is checked before any "
-        "code executes, and the extension modules are compiled against a specific C "
-        f"ABI. Build the distribution from a CPython {major}.{minor} environment, or "
-        "point --own-python-target at a matching build."
-    )
+    if tag.python_version != interpreter_version:
+        major, minor = interpreter_version
+        raise DistError(
+            f"The interpreter to ship is CPython {major}.{minor}, but the distribution's "
+            f"bytecode and extension modules were built by CPython {tag.version_string}. "
+            "That combination cannot run: the bytecode magic number is checked before any "
+            "code executes, and the extension modules are compiled against a specific C "
+            f"ABI. Build the distribution from a CPython {major}.{minor} environment, or "
+            "point --own-python-target at a matching build."
+        )
+    if tag.magic_number != interpreter_magic_number:
+        raise DistError(
+            f"The interpreter to ship is CPython {tag.version_string}, the same minor "
+            "version as the one that built the distribution's bytecode, but a different "
+            f"pre-release build of it: its .pyc magic number is {interpreter_magic_number.hex()}, "
+            f"not the {tag.magic_number.hex()} the bytecode was compiled for. CPython bumps "
+            "this number whenever the bytecode format changes, which can happen between "
+            "pre-release stages of one still-unreleased minor version even though it stays "
+            "fixed for every patch release once that minor has shipped. Build the "
+            "distribution from an environment running the exact CPython pre-release "
+            "own-python-version names, or ship a target version whose magic number matches."
+        )
 
 
 def _package_prefixes(import_path: ImportPath) -> Iterable[ImportPath]:
@@ -1853,6 +1876,7 @@ def build_dist(
     discovery: DiscoveryMode | None = None,
     python: DistPython | None = None,
     own_python_target: str | None = None,
+    own_python_version: str | None = None,
     tailor_interpreter: bool | None = None,
     drop_stdlib_groups: Iterable[str] = (),
     guard_version: bool = True,
@@ -1893,8 +1917,13 @@ def build_dist(
     `own_python_target`, and the minutes that first build takes, see
     `own_python.build_own_python` -- and stages it at the distribution *root*, so the
     folder runs on a machine with no Python installed. The interpreter shipped must
-    agree on `(major, minor)` with the one compiling the bytecode here; a patch
-    difference is fine (see `assert_no_version_skew`).
+    agree on `(major, minor)` *and* `.pyc` magic number with the one compiling the
+    bytecode here; a patch difference is fine once a minor has shipped, but not
+    necessarily during its own pre-release cycle (see `assert_no_version_skew`).
+    `own_python_version` picks which curated CPython release to build (e.g.
+    `"3.15.0rc2"`); left unset, it resolves to whichever curated release matches
+    *this* interpreter's own minor version, since `assert_no_version_skew` forbids
+    shipping any other minor anyway -- see `own_python.resolve_own_python_version`.
 
     `tailor_interpreter` makes that interpreter's contents follow the same closure
     (see `own_python.resolve_requirements` and `DEFAULT_TAILOR_INTERPRETER`), which is
@@ -2120,6 +2149,26 @@ def build_dist(
             "own-python-target", DEFAULT_OWN_PYTHON_TARGET
         )
         interpreter_target = target
+        python_version = resolve_own_python_version(
+            own_python_version or entrypoint_options.get("own-python-version")
+        )
+        # Fails now rather than after the build below: `assert_no_version_skew` would
+        # catch the same mismatch, but only once a several-minutes cross-compiled
+        # interpreter already exists to check it against. `resolve_own_python_version`
+        # already makes this impossible for the auto-picked default; the case caught
+        # here is an explicit `own_python_version`/`own-python-version` naming a
+        # curated release outside the running interpreter's own minor.
+        version_major_minor = tuple(int(part) for part in python_version.split(".")[:2])
+        if version_major_minor != tag.python_version:
+            raise DistError(
+                f"own-python-version {python_version!r} is CPython "
+                f"{version_major_minor[0]}.{version_major_minor[1]}, but this "
+                f"distribution's bytecode and extension modules are being built by "
+                f"CPython {tag.version_string}. A `python = \"own\"` build can only "
+                "ship the interpreter minor version compiling it (see "
+                "assert_no_version_skew) -- run smelt itself under a CPython "
+                f"{version_major_minor[0]}.{version_major_minor[1]} environment instead."
+            )
         if static_modules and is_windows_zig_target(target):
             raise DistError(
                 f"static_modules names {sorted(static_modules)}, but target {target!r} "
@@ -2162,11 +2211,14 @@ def build_dist(
         # been written would be a pointless wait for an answer available now.
         built_interpreter = build_own_python(
             target=target,
+            python_version=python_version,
             disabled_libraries=disabled_libraries,
             linkage="static" if resolved_own_python_static else "dynamic",
             static_modules=resolved_own_python_static_modules,
         )
-        assert_no_version_skew(tag, interpreter_version(built_interpreter))
+        assert_no_version_skew(
+            tag, interpreter_version(built_interpreter), interpreter_magic_number(built_interpreter)
+        )
         # Discovery answered "the interpreter brings its own" for every standard
         # library module, having asked the interpreter running smelt. For a mode `own`
         # target that is a different interpreter, and for a cross target it can be one

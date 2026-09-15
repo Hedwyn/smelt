@@ -390,6 +390,18 @@ def build_standalone_binary(
     "which is the only shape verified so far.",
 )
 @click.option(
+    "--own-python-version",
+    type=str,
+    default=None,
+    help="CPython release to build the --python own interpreter from (one of "
+    "meta-python's curated '-Dcpython-version' choices, e.g. '3.15.0rc2'). Defaults "
+    "to the curated release matching this interpreter's own minor version -- 'own' "
+    "can never ship a different one anyway, since the bytecode compiled here is "
+    "checked against it (see smelt.dist.assert_no_version_skew). Run smelt itself "
+    "under the minor version you want to ship (e.g. `uv run --python 3.15 smelt "
+    "...`) rather than trying to pick it here.",
+)
+@click.option(
     "--tailor-interpreter/--no-tailor-interpreter",
     "tailor_interpreter",
     default=None,
@@ -569,6 +581,7 @@ def build_dist_folder(
     discovery: Literal["static", "trace", "both"] | None,
     dist_python: Literal["byo", "own"] | None,
     own_python_target: str | None,
+    own_python_version: str | None,
     tailor_interpreter: bool | None,
     drop_stdlib_groups: tuple[str, ...],
     onefile: bool | None,
@@ -620,6 +633,7 @@ def build_dist_folder(
         discovery=discovery,
         python=dist_python,
         own_python_target=own_python_target,
+        own_python_version=own_python_version,
         tailor_interpreter=tailor_interpreter,
         drop_stdlib_groups=drop_stdlib_groups,
         guard_version=not no_version_guard,

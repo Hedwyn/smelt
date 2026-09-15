@@ -904,12 +904,21 @@ def test_compile_tree_honors_exclusions(tmp_path: Path) -> None:
 def test_version_skew_guard_accepts_a_patch_difference() -> None:
     # 3.12.12-built artifacts under a 3.12.13 interpreter: proven to work, because the
     # bytecode magic is per minor version and the C ABI is stable within one
-    assert_no_version_skew(PycTargetTag((3, 12), b"\xcb\r\r\n", 0), (3, 12))
+    assert_no_version_skew(PycTargetTag((3, 12), b"\xcb\r\r\n", 0), (3, 12), b"\xcb\r\r\n")
 
 
 def test_version_skew_guard_refuses_a_minor_difference() -> None:
     with pytest.raises(DistError, match="3.13"):
-        assert_no_version_skew(PycTargetTag((3, 12), b"\xcb\r\r\n", 0), (3, 13))
+        assert_no_version_skew(PycTargetTag((3, 12), b"\xcb\r\r\n", 0), (3, 13), b"\xcb\r\r\n")
+
+
+def test_version_skew_guard_refuses_a_magic_number_difference() -> None:
+    # Same (major, minor) can still disagree on the .pyc magic number between two
+    # pre-release builds of one still-unreleased minor (e.g. 3.15.0a2 vs 3.15.0rc2) --
+    # (major, minor) alone is not enough to prove the shipped interpreter can run this
+    # bytecode.
+    with pytest.raises(DistError, match="pre-release"):
+        assert_no_version_skew(PycTargetTag((3, 15), b"\x48\x0e\r\n", 0), (3, 15), b"\x52\x0e\r\n")
 
 
 def _a_staged_interpreter() -> StagedInterpreter:

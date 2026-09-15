@@ -169,6 +169,12 @@ WINDOWS_STDLIB_REL_PATH: Final[Path] = Path("Lib")
 #: something *can* read it, rather than asked for again later.
 VERSION_MARKER_NAME: Final[str] = "_smelt_cpython_version.txt"
 
+#: Written alongside `VERSION_MARKER_NAME`, for the same targets and the same
+#: reason: this build's `.pyc` magic number (see `_cpython_source_magic_number`),
+#: hex-encoded, since `interpreter_magic_number` cannot probe a Windows or
+#: CPU-cross build's own executable to ask any more than `interpreter_version` can.
+MAGIC_NUMBER_MARKER_NAME: Final[str] = "_smelt_pyc_magic_number.txt"
+
 #: Written next to a CPU-cross build's `bin/` (see `is_cpu_cross_target`), at build
 #: time: the newline-separated union of `Modules/config.c`'s builtin inittab,
 #: `Python/frozen.c`'s frozen module tables, and any `static_modules` this build used
@@ -393,6 +399,55 @@ def _cpython_source_version(cpython_dir: Path) -> tuple[int, int]:
     return int(found["MAJOR"]), int(found["MINOR"])
 
 
+#: Matches 3.14+'s `#define PYC_MAGIC_NUMBER <int>` in `Include/internal/
+#: pycore_magic_number.h`, the raw integer `_imp.pyc_magic_number_token`
+#: (and so `importlib.util.MAGIC_NUMBER`) is derived from at build time.
+_PYC_MAGIC_NUMBER_RE: Final = re.compile(r"#define PYC_MAGIC_NUMBER (\d+)\b")
+#: Matches pre-3.14's `MAGIC_NUMBER = (<int>).to_bytes(2, 'little') + b'\r\n'` in
+#: `Lib/importlib/_bootstrap_external.py`, the same value written out directly
+#: rather than through `_imp.pyc_magic_number_token` (introduced in 3.14).
+_BOOTSTRAP_MAGIC_NUMBER_RE: Final = re.compile(r"MAGIC_NUMBER = \((\d+)\)\.to_bytes\(2")
+
+
+def _cpython_source_magic_number(cpython_dir: Path) -> bytes:
+    """
+    The 4-byte `.pyc` magic number `cpython_dir` produces, read directly from source
+    rather than asked of a built interpreter.
+
+    Needed on top of `_cpython_source_version`: CPython bumps this every time the
+    bytecode format changes, including *within* one still-unreleased `X.Y` -- true of
+    every pre-release stage smelt curates a CPython source for (see build.zig.zon's
+    own comments on chasing 3.15 through its alpha/rc pins). Two builds that agree on
+    `(major, minor)` can still disagree here, and `assert_no_version_skew`'s own
+    "a patch difference is fine" reasoning only holds once a series has shipped its
+    first final release and stopped changing this number at all -- it does not hold
+    across pre-release stages of one still-moving `X.Y`. A same-`(major, minor)`
+    mismatch here ships a folder whose interpreter refuses its own bytecode at
+    startup (`ImportError: bad magic number in 'encodings'`) with no clue why, since
+    nothing before this compared the one thing that actually decides that.
+
+    The raw integer moved out of `Lib/importlib/_bootstrap_external.py` and into a C
+    define (`Include/internal/pycore_magic_number.h`) in 3.14 -- both are tried, since
+    smelt curates versions on either side of that split. Either way it is turned into
+    the same 4-byte form `importlib.util.MAGIC_NUMBER` itself produces (2-byte
+    little-endian int, then `b'\r\n'`) so the two are directly comparable.
+    """
+    header = cpython_dir / "Include" / "internal" / "pycore_magic_number.h"
+    bootstrap = cpython_dir / "Lib" / "importlib" / "_bootstrap_external.py"
+    raw: int | None = None
+    if header.is_file():
+        match = _PYC_MAGIC_NUMBER_RE.search(header.read_text())
+        raw = int(match.group(1)) if match else None
+    if raw is None and bootstrap.is_file():
+        match = _BOOTSTRAP_MAGIC_NUMBER_RE.search(bootstrap.read_text())
+        raw = int(match.group(1)) if match else None
+    if raw is None:
+        raise OwnPythonError(
+            f"Cannot find the .pyc magic number in {header} or {bootstrap}."
+        )
+    return raw.to_bytes(2, "little") + b"\r\n"
+
+
 #: Matches one `build.zig.zon` dependency entry naming a curated CPython version, e.g.
 #: `.@"3.12.13" = .{ .url = "...", .hash = "N-V-..." , .lazy = true },` -- capturing the
 #: version name and its content hash. Non-greedy up to the first `.hash` after the
@@ -416,6 +471,51 @@ def _cpython_zon_hashes() -> dict[str, str]:
 
     zon_path = VENDORED_PROJECT_DIR / "build.zig.zon"
     return dict(_CPYTHON_ZON_ENTRY_RE.findall(zon_path.read_text()))
+
+
+def resolve_own_python_version(explicit: str | None) -> str:
+    """
+    What `build_dist` passes as `build_own_python`'s `python_version` when the caller
+    (CLI flag or `own-python-version` entrypoint option) leaves it unset: the curated
+    release matching the *running* interpreter's `(major, minor)` -- i.e. the one
+    compiling this very distribution's bytecode.
+
+    That is not an arbitrary default: `assert_no_version_skew` already refuses a
+    shipped interpreter whose minor version differs from the one that compiled the
+    bytecode, so a `python="own"` build can never actually ship a minor version other
+    than the running interpreter's own -- the auto-pick just settles on that outcome
+    up front instead of failing after several minutes of cross-compiling the wrong
+    one. It also matches `smelt.dist.trace_imported_modules`, which imports the
+    entrypoint through `sys.executable` (again, the running interpreter): discovery
+    only ever observes real imports for that one version, so shipping any other
+    minor would be trace-blind for it regardless.
+
+    Picking a different *patch*/pre-release within the running minor is still
+    possible -- pass `explicit` (e.g. `"3.15.0rc2"`) rather than leaving it to
+    auto-pick.
+
+    Raises `OwnPythonError` if `explicit` is given but not one of `build.zig.zon`'s
+    curated versions, or if auto-pick finds none curated for the running minor.
+    """
+    hashes = _cpython_zon_hashes()
+    if explicit is not None:
+        if explicit not in hashes:
+            raise OwnPythonError(
+                f"Unknown CPython version {explicit!r}: not one of meta-python's "
+                f"curated `-Dcpython-version` choices, {sorted(hashes)}."
+            )
+        return explicit
+
+    running = f"{sys.version_info.major}.{sys.version_info.minor}"
+    candidates = sorted(version for version in hashes if version.startswith(f"{running}."))
+    if not candidates:
+        raise OwnPythonError(
+            f"No curated CPython release for {running} (this interpreter's own "
+            f"minor version): meta-python's `-Dcpython-version` only curates "
+            f"{sorted(hashes)}. Run smelt itself under one of those minor versions, "
+            "or pass an explicit own-python-version/--own-python-version."
+        )
+    return candidates[-1]
 
 
 def _fetched_cpython_source_dir(python_version: str) -> Path | None:
@@ -1432,10 +1532,13 @@ def _build_interpreter(
         # Recorded now because this is the one point something *can* read it: this
         # build's own executable cannot run on this host -- a Windows `.exe` never
         # can, and a POSIX CPU-arch cross target's binary can't either, emulation
-        # aside -- so `interpreter_version` cannot probe it later the way it does a
-        # same-arch target (see `VERSION_MARKER_NAME`).
+        # aside -- so neither `interpreter_version` nor `interpreter_magic_number`
+        # can probe it later the way each does a same-arch target (see
+        # `VERSION_MARKER_NAME`/`MAGIC_NUMBER_MARKER_NAME`).
         major, minor = _cpython_source_version(cpython_dir)
         (dest / VERSION_MARKER_NAME).write_text(f"{major}.{minor}\n")
+        magic_number = _cpython_source_magic_number(cpython_dir)
+        (dest / MAGIC_NUMBER_MARKER_NAME).write_text(magic_number.hex() + "\n")
     if is_cpu_cross_target(target):
         # Same reasoning, for the builtin/frozen module set `bootstrap_modules`/
         # `_interpreter_provided_modules` would otherwise get by running this build's
@@ -1543,6 +1646,58 @@ def interpreter_version(prefix: PathExists) -> tuple[int, int]:
         )
     major, minor = (int(field_value) for field_value in fields)
     return major, minor
+
+
+def interpreter_magic_number(prefix: PathExists) -> bytes:
+    """
+    The 4-byte `.pyc` magic number of the interpreter installed at `prefix`, asked of
+    the interpreter itself rather than read from source -- the counterpart of
+    `interpreter_version`, and needed for the same reason: two builds can agree on
+    `(major, minor)` and still disagree here, once either is a pre-release of a
+    still-unreleased minor (see `assert_no_version_skew`, `smelt.dist`).
+
+    Same split as `interpreter_version`, checked the same way (not just this
+    function's own marker's presence): a Windows or POSIX CPU-arch cross prefix
+    must never fall through to the probe below on principle, not even under a
+    host's own transparent QEMU user-mode emulation (`binfmt_misc`) for a same-OS,
+    different-CPU target -- a host that happens to have it configured would
+    otherwise attempt it silently and fail deep inside qemu (a missing target
+    sysroot, typically) instead of cleanly. `MAGIC_NUMBER_MARKER_NAME` is written
+    by `_build_interpreter` alongside `VERSION_MARKER_NAME` (same builds, same
+    reason, same time) -- one missing while the other is present means only that
+    this prefix was built before smelt started recording it, not that this prefix
+    is probeable; rebuild it (`build_own_python`'s own `no_cache=True` -- `build-dist`
+    exposes no CLI flag for it yet, so a caller through the CLI has to delete
+    `prefix` itself and let the next build recreate it) rather than guessing.
+    """
+    if path_exists(Path(prefix) / VERSION_MARKER_NAME) or path_exists(
+        Path(prefix) / WINDOWS_INTERPRETER_REL_PATH
+    ):
+        marker = Path(prefix) / MAGIC_NUMBER_MARKER_NAME
+        if not marker.is_file():
+            raise OwnPythonError(
+                f"No {MAGIC_NUMBER_MARKER_NAME} at {prefix}: its magic number cannot be "
+                "probed by running it on this host, and this prefix predates smelt "
+                f"recording it at build time. Delete {prefix} and rebuild -- there is no "
+                "CLI flag for this yet, only build_own_python's own no_cache=True."
+            )
+        text = marker.read_text().strip()
+        try:
+            return bytes.fromhex(text)
+        except ValueError:
+            raise OwnPythonError(f"Unreadable magic number marker at {marker}: {text!r}") from None
+    answer = _probe_interpreter(
+        prefix,
+        "import importlib.util; print(importlib.util.MAGIC_NUMBER.hex())",
+        "its .pyc magic number",
+    )
+    try:
+        return bytes.fromhex(answer)
+    except ValueError:
+        raise OwnPythonError(
+            f"The interpreter at {Path(prefix) / INTERPRETER_REL_PATH} reported an "
+            f"unreadable .pyc magic number: {answer!r}"
+        ) from None
 
 
 def _probe_interpreter(prefix: PathExists, script: str, what: str) -> str:
@@ -2256,6 +2411,18 @@ def unprovided_modules(prefix: PathExists, modules: Iterable[str]) -> list[str]:
     module the *host* cannot import either (`_winapi` on Linux, reached through
     `subprocess`'s Windows branch) is nobody's regression: it is dropped before either
     pass, since the application evidently does not need it here.
+
+    The import pass is skipped for a `PROVIDED_MODULES_MARKER_NAME` prefix (a
+    Windows or CPU-cross build, per `_interpreter_provided_modules`): its own
+    executable must never be executed here, on principle -- not even under
+    user-mode QEMU for a same-OS, different-CPU target, since a host that
+    happens to have it configured (via `binfmt_misc`) would otherwise attempt
+    it silently and fail deep inside qemu instead of cleanly, over something
+    the file-level pass already answers safely. `provided` is documented as
+    *exact*, not a superset, for exactly this prefix shape, so anything the
+    file-level pass still can't resolve is the same kind of aliasing case
+    `_resolvable_modules`'s own docstring gives for `os.path` -- a source-level
+    `sys.modules` trick with nothing CPU-specific about it, not a genuine gap.
     """
     names = [name for name in modules if _host_can_import(name)]
     if not names:
@@ -2264,6 +2431,8 @@ def unprovided_modules(prefix: PathExists, modules: Iterable[str]) -> list[str]:
     provided = _interpreter_provided_modules(prefix)
     suspects = sorted(set(names) - _resolvable_modules(stdlib, names, provided))
     if not suspects:
+        return []
+    if path_exists(Path(prefix) / PROVIDED_MODULES_MARKER_NAME):
         return []
     return _unimportable_modules(prefix, suspects)
 

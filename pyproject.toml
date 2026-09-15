@@ -18,8 +18,15 @@ smelt = "smelt.frontend:smelt"
 Homepage = "https://github.com/Hedwyn/smelt"
 
 [project.optional-dependencies]
-tests = ["pytest", "mypy[mypyc]"]
-mypyc = ["mypy[mypyc]"]
+# mypy[mypyc] is capped below 1.19 on Python 3.15+: 1.19 made `librt` (a compiled
+# runtime accelerator) an unconditional dependency, and the `librt` wheels on PyPI
+# as of this pin are not ABI-compatible with 3.15 pre-releases -- `import
+# mypyc.build` (smelt.backend's own import of it) raises `SystemError: module
+# librt.internal uses unknown slot ID 85` before anything else runs. Below 1.19
+# there is no `librt` dependency at all. Lift the cap once mypy ships
+# 3.15-compatible `librt` wheels.
+tests = ["pytest", "mypy[mypyc]; python_version < '3.15'", "mypy[mypyc]<1.19; python_version >= '3.15'"]
+mypyc = ["mypy[mypyc]; python_version < '3.15'", "mypy[mypyc]<1.19; python_version >= '3.15'"]
 cli = ["click"]
 # patchelf: Nuitka needs it for RPATH rewrites in standalone/onefile mode on Linux;
 # bundling a known-good build keeps smelt self-contained rather than relying on the
@@ -89,7 +96,21 @@ cython = ["Cython"]
 # needed the real absolute path baked in, the same wrong-directory-depth problem
 # `deepfreeze.py` itself already had fixed. Anything older cannot build
 # `python_version="3.15.0rc2"` at all.
-metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@7b9d097"]
+# 6d2756d fixes two bugs 7b9d097's own `python_version="3.15.0rc2"` support hit on a
+# CPU-arch cross build (e.g. `own-python-target="arm-linux-gnueabihf"`): the curated
+# `3.14.2` entry (fetched as a build-time bootstrap interpreter, regardless of which
+# `-Dcpython-version` is actually being built) pointed at python.org, whose CDN served
+# that one tarball as different bytes on different requests -- re-pointed at CPython's
+# own GitHub tag archive, stable across repeated fetches. And `Utils.writeBuildPythonStub`
+# handed `./configure --with-build-python=` a `cpython_dir`-prefixed path while also
+# running `./configure` itself with `cwd` already set to `cpython_dir` -- doubling the
+# path for a `-Dcpython-version=` dependency, whose `cpython_dir` this pinned Zig's
+# project-local `zig-pkg/` cache does not hand back absolute. `configure` reported
+# `invalid or missing build python binary` for any CPU-arch cross build regardless of
+# `python_version`, since `writeBuildPythonStub` is unconditional whenever cross_arch is
+# true. Anything older hits one or both of these for `own-python-target`
+# `arm-linux-gnueabihf` (or any other CPU-arch cross target).
+metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@6d2756d"]
 # unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
 # without needing to actually run there. packaging: listed explicitly (not just relied
@@ -100,10 +121,12 @@ build = [
   "Cython",
   "nuitka[onefile]<4.2",
   "patchelf>=0.17.2,<0.18; sys_platform == 'linux'",
-  "mypy[mypyc]",
+  # capped below 1.19 on Python 3.15+: see the `mypyc` extra's own comment above.
+  "mypy[mypyc]; python_version < '3.15'",
+  "mypy[mypyc]<1.19; python_version >= '3.15'",
   "hatchling",
   "editables",
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@7b9d097",
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@6d2756d",
 ]
 
 [tool.setuptools]
