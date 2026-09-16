@@ -125,7 +125,9 @@ from smelt.own_python import (
     REAL_INTERPRETER_REL_PATH,
     InterpreterRequirements,
     StagedInterpreter,
+    TargetPythonHeaders,
     build_own_python,
+    cpython_include_dir,
     interpreter_magic_number,
     interpreter_version,
     is_musl_zig_target,
@@ -134,6 +136,7 @@ from smelt.own_python import (
     resolve_own_python_version,
     resolve_requirements,
     stage_interpreter,
+    target_python_headers_for,
     unprovided_modules,
 )
 from smelt.process import call_command
@@ -820,11 +823,11 @@ def resolve_onefile_compression_preset(
     """
     if compression_preset is not None:
         return compression_preset
-    preset = entrypoint_options.get("onefile-compression-preset", DEFAULT_ONEFILE_COMPRESSION_PRESET)
+    preset = entrypoint_options.get(
+        "onefile-compression-preset", DEFAULT_ONEFILE_COMPRESSION_PRESET
+    )
     if not isinstance(preset, int):
-        raise DistError(
-            f"Invalid onefile-compression-preset {preset!r}, expected an integer."
-        )
+        raise DistError(f"Invalid onefile-compression-preset {preset!r}, expected an integer.")
     return preset
 
 
@@ -1167,9 +1170,15 @@ def collect_optional_modules(
     needed = (
         required
         if required is not None
-        else collect_required_modules(entrypoint_module, search_paths, extra_modules, extra_packages)
+        else collect_required_modules(
+            entrypoint_module, search_paths, extra_modules, extra_packages
+        )
     )
-    return collected - needed - _closure_roots_in(entrypoint_module, extra_modules, extra_packages, search_paths)
+    return (
+        collected
+        - needed
+        - _closure_roots_in(entrypoint_module, extra_modules, extra_packages, search_paths)
+    )
 
 
 def _closure_roots_in(
@@ -2088,7 +2097,9 @@ def build_dist(
     drop_optional = resolve_drop_optional_imports(entrypoint_options, drop_optional_imports)
     pack_onefile = resolve_onefile(entrypoint_options, onefile)
     compression = resolve_onefile_compression(entrypoint_options, onefile_compression)
-    compression_preset = resolve_onefile_compression_preset(entrypoint_options, onefile_compression_preset)
+    compression_preset = resolve_onefile_compression_preset(
+        entrypoint_options, onefile_compression_preset
+    )
     reuse_cache = resolve_onefile_cache(entrypoint_options, onefile_cache)
     if onefile_only and not pack_onefile:
         raise DistError(
@@ -2165,7 +2176,7 @@ def build_dist(
                 f"own-python-version {python_version!r} is CPython "
                 f"{version_major_minor[0]}.{version_major_minor[1]}, but this "
                 f"distribution's bytecode and extension modules are being built by "
-                f"CPython {tag.version_string}. A `python = \"own\"` build can only "
+                f'CPython {tag.version_string}. A `python = "own"` build can only '
                 "ship the interpreter minor version compiling it (see "
                 "assert_no_version_skew) -- run smelt itself under a CPython "
                 f"{version_major_minor[0]}.{version_major_minor[1]} environment instead."
@@ -2278,6 +2289,27 @@ def build_dist(
     # A vendored provider that was static-link-eligible (see `smelt.vendoring`) lands
     # in `static_modules` instead -- merged in here so it is skipped by the closure
     # loop the same way a `built`, smelt-compiled static module already is.
+    # `Python.h` and `pyconfig.h` have to come from the same, target-consistent
+    # tree (see `TargetPythonHeaders`'s own doc for why) -- reused from the mode
+    # `own` interpreter build above when it was built for this same target
+    # (`build_static_interpreter`'s own `include_dirs` further down does the same
+    # reuse); resolved on demand otherwise (no mode `own` build in this run, or one
+    # built for a different target) via the same `./configure`-only step, cached
+    # per target.
+    resolved_isolated_py_headers: TargetPythonHeaders | None = None
+    if resolved_isolated_build and resolved_isolated_build_target is not None:
+        isolated_python_version = (
+            python_version if resolved_python == "own" else resolve_own_python_version(None)
+        )
+        if built_interpreter is not None and interpreter_target == resolved_isolated_build_target:
+            resolved_isolated_py_headers = TargetPythonHeaders(
+                include_dir=cpython_include_dir(isolated_python_version),
+                pyconfig_dir=assert_path_exists(built_interpreter / "pyconfig.h").parent,
+            )
+        else:
+            resolved_isolated_py_headers = target_python_headers_for(
+                resolved_isolated_build_target, python_version=isolated_python_version
+            )
     isolated_result = (
         prepare_isolated_natives(
             closure,
@@ -2286,6 +2318,7 @@ def build_dist(
             versions=resolved_isolated_build_versions,
             dependencies=parse_pyproject_dependencies(config.dependencies),
             static_build_dir=static_build_dir,
+            py_headers=resolved_isolated_py_headers,
         )
         if resolved_isolated_build
         else IsolatedNativesResult()
@@ -2297,7 +2330,10 @@ def build_dist(
         # `NewType`): `static_modules`' own declared type is `Mapping[str, ...]`,
         # and an `ImportPath`-keyed dict is not assignable to that contravariantly
         # (its `__getitem__` only promises to accept an `ImportPath`, not any `str`).
-        **{str(import_path): objects for import_path, objects in isolated_result.static_modules.items()},
+        **{
+            str(import_path): objects
+            for import_path, objects in isolated_result.static_modules.items()
+        },
     }
 
     # Native artifacts first: whatever smelt built for a module is what that module
@@ -2492,7 +2528,11 @@ def build_dist(
         # here already uses (see its own declaration above), and is `None` in `byo`
         # mode too, where `pack_dist` ignores `zig_target` entirely regardless.
         report.onefile = pack_dist(
-            report, zig_target=interpreter_target, compression=compression, compression_preset=compression_preset, reuse_cache=reuse_cache
+            report,
+            zig_target=interpreter_target,
+            compression=compression,
+            compression_preset=compression_preset,
+            reuse_cache=reuse_cache,
         )
         # Rewritten now that there is something more to say. The copy *inside* the
         # single file is the one written above and does not describe the packing --

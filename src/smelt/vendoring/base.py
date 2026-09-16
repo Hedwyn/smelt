@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from smelt.own_python import TargetPythonHeaders
 from smelt.utils import ImportPath, PathExists
 
 
@@ -53,6 +54,7 @@ class VendoredProvider(Protocol):
         python_version: tuple[int, int],
         *,
         build_dir: Path,
+        py_headers: TargetPythonHeaders | None = None,
     ) -> VendoredExtension:
         """
         Fetches (from source) and compiles this provider's extension for `target`
@@ -60,6 +62,13 @@ class VendoredProvider(Protocol):
         same convention as `smelt.isolated_build.fetch_wheel`), matching
         `version_requirement` (as `smelt.isolated_build.resolve_isolated_build_version`
         produces it).
+
+        `py_headers`, when `target` is set, is the target-correct `Python.h`/
+        `pyconfig.h` pair the caller already resolved (see
+        `smelt.own_python.target_python_headers_for`) -- forwarded to whatever
+        compiles this provider's extension (typically
+        `smelt.vendoring._compile.compile_extension_for_target`) instead of letting
+        it fall back to a generic, wrong-for-this-target one.
 
         Compiles into `build_dir` but never links: the caller decides whether the
         result is staged for static linking or linked into a loose `.so` (see

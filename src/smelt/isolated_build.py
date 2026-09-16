@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
 
 from smelt.explorer import ModuleKind, ResolvedModule
+from smelt.own_python import TargetPythonHeaders
 from smelt.utils import ImportPath, PathExists, SmeltError, assert_path_exists
 
 if TYPE_CHECKING:
@@ -402,11 +403,18 @@ def prepare_isolated_natives(
     dependencies: Mapping[str, str] = {},
     static_build_dir: Path | None = None,
     python_version: tuple[int, int] = sys.version_info[:2],
+    py_headers: TargetPythonHeaders | None = None,
 ) -> IsolatedNativesResult:
     """
     For every `ModuleKind.EXTENSION` entry in `closure`, obtains a replacement built
     for `target` instead of `resolved.origin` (the local environment's own build,
     wrong for a foreign target).
+
+    `py_headers`, forwarded to a `smelt.vendoring` provider's build, is the
+    target-correct `Python.h`/`pyconfig.h` pair the caller already resolved (see
+    `smelt.own_python.target_python_headers_for`) -- unused for a `target=None`
+    (native) build, and unused for the wheel-fetch path (a prebuilt wheel compiles
+    nothing here).
 
     Checked *first*, before any wheel lookup: whether `owning_distribution` has a
     `smelt.vendoring` provider registered for it (see `smelt.vendoring.get_provider`)
@@ -459,7 +467,9 @@ def prepare_isolated_natives(
                 version_requirement = resolve_isolated_build_version(
                     dist_name, versions, pyproject_dependencies=dependencies
                 )
-                build_dir = static_build_dir or (vendored_build_cache_dir(dist_name, target) / "objects")
+                build_dir = static_build_dir or (
+                    vendored_build_cache_dir(dist_name, target) / "objects"
+                )
                 build_dir.mkdir(parents=True, exist_ok=True)
                 vendored_builds[dist_name] = vendoring.build_vendored_extension(
                     provider,
@@ -468,6 +478,7 @@ def prepare_isolated_natives(
                     python_version,
                     build_dir=build_dir,
                     static_build_dir=static_build_dir,
+                    py_headers=py_headers,
                 )
             vext, so_path = vendored_builds[dist_name]
             if vext.import_path != import_path:

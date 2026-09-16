@@ -143,9 +143,7 @@ REAL_INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python-real")
 MUSL_LOADER_GLOB: Final[str] = "ld-musl-*.so.1"
 
 #: The stub installed as `bin/python` for a musl target (see `_stage_musl_runtime`).
-INTERPRETER_SHIM_SOURCE: Final[Path] = (
-    Path(__file__).parent / "launcher" / "interpreter_shim.zig"
-)
+INTERPRETER_SHIM_SOURCE: Final[Path] = Path(__file__).parent / "launcher" / "interpreter_shim.zig"
 
 #: The Windows counterpart of `INTERPRETER_REL_PATH`. meta-python's `buildWindows`
 #: installs the executable and the DLL implementing the interpreter side by side under
@@ -228,7 +226,9 @@ def _parse_builtin_modules(config_c_text: str) -> frozenset[str]:
     are unioned in separately by `_static_provided_modules`, since a caller's request
     is known without parsing anything.
     """
-    return frozenset(_C_ARRAY_ENTRY_NAME_RE.findall(_c_array_body(config_c_text, "_PyImport_Inittab")))
+    return frozenset(
+        _C_ARRAY_ENTRY_NAME_RE.findall(_c_array_body(config_c_text, "_PyImport_Inittab"))
+    )
 
 
 def _parse_frozen_modules(frozen_c_text: str) -> frozenset[str]:
@@ -257,7 +257,11 @@ def _static_provided_modules(cpython_dir: Path, static_modules: Iterable[str]) -
     """
     config_c = (cpython_dir / "Modules" / "config.c").read_text()
     frozen_c = (cpython_dir / "Python" / "frozen.c").read_text()
-    return _parse_builtin_modules(config_c) | _parse_frozen_modules(frozen_c) | frozenset(static_modules)
+    return (
+        _parse_builtin_modules(config_c)
+        | _parse_frozen_modules(frozen_c)
+        | frozenset(static_modules)
+    )
 
 
 #: The stdlib module whose presence CPython's prefix detection uses to recognise a
@@ -442,9 +446,7 @@ def _cpython_source_magic_number(cpython_dir: Path) -> bytes:
         match = _BOOTSTRAP_MAGIC_NUMBER_RE.search(bootstrap.read_text())
         raw = int(match.group(1)) if match else None
     if raw is None:
-        raise OwnPythonError(
-            f"Cannot find the .pyc magic number in {header} or {bootstrap}."
-        )
+        raise OwnPythonError(f"Cannot find the .pyc magic number in {header} or {bootstrap}.")
     return raw.to_bytes(2, "little") + b"\r\n"
 
 
@@ -1063,6 +1065,106 @@ def _resolve_pyconfig_header(
     return assert_path_exists(resolved)
 
 
+@dataclass
+class TargetPythonHeaders:
+    """
+    What a caller needs to compile a C source against a *target's* Python C-API
+    correctly, instead of the running interpreter's own: `Python.h` (and every
+    header it pulls in, e.g. `cpython/object.h`) has to come from the *same*
+    place as `pyconfig.h` -- `Python.h` itself does `#include "pyconfig.h"`, a
+    quoted include, which C/C++ resolve by checking the *including file's own
+    directory first*, before any `-I` search path, no matter its position on the
+    command line. Mixing this host's installed `Python.h` (whose own directory
+    already has its own, host-native `pyconfig.h` sitting right next to it) with
+    a separately resolved target `pyconfig.h` passed via `-I` cannot work: the
+    host's own same-named sibling file always wins the quoted lookup first,
+    silently, before the `-I` list is ever consulted. The fix is to source both
+    files from the same, target-consistent tree instead of overriding one half
+    of a matched pair.
+
+    `include_dir` is CPython's own `Include/` (from the same source checkout
+    `_resolve_pyconfig_header` configures) -- version-specific, but *not*
+    target-specific: the header *sources* are identical across targets, only
+    the `./configure`-generated `pyconfig.h` differs. `pyconfig_dir` is the
+    directory holding that target-specific `pyconfig.h`. Passed together to
+    `smelt.vendoring`'s compile helper (`smelt.vendoring._compile.
+    compile_extension_for_target`) as the two `-I` entries replacing the host's
+    own `sysconfig` include dirs for a cross-target compile -- since `Include/`
+    itself holds no `pyconfig.h` of its own, the quoted lookup falls through to
+    `-I` cleanly this time and finds the correct one.
+    """
+
+    include_dir: PathExists
+    pyconfig_dir: Path
+
+
+def cpython_include_dir(python_version: str = DEFAULT_CPYTHON_VERSION) -> PathExists:
+    """
+    CPython `python_version`'s own `Include/` directory (`Python.h` and every
+    public header it pulls in) -- from the same source checkout
+    `_resolve_pyconfig_header` configures a target `pyconfig.h` against, so the
+    two are always a matching pair (see `TargetPythonHeaders`). Same across
+    every target for a given `python_version`: only `pyconfig.h` itself is
+    target-specific.
+
+    Raises `OwnPythonError` if nothing has fetched this version's source yet
+    (see `_cpython_source_dir`) -- call after `_resolve_pyconfig_header`/
+    `pyconfig_header_for_target`/`build_own_python` has run at least once for
+    this `python_version`, which is what actually fetches it.
+    """
+    return assert_path_exists(_cpython_source_dir(python_version) / "Include")
+
+
+def pyconfig_header_for_target(
+    target: str,
+    *,
+    python_version: str = DEFAULT_CPYTHON_VERSION,
+) -> PathExists:
+    """
+    A cached, target-correct `pyconfig.h` for `target`, without building a full
+    interpreter -- for a caller that needs the header alone (e.g.
+    `smelt.isolated_build`, compiling a vendored third-party extension for a target
+    with no mode `own` interpreter built for it in the same run) and so has no
+    `build_own_python` output of its own to take one from.
+
+    Thin wrapper around `_resolve_pyconfig_header` (the same `./configure`-only step
+    a real build already runs): cached under `own_python_cache_dir` the same way a
+    real build's output is, so a second call for the same target/version is a cache
+    hit rather than a second `./configure` run. `debug` is not a parameter here --
+    `pyconfig.h` only depends on it through `--with-pydebug`'s ABI-affecting macros,
+    irrelevant to a header used purely as an extension-compile include, so this
+    always resolves the release-mode one.
+
+    Consider `target_python_headers_for` instead: this returns `pyconfig.h` alone,
+    which -- per `TargetPythonHeaders`'s own doc -- is not by itself enough to
+    correctly compile a C source against a foreign target's Python C-API.
+    """
+    dest = own_python_cache_dir(target, python_version=python_version) / "pyconfig-only"
+    cached = dest / "pyconfig.h"
+    if cached.is_file():
+        return assert_path_exists(cached)
+    with interpreter_build_lock():
+        return _resolve_pyconfig_header(
+            target, debug=False, dest=dest, python_version=python_version
+        )
+
+
+def target_python_headers_for(
+    target: str,
+    *,
+    python_version: str = DEFAULT_CPYTHON_VERSION,
+) -> TargetPythonHeaders:
+    """
+    `TargetPythonHeaders` for `target`: `pyconfig_header_for_target`'s resolved
+    header, paired with the matching `cpython_include_dir` -- see
+    `TargetPythonHeaders`'s own doc for why a `pyconfig.h` alone is not enough.
+    """
+    header = pyconfig_header_for_target(target, python_version=python_version)
+    return TargetPythonHeaders(
+        include_dir=cpython_include_dir(python_version), pyconfig_dir=header.parent
+    )
+
+
 def own_python_cache_dir(
     target: str | None = None,
     *,
@@ -1317,7 +1419,7 @@ def build_own_python(
         raise OwnPythonError(
             f"static_modules names {sorted(static)}, but linkage={linkage!r}: "
             'compiling modules as builtins only has an effect under linkage="static" '
-            "(python-linkage=off) -- pass linkage=\"static\", or drop static_modules."
+            '(python-linkage=off) -- pass linkage="static", or drop static_modules.'
         )
     _ensure_metapython_installed()
     if target is not None:
@@ -2917,9 +3019,7 @@ def stage_interpreter(
     # Before anything else looks at `bin/python`: from here on it is the stub, and the
     # real interpreter is `REAL_INTERPRETER_REL_PATH` (see `_interpreter_elf_files`,
     # `static_python.build_static_interpreter`).
-    musl_loader_rel_path = _stage_musl_runtime(
-        Path(built_prefix), dist_root, zig_target=zig_target
-    )
+    musl_loader_rel_path = _stage_musl_runtime(Path(built_prefix), dist_root, zig_target=zig_target)
 
     # Measured on the untouched copy, so the verification below covers the `prune`
     # patterns too and not just the closure-driven pass: a pattern that happens to

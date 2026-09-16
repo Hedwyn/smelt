@@ -318,7 +318,9 @@ def _compress(
                     shutil.copyfileobj(handle, xz_sink)
             case "gzip":
                 with dest.open("wb") as raw:
-                    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, compresslevel=preset) as gzip_sink:
+                    with gzip.GzipFile(
+                        fileobj=raw, mode="wb", mtime=0, compresslevel=preset
+                    ) as gzip_sink:
                         shutil.copyfileobj(handle, gzip_sink)
 
 
@@ -807,7 +809,10 @@ def pack_zip_application(
 
     with tempfile.TemporaryDirectory() as scratch:
         archive = build_payload_archive(
-            dist_root, Path(scratch) / PAYLOAD_MEMBER_NAME, compression=compression, compression_preset=compression_preset
+            dist_root,
+            Path(scratch) / PAYLOAD_MEMBER_NAME,
+            compression=compression,
+            compression_preset=compression_preset,
         )
         directory = cache_name(name, archive.digest)
         _write_zip_application(
@@ -873,7 +878,10 @@ def pack_executable(
         dest = dest.with_name(dest.name + ".exe")
     with tempfile.TemporaryDirectory() as scratch:
         archive = build_payload_archive(
-            dist_root, Path(scratch) / PAYLOAD_MEMBER_NAME, compression=compression, compression_preset=compression_preset
+            dist_root,
+            Path(scratch) / PAYLOAD_MEMBER_NAME,
+            compression=compression,
+            compression_preset=compression_preset,
         )
         launcher = build_launcher(Path(scratch) / "launcher", zig_target=zig_target)
         directory = cache_name(name, archive.digest)

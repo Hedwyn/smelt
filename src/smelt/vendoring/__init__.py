@@ -21,6 +21,7 @@ from pathlib import Path
 
 from smelt.compiler import link_extension_objects
 from smelt.isolated_build import canonicalize_distribution_name
+from smelt.own_python import TargetPythonHeaders
 from smelt.utils import PathExists, get_extension_suffix
 from smelt.vendoring.base import VendoredExtension, VendoredProvider
 from smelt.vendoring.cffi import CffiProvider
@@ -45,6 +46,7 @@ def build_vendored_extension(
     *,
     build_dir: Path,
     static_build_dir: Path | None,
+    py_headers: TargetPythonHeaders | None = None,
 ) -> tuple[VendoredExtension, PathExists | None]:
     """
     Compiles `provider`'s extension for `target`. Returns the compiled
@@ -54,14 +56,35 @@ def build_vendored_extension(
     static linking and never links a `.so` at all, mirroring
     `smelt.backend._compile_place_or_stage`'s own branch for every other
     backend.
+
+    `py_headers`, forwarded to `provider.compile`, is the target-correct
+    `Python.h`/`pyconfig.h` pair `smelt.isolated_build.prepare_isolated_natives`
+    already resolved (see `smelt.own_python.target_python_headers_for`) --
+    unused when `target` is `None` (a native build needs none).
     """
-    vext = provider.compile(version_requirement, target, python_version, build_dir=build_dir)
+    vext = provider.compile(
+        version_requirement,
+        target,
+        python_version,
+        build_dir=build_dir,
+        py_headers=py_headers,
+    )
     if static_build_dir is not None:
         return vext, None
     so_suffix = (
-        get_extension_suffix(target) if target is not None else sysconfig.get_config_var("EXT_SUFFIX")
+        get_extension_suffix(target)
+        if target is not None
+        else sysconfig.get_config_var("EXT_SUFFIX")
     )
     so_path = link_extension_objects(
-        vext.objects, f"{vext.module_name}{so_suffix}", dest_folder=build_dir
+        vext.objects,
+        f"{vext.module_name}{so_suffix}",
+        dest_folder=build_dir,
+        # Without this, the link step defaults to the host's own architecture --
+        # `vext.objects` were compiled `--target={target}` (see
+        # `smelt.vendoring._compile.compile_extension_for_target`), so linking
+        # them without the same flag mismatches (e.g. "incompatible with
+        # elf64-x86-64" for objects actually built for arm-linux-gnueabihf).
+        extra_preargs=[f"--target={target}"] if target is not None else (),
     )
     return vext, so_path

@@ -26,7 +26,14 @@ from typing import Final
 from setuptools import Extension
 
 from smelt.isolated_build import vendored_build_cache_dir
-from smelt.utils import ImportPath, PathExists, SmeltError, assert_is_valid_import_path, assert_path_exists
+from smelt.own_python import TargetPythonHeaders
+from smelt.utils import (
+    ImportPath,
+    PathExists,
+    SmeltError,
+    assert_is_valid_import_path,
+    assert_path_exists,
+)
 from smelt.vendoring._compile import compile_extension_for_target
 from smelt.vendoring._libffi_build import build_libffi
 from smelt.vendoring.base import VendoredExtension
@@ -73,6 +80,7 @@ class CffiProvider:
         python_version: tuple[int, int],
         *,
         build_dir: Path,
+        py_headers: TargetPythonHeaders | None = None,
     ) -> VendoredExtension:
         try:
             from unearth import PackageFinder, TargetPython
@@ -128,7 +136,7 @@ class CffiProvider:
                 ("HAVE_SYNC_SYNCHRONIZE", None),
             ],
         )
-        objects = compile_extension_for_target(extension, target, build_dir)
+        objects = compile_extension_for_target(extension, target, build_dir, py_headers=py_headers)
         return VendoredExtension(
             import_path=_IMPORT_PATH,
             module_name="_cffi_backend",

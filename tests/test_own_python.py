@@ -62,8 +62,8 @@ from smelt.own_python import (
     INTERPRETER_HOST_DLL_PREFIXES,
     INTERPRETER_REL_PATH,
     LIBRARY_MODULES,
-    MUSL_LOADER_GLOB,
     MINIMAL_VIABLE_STDLIB,
+    MUSL_LOADER_GLOB,
     OPTIONAL_STDLIB_GROUPS,
     REAL_INTERPRETER_REL_PATH,
     VERSION_MARKER_NAME,
@@ -847,9 +847,7 @@ def test_build_own_python_rejects_static_modules_without_static_linkage() -> Non
 def test_resolve_own_python_static_prefers_the_caller_then_the_declaration() -> None:
     assert resolve_own_python_static(EntrypointOptions()) is DEFAULT_OWN_PYTHON_STATIC
     assert resolve_own_python_static(EntrypointOptions({"own-python-static": True})) is True
-    assert (
-        resolve_own_python_static(EntrypointOptions({"own-python-static": True}), False) is False
-    )
+    assert resolve_own_python_static(EntrypointOptions({"own-python-static": True}), False) is False
 
 
 def test_resolve_own_python_static_modules_prefers_the_caller_then_the_declaration() -> None:
@@ -1281,6 +1279,7 @@ def _fake_musl_loader(prefix: Path, name: str = "ld-musl-x86_64.so.1") -> Path:
     loader.write_text('#!/bin/sh\nif [ "$1" = "--argv0" ]; then shift 2; fi\nexec "$@"\n')
     loader.chmod(0o755)
     return loader
+
 
 @pytest.mark.parametrize(
     ("target", "expected"),

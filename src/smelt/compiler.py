@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, ClassVar, Final
 from distutils.compilers.C.unix import Compiler
 from setuptools import Extension
 
+from smelt.own_python import TargetPythonHeaders
 from smelt.process import call_command
 from smelt.utils import (
     ImportPath,
@@ -340,6 +341,8 @@ def _compile_extension_sources(
     include_dirs: list[str],
     crosscompile: SupportedPlatforms | None,
     build_folder: str,
+    *,
+    py_headers: TargetPythonHeaders | None = None,
 ) -> tuple[list[str], list[str]]:
     """
     Compiles `extension_obj`'s sources into `build_folder`, returning the produced
@@ -348,17 +351,37 @@ def _compile_extension_sources(
 
     Shared by `compile_extension` and `compile_executable`: both compile the same way
     and only differ in how the resulting objects are linked.
+
+    `py_headers`, when given for a cross-compile, *replaces* `include_dirs` (the
+    caller's host-native `sysconfig` dirs) with `[py_headers.include_dir,
+    py_headers.pyconfig_dir]` instead of adding to them: `Python.h`'s own
+    `#include "pyconfig.h"` is a quoted include, resolved against the *including
+    file's own directory first*, before any `-I` search path at all -- the host's
+    `Python.h` has its own, host-native `pyconfig.h` sitting right next to it, so
+    as long as *that* `Python.h` is the one actually compiled against, no `-I`
+    entry can ever override its sibling file (see `smelt.own_python.TargetPythonHeaders`
+    for the full reasoning, and `smelt.vendoring._compile.compile_extension_for_target`
+    for the first place this was worked out). Without `py_headers`, cross-compiling
+    falls back to the old, still-broken `PYCONFIG_PATH` shim -- kept only so a
+    caller that never resolves real target headers does not regress further.
     """
     extra_preargs: list[str] = []
     if crosscompile is not None:
-        # TODO: generate/obtain pyconfig.h for the target platform
         warnings.warn(
             "Support for cross-compiling is experimental.\n"
             "Do not assume stability from the built artifacts"
         )
         extra_preargs.append(f"--target={crosscompile.value}")
-        # adding pyconfig
-        include_dirs.append(PYCONFIG_PATH)
+        if py_headers is not None:
+            include_dirs = [str(py_headers.include_dir), str(py_headers.pyconfig_dir)]
+        else:
+            # TODO: generate/obtain pyconfig.h for the target platform -- this
+            # branch is known broken (see cpu_cross_compile_pyconfig_plan.md):
+            # `PYCONFIG_PATH` never itself holds a `pyconfig.h`, and even if it
+            # did, the host's own `Python.h` (still first in `include_dirs`)
+            # would still resolve its own, wrong, same-directory `pyconfig.h`
+            # first regardless of `-I` order.
+            include_dirs = [*include_dirs, PYCONFIG_PATH]
 
     objects = compiler.compile(
         sources=extension_obj.sources,
@@ -410,6 +433,8 @@ def compile_extension(
     dest_folder: PathLike[str] | None = None,
     crosscompile: SupportedPlatforms | None = None,
     use_zig_native_interface: bool = False,
+    *,
+    py_headers: TargetPythonHeaders | None = None,
 ) -> PathExists:
     """
     Standalone function compiling a low-level extension (C, C++ or Zig)
@@ -428,6 +453,12 @@ def compile_extension(
     dest_folder: PathLike[str]
         The folder in which to place the built shared library.
         Defaults to cwd.
+
+    py_headers: TargetPythonHeaders | None
+        For `crosscompile`, the target-correct `Python.h`/`pyconfig.h` pair (see
+        `smelt.own_python.target_python_headers_for`) -- see
+        `_compile_extension_sources`'s own doc for why this matters. Unused for a
+        native build.
     """
     compiler = compiler or ZigCompiler()
     libdir = sysconfig.get_config_var("LIBDIR")
@@ -470,7 +501,9 @@ def compile_extension(
     with tempfile.TemporaryDirectory() as build_folder:
         # TODO: investigate the pure setuptools alternative
         # as the distutils compiler is deprecated
-        objects = compile_extension_objects(extension_obj, build_folder, compiler, crosscompile)
+        objects = compile_extension_objects(
+            extension_obj, build_folder, compiler, crosscompile, py_headers=py_headers
+        )
 
         # Link it into a shared object
         ext_name = extension_obj.name + so_suffix
@@ -499,6 +532,8 @@ def compile_extension_objects(
     dest_folder: PathLike[str],
     compiler: Compiler | None = None,
     crosscompile: SupportedPlatforms | None = None,
+    *,
+    py_headers: TargetPythonHeaders | None = None,
 ) -> list[PathExists]:
     """
     Compiles `extension` the same way `compile_extension` does, but stops short of the
@@ -515,6 +550,11 @@ def compile_extension_objects(
     Unlike `compile_extension`, `dest_folder` is required and not cleaned up here: the
     objects have to outlive this call to be of any use to that later build step, so
     there is no tempdir to hide the persistence decision behind.
+
+    `py_headers`, for `crosscompile`, is the target-correct `Python.h`/`pyconfig.h`
+    pair (see `smelt.own_python.target_python_headers_for`) -- see
+    `_compile_extension_sources`'s own doc for why this matters. Unused for a native
+    build.
     """
     compiler = compiler or ZigCompiler()
     include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
@@ -537,7 +577,7 @@ def compile_extension_objects(
         extension_obj = extension
 
     objects, _extra_preargs = _compile_extension_sources(
-        compiler, extension_obj, include_dirs, crosscompile, str(dest_folder)
+        compiler, extension_obj, include_dirs, crosscompile, str(dest_folder), py_headers=py_headers
     )
     return [assert_path_exists(obj) for obj in objects]
 
@@ -547,6 +587,8 @@ def compile_executable(
     compiler: Compiler | None = None,
     dest_folder: PathLike[str] | None = None,
     crosscompile: SupportedPlatforms | None = None,
+    *,
+    py_headers: TargetPythonHeaders | None = None,
 ) -> PathExists:
     """
     Standalone function compiling a low-level source (C, C++ or Zig) into a native,
@@ -565,6 +607,12 @@ def compile_executable(
     dest_folder: PathLike[str]
         The folder in which to place the built executable.
         Defaults to cwd.
+
+    py_headers: TargetPythonHeaders | None
+        For `crosscompile`, the target-correct `Python.h`/`pyconfig.h` pair (see
+        `smelt.own_python.target_python_headers_for`) -- see
+        `_compile_extension_sources`'s own doc for why this matters. Unused for a
+        native build.
     """
     compiler = compiler or ZigCompiler()
     include_dirs = [sysconfig.get_path("include"), sysconfig.get_path("platinclude")]
@@ -595,7 +643,7 @@ def compile_executable(
 
     with tempfile.TemporaryDirectory() as build_folder:
         objects, extra_preargs = _compile_extension_sources(
-            compiler, extension_obj, include_dirs, crosscompile, build_folder
+            compiler, extension_obj, include_dirs, crosscompile, build_folder, py_headers=py_headers
         )
 
         exe_name = extension_obj.name + exe_suffix

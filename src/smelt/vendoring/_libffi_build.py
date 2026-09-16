@@ -66,9 +66,7 @@ def build_libffi(target: str | None, *, build_dir: Path) -> LibffiBuild:
         ]
         if target is not None:
             cmd.append(f"-Dtarget={target}")
-        result = subprocess.run(
-            cmd, cwd=_LIBFFI_PROJECT_DIR, capture_output=True, text=True
-        )
+        result = subprocess.run(cmd, cwd=_LIBFFI_PROJECT_DIR, capture_output=True, text=True)
         if result.returncode != 0:
             raise LibffiBuildError(
                 f"`zig build` failed building the vendored libffi for target "
