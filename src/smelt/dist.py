@@ -78,7 +78,7 @@ from smelt.bytecode import (
     compile_to_pyc,
 )
 from smelt.compiler import SupportedPlatforms
-from smelt.config import EntrypointOptions, SmeltConfig
+from smelt.config import Backend, EntrypointOptions, SmeltConfig
 from smelt.explorer import (
     ModuleKind,
     ResolvedModule,
@@ -99,6 +99,11 @@ from smelt.isolated_build import (
     IsolatedNativesResult,
     parse_pyproject_dependencies,
     prepare_isolated_natives,
+)
+from smelt.manifest import (
+    discover_transitive_manifests,
+    transitive_mypyc_runtime,
+    transitive_nuitka_runtime,
 )
 from smelt.native_deps import (
     BundledNatives,
@@ -2406,6 +2411,14 @@ def build_dist(
             placed_natives.add(native.dest_rel_path)
             report.natives.append(native)
 
+    # A dependency's own smelt manifest (see `smelt.manifest`), if any -- checked
+    # below for a `ModuleKind.EXTENSION` closure entry compiled by mypyc or Nuitka, to
+    # explicitly place its shared runtime alongside it. mypyc's is `dlopen`'d, so
+    # nothing else finds it; Nuitka's is a real ELF `DT_NEEDED` dependency that
+    # `bundle_native_dependencies`'s own scan further down would find on its own, but
+    # this declares it directly rather than leaving it solely dependent on that scan.
+    transitive_backends = discover_transitive_manifests(closure.keys())
+
     for import_path, resolved in closure.items():
         if import_path in built:
             report.skipped[import_path] = "native (built by smelt)"
@@ -2455,6 +2468,18 @@ def build_dist(
                 if native.dest_rel_path not in placed_natives:
                     placed_natives.add(native.dest_rel_path)
                     report.natives.append(native)
+                match transitive_backends.get(import_path):
+                    case Backend.MYPYC:
+                        runtime = transitive_mypyc_runtime(import_path, source)
+                    case Backend.NUITKA:
+                        runtime = transitive_nuitka_runtime(source)
+                    case _:
+                        runtime = None
+                if runtime is not None:
+                    runtime_native = _copy_native(import_path, runtime, payload_root, "environment")
+                    if runtime_native.dest_rel_path not in placed_natives:
+                        placed_natives.add(runtime_native.dest_rel_path)
+                        report.natives.append(runtime_native)
             case ModuleKind.NAMESPACE:
                 # PEP 420: the directory itself is the module. Nothing to compile, and
                 # explicitly no `__init__` -- adding one would turn it into a regular

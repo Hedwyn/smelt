@@ -41,6 +41,11 @@ from smelt.explorer import (
     flatten_dependency_graph,
     has_local_source,
 )
+from smelt.manifest import (
+    discover_transitive_manifests,
+    mypyc_runtime_import_name,
+    write_manifest_module,
+)
 from smelt.nuitkaify import (
     RUNTIME_LIB_NAME,
     Stdout,
@@ -424,7 +429,7 @@ def compile_module_with_fallback(
     static_build_dir: PathLike[str] | None = None,
     crosscompile: SupportedPlatforms | None = None,
     py_headers: TargetPythonHeaders | None = None,
-) -> tuple[GenericExtension, list[PathExists] | None]:
+) -> tuple[GenericExtension, list[PathExists] | None, Backend]:
     """
     Compiles `import_path` trying each backend in `backend_priority_order` in turn,
     falling back to the next one when a backend fails to produce a working extension.
@@ -435,6 +440,7 @@ def compile_module_with_fallback(
     it, Nuitka included (it only ever fails Tier 1 on the merits, see `run_backend`'s
     own doc, not because it is auto-discovered). The second element of the returned
     tuple is that staging's own object files, or `None` when linked+placed normally.
+    The third is whichever backend actually succeeded.
 
     `crosscompile`/`py_headers` are forwarded the same way, to `_compile_place_or_stage`.
     """
@@ -452,7 +458,7 @@ def compile_module_with_fallback(
             last_exc = exc
             continue
         auto_context.record_attempt(import_path, backend, error=None)
-        return ext, objects
+        return ext, objects, backend
     raise SmeltError(
         f"All backends {[b.value for b in backend_priority_order]} failed to compile {import_path}"
     ) from last_exc
@@ -837,11 +843,19 @@ class BackendResult:
     unless `static_link=True`. `static_build_dir` is where those objects live; the
     caller owns cleaning it up once it is done consuming `static_modules` (`None`
     when `static_modules` is empty, since nothing was staged there).
+
+    `compiled_backends` is which backend compiled each pinned or auto-discovered
+    mypyc/Cython/Nuitka module -- what `write_manifest_module` wrote into
+    `manifest_modules` (see `smelt.manifest`), so a downstream build of a package
+    depending on this one can find its shared runtime files, invisible to plain
+    import-graph analysis, once this package is installed.
     """
 
     artifacts: list[Path]
     static_modules: dict[ImportPath, list[PathExists]] = field(default_factory=dict)
     static_build_dir: Path | None = None
+    compiled_backends: dict[ImportPath, Backend] = field(default_factory=dict)
+    manifest_modules: list[Path] = field(default_factory=list)
 
 
 def run_backend(
@@ -899,6 +913,13 @@ def run_backend(
     `.artifacts` is what every existing caller (e.g. the hatchling build hook, which
     force-includes them in packaging) already expected from this function.
 
+    Before returning, writes this package's own smelt manifest (see `smelt.manifest`)
+    next to its source, declaring every pinned or auto-discovered mypyc/Cython/Nuitka
+    module and the backend that compiled it. That is also consulted here, for
+    dependencies: their own manifests, if any, are checked while compiling a Nuitka
+    entrypoint below, so a dependency's `dlopen`'d mypyc runtime is bundled the same
+    way this run's own is.
+
     `crosscompile`, when given, cross-compiles every module below (pinned or
     auto-discovered) for that target instead of the host -- resolving the
     target-correct `Python.h`/`pyconfig.h` pair once here (see `TargetPythonHeaders`)
@@ -920,6 +941,7 @@ def run_backend(
 
     built_artifacts: list[Path] = []
     static_modules: dict[ImportPath, list[PathExists]] = {}
+    compiled_backends: dict[ImportPath, Backend] = {}
     static_build_dir = Path(tempfile.mkdtemp(prefix="smelt-static-")) if static_link else None
     path_solver = path_solver or config.get_path_solver()
     # Starting with C extensions
@@ -988,6 +1010,7 @@ def run_backend(
 
     for module in config.mypyc_modules:
         mypyc_ext = _mypycify_one(module, path_solver)
+        compiled_backends[module.import_path] = Backend.MYPYC
         if _place_or_stage(mypyc_ext):
             continue
         built_artifacts.append(mypyc_ext.get_dest_path(target_triple))
@@ -997,6 +1020,7 @@ def run_backend(
 
     # cython extensions -- eligible for static linking, unlike Nuitka below.
     for cython_ext in compile_cython_extensions(config.cython_modules, path_solver=path_solver):
+        compiled_backends[cython_ext.import_path] = Backend.CYTHON
         if _place_or_stage(cython_ext):
             continue
         built_artifacts.append(cython_ext.get_dest_path(target_triple))
@@ -1013,6 +1037,7 @@ def run_backend(
     # library -- correctly, and without needing a name-the-backend special case.
     for nuitka_mod in config.nuitka_modules:
         nuitka_ext = nuitkaify_module(nuitka_mod, path_solver=path_solver)
+        compiled_backends[nuitka_mod.import_path] = Backend.NUITKA
         if _place_or_stage(nuitka_ext):
             continue
         built_artifacts.append(nuitka_ext.get_dest_path(target_triple))
@@ -1027,7 +1052,7 @@ def run_backend(
     # site-packages, etc).
     for import_path in sorted(discover_auto_targets(config, path_solver)):
         try:
-            auto_ext, auto_objects = compile_module_with_fallback(
+            auto_ext, auto_objects, auto_backend = compile_module_with_fallback(
                 import_path,
                 config.backend_priority_order,
                 path_solver,
@@ -1038,6 +1063,7 @@ def run_backend(
         except SmeltError as exc:
             _logger.warning("Skipping auto-discovered module %s: %s", import_path, exc)
             continue
+        compiled_backends[auto_ext.import_path] = auto_backend
         if auto_objects is not None:
             static_modules[auto_ext.import_path] = auto_objects
             _logger.info("Staged %s for static linking (no .so written)", auto_ext.import_path)
@@ -1084,6 +1110,21 @@ def run_backend(
                 module_path, strategy=strategy, package_root=path_solver.project_root
             )
             entrypoint_options = config.entrypoints[entrypoint_spec]
+            # Dependencies (already-installed packages, not this run's own modules)
+            # that expose a smelt manifest (see `smelt.manifest`) and were compiled
+            # with mypyc: their shared runtime is `dlopen`'d, invisible to Nuitka's
+            # own import-follower, the same problem `shared_runtime_extensions`
+            # solves above for this run's own mypyc modules.
+            transitive_mypyc_runtimes = {
+                mypyc_runtime_import_name(dep_import_path)
+                for dep_import_path, dep_backend in discover_transitive_manifests(
+                    node.name
+                    for node in flatten_dependency_graph(
+                        build_dependency_graph(ImportPath(module_path))
+                    )
+                ).items()
+                if dep_backend == Backend.MYPYC
+            }
             # a codegen'd wrapper script must live outside the package tree it imports
             # (colliding on name with that package -- a common case, e.g. a `main`
             # function in the package's own top-level module -- would otherwise shadow
@@ -1111,6 +1152,7 @@ def run_backend(
                     entrypoint_file,
                     stdout=stdout,
                     include_modules=shared_runtime_extensions
+                    | transitive_mypyc_runtimes
                     | set(entrypoint_options.get("include-modules", [])),
                     include_packages=entrypoint_options.get("include-package", []),
                     include_package_data=entrypoint_options.get("include-package-data", []),
@@ -1122,4 +1164,7 @@ def run_backend(
                     no_cache=no_cache,
                 )
 
-    return BackendResult(built_artifacts, static_modules, static_build_dir)
+    manifest_modules = write_manifest_module(compiled_backends, path_solver)
+    return BackendResult(
+        built_artifacts, static_modules, static_build_dir, compiled_backends, manifest_modules
+    )
