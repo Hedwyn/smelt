@@ -111,7 +111,7 @@ Options:
 A few commands are lower-level, mainly intended for manually testing a single module rather than everyday project builds:
 
 * **`show-config`** - parses and prints the Smelt config resolved from a `pyproject.toml`, for debugging what the build hook/CLI actually sees.
-* **`compile-module MODULE_IMPORT_PATH`** - compiles a single module with a chosen backend (`-b/--backend mypyc|nuitka|cython`), optionally cross-compiling it for another platform (`-cp/--crosscompile`, see [Advanced Use Cases](advanced.md)).
+* **`compile-module MODULE_IMPORT_PATH`** - compiles a single module with a chosen backend (`-b/--backend mypyc|nuitka|cython`), optionally cross-compiling it for one or more platforms (`-t/--target`, comma-separated, see [Advanced Use Cases](advanced.md)).
 * **`nuitkaify ENTRYPOINT_PATH`** - runs Smelt's Nuitka wrapper directly on a single entrypoint, bypassing the rest of the config.
 
 Run `smelt <command> --help` for the full option list of any of these.

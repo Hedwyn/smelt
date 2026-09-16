@@ -122,7 +122,6 @@ from smelt.onefile import (
     resolve_compression,
 )
 from smelt.own_python import (
-    DEFAULT_OWN_PYTHON_TARGET,
     REAL_INTERPRETER_REL_PATH,
     InterpreterRequirements,
     StagedInterpreter,
@@ -759,26 +758,44 @@ def resolve_isolated_build_versions(
     )
 
 
-def resolve_isolated_build_target(
+def resolve_target_platforms(
     entrypoint_options: EntrypointOptions,
-    isolated_build_target: str | None = None,
-) -> str | None:
+    target_platforms: Iterable[str] = (),
+) -> list[str | None]:
     """
-    The target triple `isolated-build` reinstalls native dependencies for (same
-    spelling as `own_python_target`; `None` means the host's own platform):
-    `isolated_build_target` where the caller decided (the CLI wins over the
-    declaration), then the entrypoint's own `isolated-build-target` option, then
-    `None` -- there is no sensible default besides the host.
+    Platform(s) to build for -- drives the `python = "own"` interpreter build and
+    `isolated-build`'s native-dependency reinstall alike, since there is no build
+    where those would sensibly target different platforms: `target_platforms` where
+    the caller passed any (the CLI wins over the declaration, replacing it rather
+    than merging), else the entrypoint's own `target` option, else a single native
+    build. The literal `"host"` (in either source) resolves to `None`, the sentinel
+    every cross-aware step downstream already treats as "native, no zig -target flag"
+    (see `own_python.DEFAULT_OWN_PYTHON_TARGET`).
     """
-    if isolated_build_target is not None:
-        return isolated_build_target
-    declared = entrypoint_options.get("isolated-build-target")
-    if declared is not None and not isinstance(declared, str):
-        raise DistError(
-            f"Invalid isolated-build-target {declared!r}, expected a string (a target "
-            'triple, e.g. "x86_64-linux-musl") or unset.'
-        )
-    return declared
+    declared = list(target_platforms) or entrypoint_options.get("target") or []
+    if not declared:
+        return [None]
+    return [None if platform == "host" else platform for platform in declared]
+
+
+def assert_supported_platforms(
+    entrypoint_options: EntrypointOptions,
+    resolved_target_platforms: Iterable[str | None],
+) -> None:
+    """
+    Fails fast -- before any build starts -- for a resolved target outside the
+    entrypoint's own `supported-platforms` allowlist. `None` ("host") is always
+    implicitly allowed regardless of that list; an unset list accepts anything.
+    """
+    supported = entrypoint_options.get("supported-platforms")
+    if supported is None:
+        return
+    for target in resolved_target_platforms:
+        if target is not None and target not in supported:
+            raise DistError(
+                f"Target platform {target!r} is not in this entrypoint's "
+                f"supported-platforms {supported!r}."
+            )
 
 
 def resolve_onefile(
@@ -883,7 +900,7 @@ def assert_no_version_skew(
             "That combination cannot run: the bytecode magic number is checked before any "
             "code executes, and the extension modules are compiled against a specific C "
             f"ABI. Build the distribution from a CPython {major}.{minor} environment, or "
-            "point --own-python-target at a matching build."
+            "point --target at a matching build."
         )
     if tag.magic_number != interpreter_magic_number:
         raise DistError(
@@ -1689,7 +1706,7 @@ loader** (`libc`, `libm`, `ld-linux`). That is not an oversight: `ld.so` and `li
 are a tightly ABI-coupled pair, and a build that shipped its own copy of them
 segfaulted inside the loader before any Python ran. Any Linux new enough to have a
 compatible glibc will do; a genuinely libc-independent build means targeting musl,
-which `--own-python-target x86_64-linux-musl` does and this folder does not."""
+which `--target x86_64-linux-musl` does and this folder does not."""
     return f"""\
 **The C library travels with the folder too**: `{interpreter.musl_loader_rel_path}` is
 musl, loader and libc in one file, so nothing at all is taken from the target machine.
@@ -1886,7 +1903,7 @@ def build_dist(
     build_extensions: bool = True,
     discovery: DiscoveryMode | None = None,
     python: DistPython | None = None,
-    own_python_target: str | None = None,
+    target_platform: str | None = None,
     own_python_version: str | None = None,
     tailor_interpreter: bool | None = None,
     drop_stdlib_groups: Iterable[str] = (),
@@ -1907,7 +1924,6 @@ def build_dist(
     use_inittab: bool | None = None,
     isolated_build: bool | None = None,
     isolated_build_versions: IsolatedBuildVersions | None = None,
-    isolated_build_target: str | None = None,
     own_python_static: bool | None = None,
     own_python_static_modules: Iterable[str] | None = None,
 ) -> DistReport:
@@ -1923,9 +1939,18 @@ def build_dist(
     `discovery` selects how modules are found (see `DiscoveryMode`), defaulting to
     what the entrypoint declares, then to `DEFAULT_DISCOVERY`.
 
+    `target_platform` (a Zig target triple, e.g. `"x86_64-linux-musl"`, or `None` for
+    a native build against the host's own libc) is the platform this call builds
+    for: it drives both the `"own"` interpreter build below and `isolated_build`'s
+    native-dependency reinstall further down alike, since a build has no use for
+    picking a different one for each. A caller that only has a raw, possibly
+    multi-valued or `"host"`-containing list (e.g. an entrypoint's own
+    `target` declaration) should resolve it with `resolve_target_platforms`
+    first, and build once per resolved entry -- `smelt build-dist` does exactly that.
+
     `python` selects which interpreter the distribution runs on (see `DistPython`),
     defaulting the same way. `"own"` builds one through `smelt.own_python` -- for
-    `own_python_target`, and the minutes that first build takes, see
+    `target_platform`, and the minutes that first build takes, see
     `own_python.build_own_python` -- and stages it at the distribution *root*, so the
     folder runs on a machine with no Python installed. The interpreter shipped must
     agree on `(major, minor)` *and* `.pyc` magic number with the one compiling the
@@ -1997,8 +2022,7 @@ def build_dist(
     the entrypoint declares under the same name in its own options.
 
     `isolated_build` reinstalls every third-party native dependency the closure reaches
-    for `isolated_build_target` (a Zig-triple-shaped string; `None` means the host's
-    own platform) instead of copying whatever build happens to be installed here --
+    for `target_platform` instead of copying whatever build happens to be installed here --
     off by default, since it needs the `isolated-build` extra and a real network fetch
     per native dependency (see `smelt.isolated_build`). `isolated_build_versions`
     picks which version of each dependency gets fetched (see `IsolatedBuildVersions`).
@@ -2036,27 +2060,35 @@ def build_dist(
     resolved_isolated_build_versions = resolve_isolated_build_versions(
         entrypoint_options, isolated_build_versions
     )
-    resolved_isolated_build_target = resolve_isolated_build_target(
-        entrypoint_options, isolated_build_target
-    )
     resolved_own_python_static = resolve_own_python_static(entrypoint_options, own_python_static)
     resolved_own_python_static_modules = resolve_own_python_static_modules(
         entrypoint_options, own_python_static_modules
     )
     # Hoisted ahead of `run_backend` (below) so its own compile step cross-compiles
     # for the same target the mode `own` interpreter build further down resolves --
-    # that block still reads this via the `target` local it assigns from it.
-    resolved_own_python_target = own_python_target or entrypoint_options.get(
-        "own-python-target", DEFAULT_OWN_PYTHON_TARGET
+    # that block still reads this via the `target` local it assigns from it. Also
+    # what `isolated_build` reinstalls native dependencies for, further down: one
+    # target drives both, see `resolve_target_platforms`'s own doc for why.
+    declared_target_platforms = resolve_target_platforms(
+        entrypoint_options, (target_platform,) if target_platform is not None else ()
     )
+    if len(declared_target_platforms) != 1:
+        raise DistError(
+            "This entrypoint declares multiple targets "
+            f"{declared_target_platforms!r}; build_dist builds one platform per call -- "
+            "pass target_platform explicitly, or use `smelt build-dist`/`smelt "
+            "compile-module`, which loop over all of them."
+        )
+    assert_supported_platforms(entrypoint_options, declared_target_platforms)
+    (resolved_target_platform,) = declared_target_platforms
     # `run_backend`'s own `crosscompile` is the narrower, Zig-target-spelled enum its
     # compile primitives take (see `SupportedPlatforms.from_triple`'s own doc) --
     # raises for a target outside today's 3 supported members (e.g. musl, Windows,
     # macOS): `run_backend` cross-compiling extensions does not extend there yet,
     # unlike interpreter/wheel targeting elsewhere in this function.
     backend_crosscompile = (
-        SupportedPlatforms.from_triple(resolved_own_python_target)
-        if resolved_own_python_target is not None
+        SupportedPlatforms.from_triple(resolved_target_platform)
+        if resolved_target_platform is not None
         else None
     )
     # Auto-discovery (`run_backend(static_link=True)`, see `compiling_pipeline_refactor.md`)
@@ -2175,7 +2207,7 @@ def build_dist(
     #: interpreter, are produced for the same target as the interpreter itself).
     interpreter_target: str | None = None
     if resolved_python == "own":
-        target = resolved_own_python_target
+        target = resolved_target_platform
         interpreter_target = target
         python_version = resolve_own_python_version(
             own_python_version or entrypoint_options.get("own-python-version")
@@ -2313,24 +2345,24 @@ def build_dist(
     # built for a different target) via the same `./configure`-only step, cached
     # per target.
     resolved_isolated_py_headers: TargetPythonHeaders | None = None
-    if resolved_isolated_build and resolved_isolated_build_target is not None:
+    if resolved_isolated_build and resolved_target_platform is not None:
         isolated_python_version = (
             python_version if resolved_python == "own" else resolve_own_python_version(None)
         )
-        if built_interpreter is not None and interpreter_target == resolved_isolated_build_target:
+        if built_interpreter is not None and interpreter_target == resolved_target_platform:
             resolved_isolated_py_headers = TargetPythonHeaders(
                 include_dir=cpython_include_dir(isolated_python_version),
                 pyconfig_dir=assert_path_exists(built_interpreter / "pyconfig.h").parent,
             )
         else:
             resolved_isolated_py_headers = target_python_headers_for(
-                resolved_isolated_build_target, python_version=isolated_python_version
+                resolved_target_platform, python_version=isolated_python_version
             )
     isolated_result = (
         prepare_isolated_natives(
             closure,
             payload_root,
-            target=resolved_isolated_build_target,
+            target=resolved_target_platform,
             versions=resolved_isolated_build_versions,
             dependencies=parse_pyproject_dependencies(config.dependencies),
             static_build_dir=static_build_dir,
@@ -2414,7 +2446,7 @@ def build_dist(
                 if resolved_isolated_build and import_path not in isolated_natives:
                     raise IsolatedBuildError(
                         f"isolated-build could not reinstall {import_path!r} for "
-                        f"target {resolved_isolated_build_target or 'the host'!r} -- "
+                        f"target {resolved_target_platform or 'the host'!r} -- "
                         "either its owning distribution could not be determined, or "
                         "the fetched wheel has no matching file."
                     )
@@ -2535,14 +2567,11 @@ def build_dist(
     _logger.info("Assembled distribution at %s", dist_root)
 
     if report.onefile_path is not None:
-        # `interpreter_target`, not the raw `own_python_target` parameter: the latter
-        # is only the CLI-level override and stays `None` whenever a target comes from
-        # the entrypoint's own `own-python-target` declaration instead (the common
-        # case for a pyproject.toml-configured build) -- silently building the
-        # launcher *native* while the interpreter it carries is genuinely
-        # cross-compiled. `interpreter_target` is the one every other cross-aware step
-        # here already uses (see its own declaration above), and is `None` in `byo`
-        # mode too, where `pack_dist` ignores `zig_target` entirely regardless.
+        # `interpreter_target`, not `resolved_target_platform` directly: the latter is
+        # set regardless of `python` mode, but there is no shipped interpreter to
+        # cross-compile a launcher stub for in mode `byo` -- `interpreter_target` is
+        # already `None` there (see its own declaration above), so `pack_dist` gets
+        # the right `zig_target` in both modes without a separate mode check here.
         report.onefile = pack_dist(
             report,
             zig_target=interpreter_target,

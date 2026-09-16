@@ -8,11 +8,12 @@ Command-line interface for Smelt
 from __future__ import annotations
 
 import logging
+import platform
 import shutil
 import sys
 import sysconfig
 import tomllib
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal, NoReturn, ParamSpec, TypeVar
@@ -39,7 +40,13 @@ from smelt.config import (
     toml_get_nested_section,
 )
 from smelt.context import enable_global_context, get_context
-from smelt.dist import build_dist, run_instructions
+from smelt.dist import (
+    assert_supported_platforms,
+    build_dist,
+    resolve_entrypoint_spec,
+    resolve_target_platforms,
+    run_instructions,
+)
 from smelt.own_python import target_python_headers_for
 from smelt.utils import (
     ImportPath,
@@ -104,6 +111,42 @@ class CliExistingPath(ParamType):
         if not path_exists(path):
             self.fail(f"{value} not found")
         return path
+
+
+class CliCommaSeparated(ParamType):
+    """
+    Parses a comma-separated list value (e.g. `-t arm-linux-gnueabihf,aarch64-linux-gnu`)
+    into a tuple of its items, empty items (a bare `-t ""`, or unset) dropped.
+    """
+
+    name = "comma_separated"
+
+    def convert(
+        self, value: str, param: Parameter | None, ctx: Context | None
+    ) -> tuple[str, ...]:
+        _ = param
+        _ = ctx
+        return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+class CliCommaSeparatedChoice(ParamType):
+    """
+    Comma-separated `click.Choice`: parses e.g. `-t a,b,c` into a tuple, validating
+    each item against `choices` the same way `click.Choice` would for a single value.
+    """
+
+    def __init__(self, choices: Iterable[str]) -> None:
+        self.choices = list(choices)
+        self.name = "|".join(self.choices)
+
+    def convert(
+        self, value: str, param: Parameter | None, ctx: Context | None
+    ) -> tuple[str, ...]:
+        items = tuple(item.strip() for item in value.split(",") if item.strip())
+        for item in items:
+            if item not in self.choices:
+                self.fail(f"{item!r} is not one of {self.choices!r}", param, ctx)
+        return items
 
 
 class CliEmbedFile(ParamType):
@@ -210,6 +253,38 @@ def parse_config_from_pyproject(
         project_scripts=project_scripts,
         project_dependencies=project_dependencies,
     )
+
+
+def _host_label() -> str:
+    """
+    Cosmetic label for the "host" target platform, used only to name an output
+    folder -- never fed to a compiler flag, so it does not need to resolve the
+    host's actual Zig triple (arch/os/libc), unlike a real cross-compile target.
+    """
+    return f"{platform.system().lower()}-{platform.machine().lower()}"
+
+
+def _advisory_target_platforms() -> list[str]:
+    """
+    Best-effort platform list for `-t/--target`'s `--help` text: the default
+    entrypoint's own `supported-platforms`, read from `./pyproject.toml` if there is
+    one to read here -- advisory only, never gates the option itself (that happens
+    once the real `--package-path`/`--entrypoint` are known, in `smelt.dist`). Any
+    failure (no pyproject.toml, no single default entrypoint, nothing declared, a
+    malformed file, ...) falls back silently to `compiler.SupportedPlatforms`'s own
+    triples, plus "host" -- never lets a parse error affect `--help` or argument
+    parsing.
+    """
+    fallback = ["host", *(member.get_triple_name() for member in SupportedPlatforms)]
+    try:
+        with Path("pyproject.toml").open("rb") as f:
+            toml_data = tomllib.load(f)
+        config = parse_config_from_pyproject(toml_data)
+        entrypoint_spec = resolve_entrypoint_spec(config, None)
+        supported = config.entrypoints[entrypoint_spec].get("supported-platforms")
+        return list(supported) if supported else fallback
+    except Exception:
+        return fallback
 
 
 def error_exit(msg: str, code: int = 1) -> NoReturn:
@@ -383,12 +458,17 @@ def build_standalone_binary(
     "declaration, then to 'byo'.",
 )
 @click.option(
-    "--own-python-target",
-    type=str,
-    default=None,
-    help="Zig target triple to build the --python own interpreter for (e.g. "
-    "'x86_64-linux-musl'). Defaults to a native build against the host's own libc, "
-    "which is the only shape verified so far.",
+    "-t",
+    "--target",
+    "target_platforms",
+    type=CliCommaSeparated(),
+    default="",
+    help="Platform(s) to build the distribution for: a comma-separated list of Zig "
+    "target triples (e.g. 'x86_64-linux-musl') and/or 'host' for a native build. "
+    "One distribution is built per platform, nested under <output-dir>/<platform>/ "
+    "whenever this flag is passed explicitly. Defaults to 'host', the only shape "
+    "verified so far. Platforms known here (best-effort, from this package's own "
+    f"supported-platforms when declared): {', '.join(_advisory_target_platforms())}.",
 )
 @click.option(
     "--own-python-version",
@@ -493,7 +573,7 @@ def build_standalone_binary(
     "the finished folder fails the build, since it could not be imported on the "
     "target machine. Off by default: the ordinary shape ships musl's own loader with "
     "the interpreter and keeps dlopen() -- and third-party native modules -- working. "
-    "Verified only for --own-python-target x86_64-linux-musl.",
+    "Verified only for --target x86_64-linux-musl.",
 )
 @click.option(
     "--own-python-static-module",
@@ -581,7 +661,7 @@ def build_dist_folder(
     no_build: bool,
     discovery: Literal["static", "trace", "both"] | None,
     dist_python: Literal["byo", "own"] | None,
-    own_python_target: str | None,
+    target_platforms: tuple[str, ...],
     own_python_version: str | None,
     tailor_interpreter: bool | None,
     drop_stdlib_groups: tuple[str, ...],
@@ -623,42 +703,62 @@ def build_dist_folder(
     config = parse_config_from_pyproject(toml_data, project_root=package_path)
     config.load_env()
     path_solver = config.get_path_solver(project_root=package_path)
-    dist_report = build_dist(
-        config,
-        entrypoint=entrypoint,
-        output_dir=output_dir,
-        path_solver=path_solver,
-        optimize=-1 if optimize is None else optimize,
-        stdout="stdout",
-        build_extensions=not no_build,
-        discovery=discovery,
-        python=dist_python,
-        own_python_target=own_python_target,
-        own_python_version=own_python_version,
-        tailor_interpreter=tailor_interpreter,
-        drop_stdlib_groups=drop_stdlib_groups,
-        guard_version=not no_version_guard,
-        isolate=not no_isolate,
-        exclude_modules=exclude_modules,
-        drop_optional_imports=drop_optional_imports,
-        include_distribution_metadata=include_distribution_metadata,
-        include_modules=include_modules,
-        include_packages=include_packages,
-        include_package_data=include_package_data,
-        onefile=onefile,
-        onefile_only=onefile_only,
-        onefile_compression=onefile_compression,
-        onefile_compression_preset=onefile_compression_preset,
-        onefile_cache=onefile_cache,
-        use_inittab=use_inittab,
-        own_python_static=own_python_static,
-        own_python_static_modules=own_python_static_modules,
-    )
-    click.echo(dist_report.render())
-    click.echo("")
-    click.echo(run_instructions(dist_report))
-    if report is not None:
-        Path(report).write_text(dist_report.render())
+
+    entrypoint_spec = resolve_entrypoint_spec(config, entrypoint)
+    entrypoint_options = config.entrypoints[entrypoint_spec]
+    resolved_targets = resolve_target_platforms(entrypoint_options, target_platforms)
+    # Checked once for the whole list, before any build starts -- a later platform
+    # failing the allowlist must not leave earlier ones half-built.
+    assert_supported_platforms(entrypoint_options, resolved_targets)
+    # Whether a target was explicitly requested (CLI flag or the entrypoint's own
+    # declaration) rather than left to the bare default -- not the same as
+    # `resolved_targets != [None]`: an explicit "host" still resolves to `None`, but
+    # was still asked for by name, and gets the same nested output as any other
+    # explicit platform.
+    explicit_targets = bool(target_platforms) or bool(entrypoint_options.get("target"))
+
+    for target in resolved_targets:
+        target_label = target or _host_label()
+        target_output_dir = output_dir / target_label if explicit_targets else output_dir
+        dist_report = build_dist(
+            config,
+            entrypoint=entrypoint,
+            output_dir=target_output_dir,
+            path_solver=path_solver,
+            optimize=-1 if optimize is None else optimize,
+            stdout="stdout",
+            build_extensions=not no_build,
+            discovery=discovery,
+            python=dist_python,
+            target_platform=target,
+            own_python_version=own_python_version,
+            tailor_interpreter=tailor_interpreter,
+            drop_stdlib_groups=drop_stdlib_groups,
+            guard_version=not no_version_guard,
+            isolate=not no_isolate,
+            exclude_modules=exclude_modules,
+            drop_optional_imports=drop_optional_imports,
+            include_distribution_metadata=include_distribution_metadata,
+            include_modules=include_modules,
+            include_packages=include_packages,
+            include_package_data=include_package_data,
+            onefile=onefile,
+            onefile_only=onefile_only,
+            onefile_compression=onefile_compression,
+            onefile_compression_preset=onefile_compression_preset,
+            onefile_cache=onefile_cache,
+            use_inittab=use_inittab,
+            own_python_static=own_python_static,
+            own_python_static_modules=own_python_static_modules,
+        )
+        click.echo(dist_report.render())
+        click.echo("")
+        click.echo(run_instructions(dist_report))
+        if report is not None:
+            report_path = Path(report)
+            if explicit_targets:
+                report_path = report_path.with_stem(f"{report_path.stem}-{target_label}")
+            report_path.write_text(dist_report.render())
 
 
 @smelt.command()
@@ -694,16 +794,20 @@ def nuitkaify(entrypoint_path: ImportPath, logging_level: str) -> None:
     help="How to compile the module",
 )
 @click.option(
-    "-cp",
-    "--crosscompile",
-    type=click.Choice([platform.value for platform in SupportedPlatforms]),
-    default=None,
+    "-t",
+    "--target",
+    "target_platforms",
+    type=CliCommaSeparatedChoice(["host", *(platform.value for platform in SupportedPlatforms)]),
+    default="",
+    help="Platform(s) to cross-compile the module for: a comma-separated list. One "
+    "compiled extension is built per platform, nested under a <platform>/ folder "
+    "whenever this flag is passed explicitly. Defaults to a single native build.",
 )
 @wrap_smelt_errors()
 def compile_module(
     module_import_path: ImportPath,
     backend: Literal["mypyc", "nuitka", "cython"],
-    crosscompile: str | None,
+    target_platforms: tuple[str, ...],
 ) -> None:
     """
     Standalone command to run the nuitka wrapper in this package.
@@ -717,13 +821,6 @@ def compile_module(
     except SmeltConfigError as exc:
         error_exit(str(exc))
 
-    target_platform = SupportedPlatforms(crosscompile) if crosscompile else None
-    py_headers = (
-        target_python_headers_for(target_platform.get_triple_name())
-        if target_platform is not None
-        else None
-    )
-
     if backend == "nuitka":
         config = NuitkaModule(module_import_path, module_source)
         generic_ext = nuitkaify_module(config, path_solver, stdout="stdout")
@@ -735,17 +832,34 @@ def compile_module(
     elif backend == "cython":
         modules = [CythonExtension(module_import_path)]
         (generic_ext,) = compile_cython_extensions(modules, path_solver=path_solver)
-    compiled_so = compile_extension(
-        generic_ext.extension, crosscompile=target_platform, py_headers=py_headers
-    )
-    dest_path = generic_ext.dest_folder / compiled_so
-    shutil.move(compiled_so, dest_path)
-    if runtime := generic_ext.runtime:
-        runtime_compiled_so = compile_extension(
-            runtime, crosscompile=target_platform, py_headers=py_headers
+
+    # `generic_ext` (the transpiled/translated source) is target-independent -- built
+    # once above regardless of how many platforms are requested; only the actual
+    # compile step below runs once per platform.
+    for platform_value in target_platforms or ("host",):
+        target_platform = SupportedPlatforms(platform_value) if platform_value != "host" else None
+        py_headers = (
+            target_python_headers_for(target_platform.get_triple_name())
+            if target_platform is not None
+            else None
         )
-        shutil.move(runtime_compiled_so, generic_ext.dest_folder / runtime_compiled_so)
-    click.echo(f"Compiled so path: {dest_path}")
+        dest_folder = (
+            generic_ext.dest_folder / platform_value
+            if target_platforms
+            else generic_ext.dest_folder
+        )
+        dest_folder.mkdir(parents=True, exist_ok=True)
+        compiled_so = compile_extension(
+            generic_ext.extension, crosscompile=target_platform, py_headers=py_headers
+        )
+        dest_path = dest_folder / compiled_so
+        shutil.move(compiled_so, dest_path)
+        if runtime := generic_ext.runtime:
+            runtime_compiled_so = compile_extension(
+                runtime, crosscompile=target_platform, py_headers=py_headers
+            )
+            shutil.move(runtime_compiled_so, dest_folder / runtime_compiled_so)
+        click.echo(f"Compiled so path: {dest_path}")
 
 
 @smelt.command

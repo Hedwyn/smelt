@@ -6,11 +6,13 @@ Smelt provides experimental support for cross-compiling native extensions, lever
 
 ### Building for another platform
 
-Cross-compilation is driven by the `-cp/--crosscompile` option of [`smelt compile-module`](cli.md#other-commands):
+Cross-compilation is driven by the `-t/--target` option of [`smelt compile-module`](cli.md#other-commands):
 
 ```
-smelt compile-module my_project.hello --backend nuitka --crosscompile aarch64-linux
+smelt compile-module my_project.hello --backend nuitka --target aarch64-linux
 ```
+
+A comma-separated list compiles the module once per platform, each nested under its own `<platform>/` folder (e.g. `--target aarch64-linux,arm-linux-gnueabihf`).
 
 Under the hood this passes `-target <triple>` to `zig cc`/`zig build-lib`, the same mechanism Zig itself uses for cross-compiling C/C++ code.
 
@@ -18,7 +20,7 @@ Under the hood this passes `-target <triple>` to `zig cc`/`zig build-lib`, the s
 
 Cross-compilation in Smelt is still an experimental, narrow feature - keep the following in mind before relying on it:
 
-* **Only the handwritten C/Zig extension path cross-compiles today.** `c_extensions` and `zig_modules` are cross-compiled correctly. The `mypyc`, `cython` and `nuitka` backends don't participate in cross-compilation yet: passing `--crosscompile` alongside `--backend mypyc|cython|nuitka` on `compile-module` is currently a no-op for those backends.
+* **Only the handwritten C/Zig extension path cross-compiles today.** `c_extensions` and `zig_modules` are cross-compiled correctly. The `mypyc`, `cython` and `nuitka` backends don't participate in cross-compilation yet: passing `--target` alongside `--backend mypyc|cython|nuitka` on `compile-module` is currently a no-op for those backends.
 * **Linux-only targets, for now.** Only three target triples are currently supported: `aarch64-linux`, `arm-linux-gnueabihf` (armv7l) and `x86_64-linux`. There is no cross-compiling target for Windows or macOS yet.
 * **A matching `pyconfig.h` is required for the target.** Building a Python C extension needs a `pyconfig.h` matching the target platform's Python ABI. Smelt bundles pre-generated ones for the triples above, but currently only for Python 3.12 - cross-compiling against a different interpreter version isn't supported out of the box.
 * **Stability isn't guaranteed.** Smelt emits a runtime warning whenever cross-compilation is used; treat produced artifacts as experimental rather than production-ready until this matures.

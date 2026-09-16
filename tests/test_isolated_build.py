@@ -23,10 +23,11 @@ from smelt.dist import (
     DEFAULT_ISOLATED_BUILD,
     DistError,
     IsolatedBuildError,
+    assert_supported_platforms,
     build_dist,
     resolve_isolated_build,
-    resolve_isolated_build_target,
     resolve_isolated_build_versions,
+    resolve_target_platforms,
 )
 from smelt.isolated_build import (
     DEFAULT_ISOLATED_BUILD_VERSIONS,
@@ -206,21 +207,24 @@ def test_resolve_isolated_build_versions_rejects_an_unknown_strategy() -> None:
         )
 
 
-def test_resolve_isolated_build_target_prefers_the_caller_then_the_declaration() -> None:
-    assert resolve_isolated_build_target(EntrypointOptions()) is None
-    assert (
-        resolve_isolated_build_target(
-            EntrypointOptions({"isolated-build-target": "aarch64-linux-gnu"})
-        )
-        == "aarch64-linux-gnu"
-    )
-    assert (
-        resolve_isolated_build_target(
-            EntrypointOptions({"isolated-build-target": "aarch64-linux-gnu"}),
-            "x86_64-linux-musl",
-        )
-        == "x86_64-linux-musl"
-    )
+def test_resolve_target_platforms_prefers_the_caller_then_the_declaration() -> None:
+    assert resolve_target_platforms(EntrypointOptions()) == [None]
+    assert resolve_target_platforms(
+        EntrypointOptions({"target": ["aarch64-linux-gnu"]})
+    ) == ["aarch64-linux-gnu"]
+    assert resolve_target_platforms(
+        EntrypointOptions({"target": ["aarch64-linux-gnu"]}),
+        ["x86_64-linux-musl"],
+    ) == ["x86_64-linux-musl"]
+    assert resolve_target_platforms(EntrypointOptions(), ["host"]) == [None]
+
+
+def test_assert_supported_platforms_rejects_a_target_outside_the_allowlist() -> None:
+    entrypoint_options = EntrypointOptions({"supported-platforms": ["aarch64-linux-gnu"]})
+    assert_supported_platforms(entrypoint_options, ["aarch64-linux-gnu"])
+    assert_supported_platforms(entrypoint_options, [None])  # host always allowed
+    with pytest.raises(DistError):
+        assert_supported_platforms(entrypoint_options, ["x86_64-linux-musl"])
 
 
 # --- fetch_wheel / extract_wheel / locate_native_in_wheel (needs network) ----------
@@ -307,7 +311,7 @@ def test_build_dist_ships_the_isolated_build_replacement(tmp_path: Path) -> None
         build_extensions=False,
         discovery="static",
         isolated_build=True,
-        isolated_build_target="x86_64-linux-musl",
+        target_platform="x86_64-linux-musl",
     )
     natives = list(report.payload_root.rglob("*.so"))
     assert len(natives) == 1
@@ -335,5 +339,5 @@ def test_build_dist_fails_loudly_when_isolated_build_has_no_wheel_for_the_target
             build_extensions=False,
             discovery="static",
             isolated_build=True,
-            isolated_build_target="x86_64-windows-gnu",
+            target_platform="x86_64-windows-gnu",
         )

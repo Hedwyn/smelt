@@ -252,9 +252,17 @@ EntrypointOptions = TypedDict(
         # `python` is one of "byo" (bring your own interpreter, the default) or "own"
         # (ship one smelt builds itself, so the folder needs no Python installed).
         "python": str,
-        # Zig target triple for the `python = "own"` interpreter build; omitted means
-        # a native build against the host's own libc.
-        "own-python-target": str,
+        # Platform(s) to build the distribution for: Zig target triples (e.g.
+        # "x86_64-linux-musl") or the literal "host". Drives the `python = "own"`
+        # interpreter build and the `isolated-build` native-dependency reinstall
+        # alike -- see `smelt.dist.resolve_target_platforms`. Omitted, or "host",
+        # means a native build against the host's own libc.
+        "target": list[str],
+        # Allowlist `target` is checked against, entrypoint by entrypoint --
+        # requesting a platform outside it fails the build before anything is built.
+        # "host" is always implicitly allowed regardless of this list. Omitted means
+        # any requested platform is accepted. See `smelt.dist.assert_supported_platforms`.
+        "supported-platforms": list[str],
         # CPython release the `python = "own"` interpreter is built from, one of
         # meta-python's curated `-Dcpython-version` choices (e.g. "3.15.0rc2").
         # Omitted means the release matching the running interpreter's own minor
@@ -295,9 +303,6 @@ EntrypointOptions = TypedDict(
         # see `smelt.isolated_build.IsolatedBuildVersions` and
         # `DEFAULT_ISOLATED_BUILD_VERSIONS`.
         "isolated-build-versions": str,
-        # Target triple `isolated-build` reinstalls native dependencies for (same
-        # spelling as `own-python-target`); omitted means the host's own platform.
-        "isolated-build-target": str,
         # Whether the `python = "own"` interpreter is built as one monolithic,
         # static-PIE executable (no libpythonX.Y.so) instead of the ordinary
         # dynamic-libc/dynamic-libpython shape. Off by default -- see
