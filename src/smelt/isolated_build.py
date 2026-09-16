@@ -20,11 +20,18 @@ import shutil
 import sys
 import zipfile
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from smelt.explorer import ModuleKind, ResolvedModule
 from smelt.utils import ImportPath, PathExists, SmeltError, assert_path_exists
+
+if TYPE_CHECKING:
+    # `smelt.vendoring` imports back from this module (see `prepare_isolated_natives`'s
+    # own local import, below) -- only safe to name its types here, never to import
+    # the package itself at module scope.
+    from smelt.vendoring.base import VendoredExtension
 
 
 class IsolatedBuildError(SmeltError):
@@ -72,7 +79,7 @@ def owning_distribution(import_path: ImportPath) -> str | None:
     return min(owners, default=None)
 
 
-def _canonicalize_distribution_name(name: str) -> str:
+def canonicalize_distribution_name(name: str) -> str:
     """
     PEP 503 canonicalization (lowercase, `-`/`_`/`.` runs collapsed to a single `-`),
     so `Flask`/`flask`/`flask..core` all key the same way -- reimplemented inline
@@ -80,6 +87,9 @@ def _canonicalize_distribution_name(name: str) -> str:
     importing `packaging` just for this, since `owning_distribution` (from installed
     metadata) and `[project.dependencies]` (as the project author spelled it) are not
     guaranteed to agree on casing/separators for the same distribution.
+
+    Also used by `smelt.vendoring`'s provider registry, so the two agree on which
+    distribution a name refers to.
     """
     return re.sub(r"[-_.]+", "-", name).lower()
 
@@ -111,9 +121,9 @@ def resolve_isolated_build_version(
         case "local":
             return f"=={importlib.metadata.version(dist_name)}"
         case "pyproject":
-            canonical = _canonicalize_distribution_name(dist_name)
+            canonical = canonicalize_distribution_name(dist_name)
             for name, specifier in pyproject_dependencies.items():
-                if _canonicalize_distribution_name(name) == canonical:
+                if canonicalize_distribution_name(name) == canonical:
                     return specifier
             return ""
         case "lock":
@@ -210,6 +220,24 @@ def isolated_build_cache_dir(dist_name: str, version: str, target: str | None = 
     an unset target that way.
     """
     return _ISOLATED_BUILD_CACHE_DIR / (target or "native") / dist_name / version
+
+
+#: Where `smelt.vendoring`'s from-source builds cache their fetched sources and
+#: compiled dependencies (see `vendored_build_cache_dir`), sibling to
+#: `_ISOLATED_BUILD_CACHE_DIR` -- a vendored distribution resolves its own version
+#: from source, so there is no `version` component to key on ahead of time the way
+#: `isolated_build_cache_dir` does for a wheel.
+_VENDORED_BUILD_CACHE_DIR: Final[Path] = Path.home() / ".cache" / "smelt" / "vendoring"
+
+
+def vendored_build_cache_dir(dist_name: str, target: str | None = None) -> Path:
+    """
+    Where `smelt.vendoring`'s provider for `dist_name` caches whatever it fetches
+    and builds for `target` (its source, a vendored native dependency like libffi,
+    its compiled objects) across builds. Mirrors `isolated_build_cache_dir` without
+    the version component.
+    """
+    return _VENDORED_BUILD_CACHE_DIR / (target or "native") / dist_name
 
 
 def _cached_wheel(cache_dir: Path) -> PathExists | None:
@@ -350,6 +378,21 @@ def locate_sibling_libs_dirs(extracted_root: Path) -> list[Path]:
     ]
 
 
+@dataclass
+class IsolatedNativesResult:
+    """
+    What `prepare_isolated_natives` produced: `replacements` for the ordinary,
+    loose-`.so` case (a fetched wheel, or a vendored provider's build when static
+    linking was not requested), and `static_modules` for a vendored provider's
+    build staged for static linking instead (see `static_build_dir`) -- meant to be
+    merged into `smelt.backend.BackendResult.static_modules` by the caller, the
+    same dict shape.
+    """
+
+    replacements: dict[ImportPath, PathExists] = field(default_factory=dict)
+    static_modules: dict[ImportPath, list[PathExists]] = field(default_factory=dict)
+
+
 def prepare_isolated_natives(
     closure: dict[ImportPath, ResolvedModule],
     payload_root: Path,
@@ -357,25 +400,44 @@ def prepare_isolated_natives(
     target: str | None,
     versions: IsolatedBuildVersions,
     dependencies: Mapping[str, str] = {},
-) -> dict[ImportPath, PathExists]:
+    static_build_dir: Path | None = None,
+    python_version: tuple[int, int] = sys.version_info[:2],
+) -> IsolatedNativesResult:
     """
-    For every `ModuleKind.EXTENSION` entry in `closure`, fetches (once per distinct
-    owning distribution, see `owning_distribution`) a wheel built for `target` and
-    returns the replacement file to ship instead of `resolved.origin`.
+    For every `ModuleKind.EXTENSION` entry in `closure`, obtains a replacement built
+    for `target` instead of `resolved.origin` (the local environment's own build,
+    wrong for a foreign target).
+
+    Checked *first*, before any wheel lookup: whether `owning_distribution` has a
+    `smelt.vendoring` provider registered for it (see `smelt.vendoring.get_provider`)
+    -- a registered distribution is built from source instead and never touches
+    `unearth`/the package index at all. Only a distribution with no provider falls
+    through to fetching a prebuilt wheel (see `fetch_wheel`), same as before.
+
+    A vendored provider's build is either linked into a loose `.so` (returned via
+    `IsolatedNativesResult.replacements`, same as a wheel-derived one) or, when
+    `static_build_dir` is given, staged for static linking instead (returned via
+    `IsolatedNativesResult.static_modules`) -- mirroring
+    `smelt.backend._compile_place_or_stage`'s own branch for every other backend.
+    A wheel-derived replacement is always a finished, already-linked `.so`: there is
+    no object-file seam for a prebuilt wheel, so it only ever populates
+    `replacements`.
 
     Also places that distribution's whole sibling tree directly into `payload_root`
     (any `*.libs`-shaped directory the wheel vendors alongside its own extension
     modules, see `locate_sibling_libs_dirs`) -- a repaired manylinux/musllinux wheel's
     own vendored shared libraries, without which the returned replacement file alone
-    would not load on the target.
+    would not load on the target. Vendored builds have no such sibling tree.
 
     An import path whose owning distribution could not be determined, or whose
-    fetched wheel has no matching file, is simply absent from the returned mapping --
+    fetched wheel has no matching file, is simply absent from the returned result --
     the caller decides what that means (today: fail the build rather than silently
     falling back to the local, wrong-platform file or silently dropping the module).
     """
     replacements: dict[ImportPath, PathExists] = {}
+    static_modules: dict[ImportPath, list[PathExists]] = {}
     extracted_roots: dict[str, Path] = {}
+    vendored_builds: dict[str, tuple[VendoredExtension, PathExists | None]] = {}
     placed_libs_dirs: set[str] = set()
 
     for import_path, resolved in closure.items():
@@ -383,6 +445,40 @@ def prepare_isolated_natives(
             continue
         dist_name = owning_distribution(import_path)
         if dist_name is None:
+            continue
+
+        # Local import: `smelt.vendoring` imports back from this module (for
+        # `canonicalize_distribution_name`/`vendored_build_cache_dir`), so importing
+        # it at module scope here would be a circular import. Deferred to this
+        # call, by which point `smelt.isolated_build` has already finished loading.
+        from smelt import vendoring
+
+        provider = vendoring.get_provider(dist_name)
+        if provider is not None:
+            if dist_name not in vendored_builds:
+                version_requirement = resolve_isolated_build_version(
+                    dist_name, versions, pyproject_dependencies=dependencies
+                )
+                build_dir = static_build_dir or (vendored_build_cache_dir(dist_name, target) / "objects")
+                build_dir.mkdir(parents=True, exist_ok=True)
+                vendored_builds[dist_name] = vendoring.build_vendored_extension(
+                    provider,
+                    version_requirement,
+                    target,
+                    python_version,
+                    build_dir=build_dir,
+                    static_build_dir=static_build_dir,
+                )
+            vext, so_path = vendored_builds[dist_name]
+            if vext.import_path != import_path:
+                # Only a single extension per vendored distribution is supported
+                # today (see `smelt.vendoring.VendoredProvider`) -- nothing else in
+                # this distribution's closure is something this provider built.
+                continue
+            if so_path is not None:
+                replacements[import_path] = so_path
+            else:
+                static_modules[import_path] = vext.objects
             continue
 
         if dist_name not in extracted_roots:
@@ -407,4 +503,4 @@ def prepare_isolated_natives(
         if native is not None:
             replacements[import_path] = native
 
-    return replacements
+    return IsolatedNativesResult(replacements, static_modules)

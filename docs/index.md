@@ -1,13 +1,14 @@
 # Smelt
 
-Smelt is a Python tool that aims to greatly simplify shipping native code from Python projects. This notably covers:
+Smelt is a Python tool that aims to greatly simplify shipping native code and standalone applications from Python projects. It covers two related but distinct jobs:
 
-* Providing a fully standalone way to compile native code in Python projects without any system dependency.
-* Cross-compiling Python C extensions.
-* Combining multiple tools building or providing native code in Python projects (e.g., mypyc, Nuitka, local C/Zig extensions).
-* Providing a single high-level interface to automate binary builds, either for platform-specific wheels or even for standalone fully compiled binary Python projects.
+* **A build backend**: compiling native extensions (mypyc, Cython, Nuitka, handwritten C/Zig) under one `pyproject.toml`-based API, without any system dependency. This notably covers:
+    * Providing a fully standalone way to compile native code in Python projects without any system dependency.
+    * Cross-compiling Python C extensions.
+    * Combining multiple tools building or providing native code in Python projects (e.g., mypyc, Nuitka, local C/Zig extensions).
+* **A bundler**: assembling a whole Python application - its dependency closure, compiled extensions, and optionally its own interpreter - into a standalone distribution folder or single file, runnable with or without Python installed on the target machine.
 
-Head to [Get Started](get-started.md) for a minimal working setup - a single mypyc extension declared in a couple of lines of `pyproject.toml`.
+Head to [Get Started](get-started.md) for a minimal build-backend setup - a single mypyc extension declared in a couple of lines of `pyproject.toml` - or to [Bundler: Get Started](bundler-get-started.md) for a minimal standalone build.
 
 ## Goals
 
@@ -50,4 +51,5 @@ While Nuitka is designed for that purpose and already capable by itself of doing
 * **[Manifesto](manifesto.md)** - the full story behind the problems Smelt addresses, and the reasoning behind its approach.
 * **[Build Hook](build-hook.md)** - the primary way of using Smelt: plugging it into your `pyproject.toml` as a Hatchling build hook so native extensions are built automatically whenever your project is built.
 * **[CLI](cli.md)** - the `smelt` command-line tool, for driving builds manually, producing standalone binaries, and cleaning up build artifacts.
+* **[Bundler: Get Started](bundler-get-started.md)** - assembling a standalone application distribution with `smelt build-dist`, and its [Overview](bundler-overview.md) and [Reference](bundler-reference.md) pages.
 * **[Advanced Use Cases](advanced.md)** - cross-compilation support and its current limitations, plus a deep dive into how Smelt makes Nuitka behave as a per-module backend.

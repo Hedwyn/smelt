@@ -1,0 +1,20 @@
+.{
+    .name = .smelt_vendored_libffi,
+    .version = "3.5.2",
+    // Reported by `zig build` itself on first run (see the comment this replaced
+    // for why the exact value doesn't matter beyond being non-reserved).
+    .fingerprint = 0x10d0c6d53446a5ff,
+    .dependencies = .{
+        // Same URL/hash meta-python's own `build.zig.zon` already pins and
+        // successfully fetches for its `_ctypes` build (see that project's
+        // `.libffi` entry) -- reused as-is rather than re-derived.
+        .libffi = .{
+            .url = "https://github.com/allyourcodebase/libffi/archive/refs/tags/v3.5.2.tar.gz",
+            .hash = "libffi-3.5.2-QhHaJyYYAAA1JzdzpVppCdz543jMEJGazBWhRR_FMvRg",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+}

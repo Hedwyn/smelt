@@ -95,6 +95,7 @@ from smelt.isolated_build import (
     ISOLATED_BUILD_VERSIONS,
     IsolatedBuildError,
     IsolatedBuildVersions,
+    IsolatedNativesResult,
     parse_pyproject_dependencies,
     prepare_isolated_natives,
 )
@@ -2274,17 +2275,30 @@ def build_dist(
 
     # Reinstalled ahead of the closure loop below: every `ModuleKind.EXTENSION` entry
     # it locates a replacement for is substituted in there instead of `resolved.origin`.
-    isolated_natives = (
+    # A vendored provider that was static-link-eligible (see `smelt.vendoring`) lands
+    # in `static_modules` instead -- merged in here so it is skipped by the closure
+    # loop the same way a `built`, smelt-compiled static module already is.
+    isolated_result = (
         prepare_isolated_natives(
             closure,
             payload_root,
             target=resolved_isolated_build_target,
             versions=resolved_isolated_build_versions,
             dependencies=parse_pyproject_dependencies(config.dependencies),
+            static_build_dir=static_build_dir,
         )
         if resolved_isolated_build
-        else {}
+        else IsolatedNativesResult()
     )
+    isolated_natives = isolated_result.replacements
+    static_modules = {
+        **static_modules,
+        # Re-keyed as plain `str` (a no-op at runtime -- `ImportPath` is a `str`
+        # `NewType`): `static_modules`' own declared type is `Mapping[str, ...]`,
+        # and an `ImportPath`-keyed dict is not assignable to that contravariantly
+        # (its `__getitem__` only promises to accept an `ImportPath`, not any `str`).
+        **{str(import_path): objects for import_path, objects in isolated_result.static_modules.items()},
+    }
 
     # Native artifacts first: whatever smelt built for a module is what that module
     # ships as, so the bytecode pass below must not also emit a `.pyc` shadowing it.
@@ -2338,6 +2352,13 @@ def build_dist(
                     report.skipped[import_path] = f"bytecode compilation failed: {exc}"
             case ModuleKind.EXTENSION:
                 assert resolved.origin is not None, "an EXTENSION module always has an origin"
+                if import_path in static_modules:
+                    # Vendored and staged for static linking (see
+                    # `prepare_isolated_natives`'s `static_build_dir`) -- linked
+                    # straight into the interpreter below, not copied in as a
+                    # `.so`, same as a `built` entry already handled above.
+                    report.static_modules.append(import_path)
+                    continue
                 if resolved_isolated_build and import_path not in isolated_natives:
                     raise IsolatedBuildError(
                         f"isolated-build could not reinstall {import_path!r} for "

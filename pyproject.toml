@@ -142,6 +142,9 @@ package-dir = { "" = "src" }
 # install time -- it has to ship with the package or `--onefile --python own` has
 # nothing to build.
 "smelt" = ["launcher/*.zig"]
+# smelt.vendoring's own build.zig recipes (see smelt/vendoring/libffi/) are compiled
+# at isolated-build time, same reasoning as the onefile launcher above.
+"smelt.vendoring" = ["libffi/*.zig", "libffi/*.zig.zon"]
 
 [project.entry-points.hatch]
 smelt = "smelt.build_backends.hatch"
