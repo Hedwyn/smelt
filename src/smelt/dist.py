@@ -77,6 +77,7 @@ from smelt.bytecode import (
     compile_module,
     compile_to_pyc,
 )
+from smelt.compiler import SupportedPlatforms
 from smelt.config import EntrypointOptions, SmeltConfig
 from smelt.explorer import (
     ModuleKind,
@@ -2042,6 +2043,22 @@ def build_dist(
     resolved_own_python_static_modules = resolve_own_python_static_modules(
         entrypoint_options, own_python_static_modules
     )
+    # Hoisted ahead of `run_backend` (below) so its own compile step cross-compiles
+    # for the same target the mode `own` interpreter build further down resolves --
+    # that block still reads this via the `target` local it assigns from it.
+    resolved_own_python_target = own_python_target or entrypoint_options.get(
+        "own-python-target", DEFAULT_OWN_PYTHON_TARGET
+    )
+    # `run_backend`'s own `crosscompile` is the narrower, Zig-target-spelled enum its
+    # compile primitives take (see `SupportedPlatforms.from_triple`'s own doc) --
+    # raises for a target outside today's 3 supported members (e.g. musl, Windows,
+    # macOS): `run_backend` cross-compiling extensions does not extend there yet,
+    # unlike interpreter/wheel targeting elsewhere in this function.
+    backend_crosscompile = (
+        SupportedPlatforms.from_triple(resolved_own_python_target)
+        if resolved_own_python_target is not None
+        else None
+    )
     # Auto-discovery (`run_backend(static_link=True)`, see `compiling_pipeline_refactor.md`)
     # only kicks in when the caller left `static_modules` for us to fill in ourselves --
     # one who hand-supplies it already did their own eligibility judgment, and gets the
@@ -2059,6 +2076,7 @@ def build_dist(
             path_solver=path_solver,
             without_entrypoint=True,
             static_link=auto_static_link,
+            crosscompile=backend_crosscompile,
         )
         if auto_static_link:
             static_modules = backend_result.static_modules
@@ -2157,9 +2175,7 @@ def build_dist(
     #: interpreter, are produced for the same target as the interpreter itself).
     interpreter_target: str | None = None
     if resolved_python == "own":
-        target = own_python_target or entrypoint_options.get(
-            "own-python-target", DEFAULT_OWN_PYTHON_TARGET
-        )
+        target = resolved_own_python_target
         interpreter_target = target
         python_version = resolve_own_python_version(
             own_python_version or entrypoint_options.get("own-python-version")

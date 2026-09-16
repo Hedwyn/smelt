@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 from mypyc.build import mypycify
 
 from smelt.compiler import (
+    SupportedPlatforms,
     compile_extension_objects,
     compile_zig_module,
     link_extension_objects,
@@ -47,6 +48,11 @@ from smelt.nuitkaify import (
     import_path_search_root,
     nuitkaify_module,
 )
+from smelt.own_python import (
+    TargetPythonHeaders,
+    resolve_own_python_version,
+    target_python_headers_for,
+)
 from smelt.utils import (
     GenericExtension,
     ImportPath,
@@ -55,6 +61,7 @@ from smelt.utils import (
     PathSolver,
     SmeltConfigError,
     SmeltError,
+    get_extension_suffix,
     get_module_name,
     locate_module,
     path_exists,
@@ -101,7 +108,11 @@ class CompiledExtension:
 
 
 def compile_generic_extension(
-    ext: GenericExtension, dest_folder: PathLike[str]
+    ext: GenericExtension,
+    dest_folder: PathLike[str],
+    crosscompile: SupportedPlatforms | None = None,
+    *,
+    py_headers: TargetPythonHeaders | None = None,
 ) -> CompiledExtension:
     """
     Compiles `ext`'s extension (and its runtime, if any) into `dest_folder`, stopping
@@ -111,13 +122,26 @@ def compile_generic_extension(
     loose `.so`) and static linking (`smelt.static_python.build_static_interpreter`)
     both build on -- the seam `compiling_pipeline_refactor.md` opens between codegen
     and "compile-and-place".
+
+    `crosscompile`/`py_headers` are forwarded verbatim to `compile_extension_objects`
+    (see its own doc for why both are needed together for a cross build).
     """
-    objects = compile_extension_objects(ext.extension, dest_folder)
-    runtime_objects = compile_extension_objects(ext.runtime, dest_folder) if ext.runtime else None
+    objects = compile_extension_objects(
+        ext.extension, dest_folder, crosscompile=crosscompile, py_headers=py_headers
+    )
+    runtime_objects = (
+        compile_extension_objects(
+            ext.runtime, dest_folder, crosscompile=crosscompile, py_headers=py_headers
+        )
+        if ext.runtime
+        else None
+    )
     return CompiledExtension(ext, objects, runtime_objects)
 
 
-def link_generic_extension(compiled: CompiledExtension) -> GenericExtension:
+def link_generic_extension(
+    compiled: CompiledExtension, crosscompile: SupportedPlatforms | None = None
+) -> GenericExtension:
     """
     Links a `CompiledExtension`'s object files into `.so`s and moves them to their
     final destination next to the source module.
@@ -125,17 +149,31 @@ def link_generic_extension(compiled: CompiledExtension) -> GenericExtension:
     The default consumer of `compile_generic_extension`'s output -- what
     `compile_mypyc_extensions` and `_compile_and_place` used to do directly through
     `compile_extension`, now composed from the observable object-file stage instead.
+
+    `crosscompile`, when set, both names the produced `.so`'s target-tagged suffix
+    (`ext.get_dest_path(target_triple)`, same as a native build's `EXT_SUFFIX`) and is
+    passed to the link step itself as `--target=` (`compile_extension`'s own link call
+    does the same -- without it the link step defaults to the host arch, producing an
+    ELF whose arch does not match the just-compiled target objects).
     """
     ext = compiled.generic
-    so_suffix = sysconfig.get_config_var("EXT_SUFFIX")
-    module_so_path = link_extension_objects(compiled.objects, ext.extension.name + so_suffix)
-    shutil.move(module_so_path, str(ext.get_dest_path()))
+    target_triple = crosscompile.get_triple_name() if crosscompile is not None else None
+    so_suffix = (
+        get_extension_suffix(target_triple)
+        if target_triple is not None
+        else sysconfig.get_config_var("EXT_SUFFIX")
+    )
+    extra_preargs = [f"--target={crosscompile.value}"] if crosscompile is not None else []
+    module_so_path = link_extension_objects(
+        compiled.objects, ext.extension.name + so_suffix, extra_preargs=extra_preargs
+    )
+    shutil.move(module_so_path, str(ext.get_dest_path(target_triple)))
     if compiled.runtime_objects is not None:
         assert ext.runtime is not None, "runtime_objects is only ever set alongside a runtime"
         runtime_so_path = link_extension_objects(
-            compiled.runtime_objects, ext.runtime.name + so_suffix
+            compiled.runtime_objects, ext.runtime.name + so_suffix, extra_preargs=extra_preargs
         )
-        shutil.move(runtime_so_path, str(ext.get_runtime_dest_path()))
+        shutil.move(runtime_so_path, str(ext.get_runtime_dest_path(target_triple)))
     return ext
 
 
@@ -162,7 +200,11 @@ def is_static_link_eligible(ext: GenericExtension) -> bool:
 
 
 def _compile_place_or_stage(
-    ext: GenericExtension, static_build_dir: PathLike[str] | None
+    ext: GenericExtension,
+    static_build_dir: PathLike[str] | None,
+    crosscompile: SupportedPlatforms | None = None,
+    *,
+    py_headers: TargetPythonHeaders | None = None,
 ) -> list[PathExists] | None:
     """
     Compiles `ext` and either links+places it (the default), or -- when
@@ -172,12 +214,20 @@ def _compile_place_or_stage(
 
     Returns `None` when `ext` was linked and placed normally -- the shared decision
     point every `run_backend` compile loop (pinned or auto-discovered) goes through.
+
+    `crosscompile`/`py_headers` are forwarded to the compile (and, when linking,
+    link) steps -- see `compile_generic_extension`/`link_generic_extension`.
     """
     if static_build_dir is not None and is_static_link_eligible(ext):
-        compiled = compile_generic_extension(ext, static_build_dir)
+        compiled = compile_generic_extension(
+            ext, static_build_dir, crosscompile, py_headers=py_headers
+        )
         return [*compiled.objects, *(compiled.runtime_objects or [])]
     with tempfile.TemporaryDirectory() as build_folder:
-        link_generic_extension(compile_generic_extension(ext, build_folder))
+        link_generic_extension(
+            compile_generic_extension(ext, build_folder, crosscompile, py_headers=py_headers),
+            crosscompile,
+        )
     return None
 
 
@@ -372,6 +422,8 @@ def compile_module_with_fallback(
     path_solver: PathSolver,
     *,
     static_build_dir: PathLike[str] | None = None,
+    crosscompile: SupportedPlatforms | None = None,
+    py_headers: TargetPythonHeaders | None = None,
 ) -> tuple[GenericExtension, list[PathExists] | None]:
     """
     Compiles `import_path` trying each backend in `backend_priority_order` in turn,
@@ -383,13 +435,17 @@ def compile_module_with_fallback(
     it, Nuitka included (it only ever fails Tier 1 on the merits, see `run_backend`'s
     own doc, not because it is auto-discovered). The second element of the returned
     tuple is that staging's own object files, or `None` when linked+placed normally.
+
+    `crosscompile`/`py_headers` are forwarded the same way, to `_compile_place_or_stage`.
     """
     auto_context = _get_auto_mode_context()
     last_exc: Exception | None = None
     for backend in backend_priority_order:
         try:
             ext = _generate_with_backend(backend, import_path, path_solver)
-            objects = _compile_place_or_stage(ext, static_build_dir)
+            objects = _compile_place_or_stage(
+                ext, static_build_dir, crosscompile, py_headers=py_headers
+            )
         except (SmeltError, RuntimeError, ImportError) as exc:
             auto_context.record_attempt(import_path, backend, error=str(exc))
             _logger.warning("Backend %s failed to compile %s: %s", backend.value, import_path, exc)
@@ -799,6 +855,7 @@ def run_backend(
     embed_files: Iterable[tuple[Path, ImportPath]] | None = None,
     no_cache: bool = False,
     static_link: bool = False,
+    crosscompile: SupportedPlatforms | None = None,
 ) -> BackendResult:
     """
     Runs the whole backend pipeline:
@@ -841,6 +898,15 @@ def run_backend(
     that opted into `static_link` has somewhere to receive `static_modules` from --
     `.artifacts` is what every existing caller (e.g. the hatchling build hook, which
     force-includes them in packaging) already expected from this function.
+
+    `crosscompile`, when given, cross-compiles every module below (pinned or
+    auto-discovered) for that target instead of the host -- resolving the
+    target-correct `Python.h`/`pyconfig.h` pair once here (see `TargetPythonHeaders`)
+    and forwarding both down to each backend's own compile step. The one exception is
+    the Nuitka entrypoint compilation at the bottom of this function
+    (`compile_with_nuitka`): that shells out to Nuitka's own build pipeline, which has
+    no cross-compile story today (see `cross_compilation_audit.md`), so it raises
+    rather than silently emitting a host-arch binary mislabeled as the target's.
     """
     local_platform = platform.system().lower()
     if (platforms := config.platforms) is not None and local_platform not in platforms:
@@ -862,12 +928,21 @@ def run_backend(
         "compile C extensions"
     )
 
+    target_triple = crosscompile.get_triple_name() if crosscompile is not None else None
+    py_headers = (
+        target_python_headers_for(target_triple, python_version=resolve_own_python_version(None))
+        if target_triple is not None
+        else None
+    )
+
     def _place_or_stage(ext: GenericExtension) -> bool:
         """
         `_compile_place_or_stage` plus this run's bookkeeping: records staged objects
         in `static_modules` and returns whether `ext` was staged (vs. linked+placed).
         """
-        objects = _compile_place_or_stage(ext, static_build_dir)
+        objects = _compile_place_or_stage(
+            ext, static_build_dir, crosscompile, py_headers=py_headers
+        )
         if objects is None:
             return False
         static_modules[ext.import_path] = objects
@@ -885,6 +960,7 @@ def run_backend(
                 zig_mod.import_path,
                 flags=zig_mod.flags,
                 path_solver=path_solver,
+                crosscompile=crosscompile,
             )
         )
 
@@ -902,7 +978,7 @@ def run_backend(
         )
         if _place_or_stage(native_ext):
             continue
-        built_artifacts.append(native_ext.get_dest_path())
+        built_artifacts.append(native_ext.get_dest_path(target_triple))
 
     # Note: mypyc has a runtime shipped as a separate extension
     # this runtime should be named modname__mypy
@@ -914,18 +990,18 @@ def run_backend(
         mypyc_ext = _mypycify_one(module, path_solver)
         if _place_or_stage(mypyc_ext):
             continue
-        built_artifacts.append(mypyc_ext.get_dest_path())
+        built_artifacts.append(mypyc_ext.get_dest_path(target_triple))
         if mypyc_ext.runtime:
             shared_runtime_extensions.add(mypyc_ext.runtime.name)
-            built_artifacts.append(mypyc_ext.get_runtime_dest_path())
+            built_artifacts.append(mypyc_ext.get_runtime_dest_path(target_triple))
 
     # cython extensions -- eligible for static linking, unlike Nuitka below.
     for cython_ext in compile_cython_extensions(config.cython_modules, path_solver=path_solver):
         if _place_or_stage(cython_ext):
             continue
-        built_artifacts.append(cython_ext.get_dest_path())
+        built_artifacts.append(cython_ext.get_dest_path(target_triple))
         if cython_ext.runtime:
-            built_artifacts.append(cython_ext.get_runtime_dest_path())
+            built_artifacts.append(cython_ext.get_runtime_dest_path(target_triple))
 
     # A Nuitka module *does* go through smelt's own compile step (`nuitkaify_module`
     # only transpiles to C; `_place_or_stage`/`compile_generic_extension` is what
@@ -939,9 +1015,9 @@ def run_backend(
         nuitka_ext = nuitkaify_module(nuitka_mod, path_solver=path_solver)
         if _place_or_stage(nuitka_ext):
             continue
-        built_artifacts.append(nuitka_ext.get_dest_path())
+        built_artifacts.append(nuitka_ext.get_dest_path(target_triple))
         if nuitka_ext.runtime:
-            built_artifacts.append(nuitka_ext.get_runtime_dest_path())
+            built_artifacts.append(nuitka_ext.get_runtime_dest_path(target_triple))
 
     # auto-discovered modules (see `config.auto_mode`), each compiled by trying
     # `config.backend_priority_order` in turn until one succeeds. Unlike pinned
@@ -956,6 +1032,8 @@ def run_backend(
                 config.backend_priority_order,
                 path_solver,
                 static_build_dir=static_build_dir,
+                crosscompile=crosscompile,
+                py_headers=py_headers,
             )
         except SmeltError as exc:
             _logger.warning("Skipping auto-discovered module %s: %s", import_path, exc)
@@ -964,10 +1042,10 @@ def run_backend(
             static_modules[auto_ext.import_path] = auto_objects
             _logger.info("Staged %s for static linking (no .so written)", auto_ext.import_path)
             continue
-        built_artifacts.append(auto_ext.get_dest_path())
+        built_artifacts.append(auto_ext.get_dest_path(target_triple))
         if auto_ext.runtime:
             shared_runtime_extensions.add(auto_ext.runtime.name)
-            built_artifacts.append(auto_ext.get_runtime_dest_path())
+            built_artifacts.append(auto_ext.get_runtime_dest_path(target_triple))
 
     # nuitka entrypoint(s) compilation
     embed_data_files = [
@@ -975,6 +1053,17 @@ def run_backend(
         for data_file_path, import_path in (embed_files or ())
     ]
     without_entrypoint = without_entrypoint or not config.entrypoints
+    if not without_entrypoint and crosscompile is not None:
+        # `compile_with_nuitka` shells out to Nuitka's own build pipeline (Scons +
+        # its own C compiler discovery), which has no `--target=`-style cross-compile
+        # support today -- see `run_backend`'s own doc. Raising here beats silently
+        # emitting a host-arch binary mislabeled as `crosscompile`'s target.
+        raise SmeltError(
+            f"run_backend cannot cross-compile the Nuitka entrypoint build for "
+            f"{crosscompile.value!r} yet: Nuitka's own build pipeline has no "
+            "cross-compile support. Pass without_entrypoint=True to still "
+            "cross-compile the modules above."
+        )
     if not without_entrypoint:
         entrypoints_to_build = list(config.entrypoints)
         if entrypoint is not None:

@@ -139,6 +139,27 @@ class SupportedPlatforms(StrEnum):
             return self.value
         return self.value + "-gnu"
 
+    @classmethod
+    def from_triple(cls, triple: str) -> SupportedPlatforms:
+        """
+        Reverse of `get_triple_name`: the member whose GNU triple matches `triple` --
+        the vocabulary `smelt.own_python`/`smelt.dist`'s own target strings use (e.g.
+        `own_python_target`), for a caller that only has that string and needs the
+        narrower, Zig-target-spelled enum this compiler's own primitives take.
+
+        Raises `SmeltError` for a triple outside today's supported members (e.g. a
+        musl or Windows/macOS target): cross-compiling smelt's own extensions
+        (`run_backend`) does not extend there yet, unlike interpreter/wheel targeting
+        elsewhere in the codebase.
+        """
+        for member in cls:
+            if member.get_triple_name() == triple:
+                return member
+        raise SmeltError(
+            f"{triple!r} is not a target run_backend can cross-compile extensions for "
+            f"yet (supported: {[m.get_triple_name() for m in cls]})"
+        )
+
 
 class ZigCompiler(Compiler):
     """
@@ -276,9 +297,18 @@ def compile_zig_module(
     import_path: ImportPath,
     path_solver: PathSolver | None = None,
     flags: list[str] | None = None,
+    crosscompile: SupportedPlatforms | None = None,
 ) -> PathExists:
     path_solver = path_solver or PathSolver()
-    flags = flags or []
+    flags = list(flags or [])
+    if crosscompile is not None:
+        # `-Dtarget` is the flag `b.standardTargetOptions(.{})` reads -- the
+        # idiomatic way a `build.zig` exposes cross-compilation. Smelt does not
+        # control the project's own `build.zig` here (see `run_backend`'s own doc,
+        # "a project's own build.zig ... drives zig build end-to-end"), so it is on
+        # that build.zig to forward the target to every step that needs it,
+        # including locating Python headers for the target.
+        flags.append(f"-Dtarget={crosscompile.value}")
     with contextlib.chdir(folder):
         call_command("zig", "build", *flags)
         lib_path = Path.cwd() / "zig-out" / "lib" / _zig_shared_lib_name(name)
@@ -287,8 +317,11 @@ def compile_zig_module(
             f"Ran `zig build` successfully, but no library `{lib_path}` was found afterwards"
             "Check that the name of the project is properly configured, as well as your build.zig"
         )
-    # TODO crosscompile
-    suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    suffix = (
+        get_extension_suffix(crosscompile.get_triple_name())
+        if crosscompile is not None
+        else sysconfig.get_config_var("EXT_SUFFIX")
+    )
     target_path = path_solver.resolve_import_path(
         import_path, file_extension=suffix, should_exist=False
     )

@@ -40,6 +40,7 @@ from smelt.config import (
 )
 from smelt.context import enable_global_context, get_context
 from smelt.dist import build_dist, run_instructions
+from smelt.own_python import target_python_headers_for
 from smelt.utils import (
     ImportPath,
     PathExists,
@@ -716,24 +717,33 @@ def compile_module(
     except SmeltConfigError as exc:
         error_exit(str(exc))
 
+    target_platform = SupportedPlatforms(crosscompile) if crosscompile else None
+    py_headers = (
+        target_python_headers_for(target_platform.get_triple_name())
+        if target_platform is not None
+        else None
+    )
+
     if backend == "nuitka":
         config = NuitkaModule(module_import_path, module_source)
         generic_ext = nuitkaify_module(config, path_solver, stdout="stdout")
 
     elif backend == "mypyc":
-        target_platform = SupportedPlatforms(crosscompile) if crosscompile else None
-        target_triple_name = None if target_platform is None else target_platform.get_triple_name()
         modules = [MypycModule(module_import_path)]
         (generic_ext,) = compile_mypyc_extensions(modules, path_solver)
 
     elif backend == "cython":
         modules = [CythonExtension(module_import_path)]
         (generic_ext,) = compile_cython_extensions(modules, path_solver=path_solver)
-    compiled_so = compile_extension(generic_ext.extension)
+    compiled_so = compile_extension(
+        generic_ext.extension, crosscompile=target_platform, py_headers=py_headers
+    )
     dest_path = generic_ext.dest_folder / compiled_so
     shutil.move(compiled_so, dest_path)
     if runtime := generic_ext.runtime:
-        runtime_compiled_so = compile_extension(runtime)
+        runtime_compiled_so = compile_extension(
+            runtime, crosscompile=target_platform, py_headers=py_headers
+        )
         shutil.move(runtime_compiled_so, generic_ext.dest_folder / runtime_compiled_so)
     click.echo(f"Compiled so path: {dest_path}")
 
