@@ -117,6 +117,12 @@ metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@6d27
 # on as unearth's own transitive dependency) since smelt.isolated_build imports it
 # directly too, to parse [project.dependencies] specifiers.
 isolated-build = ["unearth", "packaging"]
+# puccinialin: installs a standalone rustup/cargo (no system Rust needed), the same
+# "fully standalone toolchain" goal `ziglang` already gets smelt for C/C++/Zig --
+# see smelt.rust.toolchain. maturin: the Rust/Python build frontend smelt.rust.maturin
+# drives against that toolchain, cross-linking through smelt's own `ziglang` dependency
+# via maturin's own `--zig` flag instead of a system C toolchain.
+rust = ["puccinialin", "maturin"]
 build = [
   "Cython",
   "nuitka[onefile]<4.2",

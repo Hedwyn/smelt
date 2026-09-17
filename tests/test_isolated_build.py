@@ -209,9 +209,9 @@ def test_resolve_isolated_build_versions_rejects_an_unknown_strategy() -> None:
 
 def test_resolve_target_platforms_prefers_the_caller_then_the_declaration() -> None:
     assert resolve_target_platforms(EntrypointOptions()) == [None]
-    assert resolve_target_platforms(
-        EntrypointOptions({"target": ["aarch64-linux-gnu"]})
-    ) == ["aarch64-linux-gnu"]
+    assert resolve_target_platforms(EntrypointOptions({"target": ["aarch64-linux-gnu"]})) == [
+        "aarch64-linux-gnu"
+    ]
     assert resolve_target_platforms(
         EntrypointOptions({"target": ["aarch64-linux-gnu"]}),
         ["x86_64-linux-musl"],

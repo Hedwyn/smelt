@@ -121,9 +121,7 @@ class CliCommaSeparated(ParamType):
 
     name = "comma_separated"
 
-    def convert(
-        self, value: str, param: Parameter | None, ctx: Context | None
-    ) -> tuple[str, ...]:
+    def convert(self, value: str, param: Parameter | None, ctx: Context | None) -> tuple[str, ...]:
         _ = param
         _ = ctx
         return tuple(item.strip() for item in value.split(",") if item.strip())
@@ -139,9 +137,7 @@ class CliCommaSeparatedChoice(ParamType):
         self.choices = list(choices)
         self.name = "|".join(self.choices)
 
-    def convert(
-        self, value: str, param: Parameter | None, ctx: Context | None
-    ) -> tuple[str, ...]:
+    def convert(self, value: str, param: Parameter | None, ctx: Context | None) -> tuple[str, ...]:
         items = tuple(item.strip() for item in value.split(",") if item.strip())
         for item in items:
             if item not in self.choices:
