@@ -115,8 +115,12 @@ metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@6d27
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
 # without needing to actually run there. packaging: listed explicitly (not just relied
 # on as unearth's own transitive dependency) since smelt.isolated_build imports it
-# directly too, to parse [project.dependencies] specifiers.
-isolated-build = ["unearth", "packaging"]
+# directly too, to parse [project.dependencies] specifiers. cffi: `cryptography`'s
+# own `cryptography-cffi` Rust crate shells out to a real Python (see
+# smelt.vendoring.cryptography's PYO3_PYTHON) to run its checked-in
+# `_cffi_src/build_openssl.py` at build time, which needs `cffi` importable there --
+# this host's own `cffi`, not the target's (nothing here runs on the target).
+isolated-build = ["unearth", "packaging", "cffi"]
 # puccinialin: installs a standalone rustup/cargo (no system Rust needed), the same
 # "fully standalone toolchain" goal `ziglang` already gets smelt for C/C++/Zig --
 # see smelt.rust.toolchain. maturin: the Rust/Python build frontend smelt.rust.maturin

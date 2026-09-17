@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -95,10 +96,19 @@ def build_with_maturin(
     interpreter: str | None = None,
     release: bool = True,
     emit_objects: bool = False,
+    extra_env: Mapping[str, str] = {},
 ) -> MaturinBuildResult:
     """
     Builds `manifest_path`'s crate (a `Cargo.toml`) into a wheel via `maturin build`,
     using `toolchain` instead of any system Rust install.
+
+    `extra_env`, layered over `toolchain.subprocess_env()`, is for build-time
+    configuration this crate's own `Cargo.toml`/`build.rs` reads from the
+    environment rather than from a CLI flag -- e.g. a vendored dependency's
+    `<DEP>_STATIC`/`<DEP>_DIR` (`openssl-sys`'s `OPENSSL_STATIC`/`OPENSSL_DIR`,
+    see `smelt.vendoring.cryptography`) or `PYO3_CROSS_LIB_DIR`/`PYO3_CONFIG_FILE`
+    for a cross build a hybrid cffi/PyO3 crate's own build script needs to compile
+    generated C code against the *target*'s `Python.h` rather than this host's own.
 
     `zig_target` is this codebase's own Zig-triple-shaped target string (`None` for a
     native build, resolved to this host's own Rust triple via
@@ -150,7 +160,9 @@ def build_with_maturin(
     if emit_objects:
         cmd += ["--", "-C", "save-temps"]
 
-    result = subprocess.run(cmd, env=toolchain.subprocess_env(), capture_output=True, text=True)
+    result = subprocess.run(
+        cmd, env={**toolchain.subprocess_env(), **extra_env}, capture_output=True, text=True
+    )
     if result.returncode != 0:
         raise MaturinBuildError(
             f"`maturin build` failed for {manifest_path} (target {rust_triple!r}):\n"

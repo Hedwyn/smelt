@@ -419,8 +419,11 @@ def prepare_isolated_natives(
     Checked *first*, before any wheel lookup: whether `owning_distribution` has a
     `smelt.vendoring` provider registered for it (see `smelt.vendoring.get_provider`)
     -- a registered distribution is built from source instead and never touches
-    `unearth`/the package index at all. Only a distribution with no provider falls
-    through to fetching a prebuilt wheel (see `fetch_wheel`), same as before.
+    `unearth`/the package index at all. A distribution with no provider, or whose
+    provider declines this resolved version/target (see
+    `smelt.vendoring.VendoringDeclined` -- e.g. `cryptography` below its Rust
+    transition), falls through to fetching a prebuilt wheel (see `fetch_wheel`)
+    instead, same as before.
 
     A vendored provider's build is either linked into a loose `.so` (returned via
     `IsolatedNativesResult.replacements`, same as a wheel-derived one) or, when
@@ -446,6 +449,11 @@ def prepare_isolated_natives(
     static_modules: dict[ImportPath, list[PathExists]] = {}
     extracted_roots: dict[str, Path] = {}
     vendored_builds: dict[str, tuple[VendoredExtension, PathExists | None]] = {}
+    #: Distributions whose provider declined this resolved version/target (see
+    #: `smelt.vendoring.VendoringDeclined`) -- cached the same way `vendored_builds`
+    #: caches a success, so a second import path from the same distribution does not
+    #: re-attempt (and re-fail the same way) the provider's own fetch/probe.
+    declined_dists: set[str] = set()
     placed_libs_dirs: set[str] = set()
 
     for import_path, resolved in closure.items():
@@ -462,7 +470,7 @@ def prepare_isolated_natives(
         from smelt import vendoring
 
         provider = vendoring.get_provider(dist_name)
-        if provider is not None:
+        if provider is not None and dist_name not in declined_dists:
             if dist_name not in vendored_builds:
                 version_requirement = resolve_isolated_build_version(
                     dist_name, versions, pyproject_dependencies=dependencies
@@ -471,26 +479,33 @@ def prepare_isolated_natives(
                     vendored_build_cache_dir(dist_name, target) / "objects"
                 )
                 build_dir.mkdir(parents=True, exist_ok=True)
-                vendored_builds[dist_name] = vendoring.build_vendored_extension(
-                    provider,
-                    version_requirement,
-                    target,
-                    python_version,
-                    build_dir=build_dir,
-                    static_build_dir=static_build_dir,
-                    py_headers=py_headers,
-                )
-            vext, so_path = vendored_builds[dist_name]
-            if vext.import_path != import_path:
-                # Only a single extension per vendored distribution is supported
-                # today (see `smelt.vendoring.VendoredProvider`) -- nothing else in
-                # this distribution's closure is something this provider built.
+                try:
+                    vendored_builds[dist_name] = vendoring.build_vendored_extension(
+                        provider,
+                        version_requirement,
+                        target,
+                        python_version,
+                        build_dir=build_dir,
+                        static_build_dir=static_build_dir,
+                        py_headers=py_headers,
+                    )
+                except vendoring.VendoringDeclined:
+                    declined_dists.add(dist_name)
+
+            if dist_name not in declined_dists:
+                vext, so_path = vendored_builds[dist_name]
+                if vext.import_path != import_path:
+                    # Only a single extension per vendored distribution is supported
+                    # today (see `smelt.vendoring.VendoredProvider`) -- nothing else
+                    # in this distribution's closure is something this provider built.
+                    continue
+                if so_path is not None:
+                    replacements[import_path] = so_path
+                else:
+                    static_modules[import_path] = vext.objects
                 continue
-            if so_path is not None:
-                replacements[import_path] = so_path
-            else:
-                static_modules[import_path] = vext.objects
-            continue
+            # Declined: fall through to the ordinary wheel-fetch path below, same as
+            # if no provider had been registered for this distribution at all.
 
         if dist_name not in extracted_roots:
             version_requirement = resolve_isolated_build_version(

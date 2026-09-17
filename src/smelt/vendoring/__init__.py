@@ -16,17 +16,22 @@ of a CPython-internal one.
 
 from __future__ import annotations
 
+import shutil
 import sysconfig
 from pathlib import Path
 
 from smelt.compiler import link_extension_objects
 from smelt.isolated_build import canonicalize_distribution_name
 from smelt.own_python import TargetPythonHeaders
-from smelt.utils import PathExists, get_extension_suffix
-from smelt.vendoring.base import VendoredExtension, VendoredProvider
+from smelt.utils import PathExists, SmeltError, assert_path_exists, get_extension_suffix
+from smelt.vendoring.base import VendoredExtension, VendoredProvider, VendoringDeclined
 from smelt.vendoring.cffi import CffiProvider
+from smelt.vendoring.cryptography import CryptographyProvider
 
-_PROVIDERS: dict[str, VendoredProvider] = {"cffi": CffiProvider()}
+_PROVIDERS: dict[str, VendoredProvider] = {
+    "cffi": CffiProvider(),
+    "cryptography": CryptographyProvider(),
+}
 
 
 def get_provider(dist_name: str) -> VendoredProvider | None:
@@ -61,6 +66,9 @@ def build_vendored_extension(
     `Python.h`/`pyconfig.h` pair `smelt.isolated_build.prepare_isolated_natives`
     already resolved (see `smelt.own_python.target_python_headers_for`) --
     unused when `target` is `None` (a native build needs none).
+
+    Propagates `VendoringDeclined` as-is (see `VendoredProvider.compile`) --
+    nothing to build here, the caller falls back to a wheel instead.
     """
     vext = provider.compile(
         version_requirement,
@@ -69,6 +77,23 @@ def build_vendored_extension(
         build_dir=build_dir,
         py_headers=py_headers,
     )
+    if vext.already_linked:
+        if static_build_dir is not None:
+            raise SmeltError(
+                f"{provider!r} produced an already-linked shared object for "
+                f"{vext.import_path!r}, which cannot be staged for static linking "
+                "(no object-file seam to fold into a static interpreter's "
+                "inittab) -- static_build_dir is unsupported for this provider."
+            )
+        (object_path,) = vext.objects
+        so_suffix = (
+            get_extension_suffix(target)
+            if target is not None
+            else sysconfig.get_config_var("EXT_SUFFIX")
+        )
+        so_path = build_dir / f"{vext.module_name}{so_suffix}"
+        shutil.copy(object_path, so_path)
+        return vext, assert_path_exists(so_path)
     if static_build_dir is not None:
         return vext, None
     so_suffix = (
