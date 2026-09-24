@@ -125,6 +125,45 @@ class RustToolchain:
         return {**os.environ, **self.env}
 
 
+def _cached_toolchain_env(install_dir: Path) -> dict[str, str] | None:
+    """
+    The `extra_env` `puccinialin.setup_rust(installation_dir=install_dir)` would
+    return, without invoking it -- `None` if no working `cargo` is there yet (first
+    call for this `install_dir`, or a partial/corrupted previous one).
+
+    `puccinialin.setup_rust` has no such short-circuit itself: it re-runs
+    `rustup-init -y --no-modify-path ...` unconditionally on every call. Harmless --
+    `rustup-init` is itself idempotent, and `-y`/`--no-modify-path` make its own
+    "Rust is already installed" PATH scan (routinely tripped by a distro-packaged
+    `rustc` on `$PATH`; irrelevant to this isolated, non-PATH-modifying install) a
+    non-issue -- but it still means every single smelt build spawns `rustup-init` and
+    prints its full warning block for what should be a no-op once the toolchain
+    already exists here. Mirrors `puccinialin`'s own paths (`<install_dir>/rustup`,
+    `<install_dir>/cargo`) and final health check (`cargo --version`) exactly, so a
+    skip here is indistinguishable from one it would have performed itself.
+    """
+    rustup_home = install_dir / "rustup"
+    cargo_home = install_dir / "cargo"
+    cargo = cargo_home / "bin" / "cargo"
+    if not cargo.is_file() or not os.access(cargo, os.X_OK):
+        return None
+    extra_env = {
+        "RUSTUP_HOME": str(rustup_home),
+        "CARGO_HOME": str(cargo_home),
+        "PATH": f"{cargo_home / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+    }
+    try:
+        subprocess.run(
+            [str(cargo), "--version"],
+            env={**os.environ, **extra_env},
+            check=True,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    return extra_env
+
+
 def ensure_rust_toolchain(install_dir: Path | str | None = None) -> RustToolchain:
     """
     Fetches (or reuses an already-fetched) standalone Rust toolchain via `puccinialin`
@@ -134,22 +173,27 @@ def ensure_rust_toolchain(install_dir: Path | str | None = None) -> RustToolchai
 
     `install_dir` defaults to a single cache directory (`_RUST_TOOLCHAIN_CACHE_DIR`)
     reused across builds -- mirrors `smelt.own_python.own_python_cache_dir`/
-    `smelt.isolated_build.vendored_build_cache_dir`. `puccinialin.setup_rust` is itself
-    idempotent against an existing install there (it only (re-)downloads what is
-    missing), so a repeat call is cheap.
+    `smelt.isolated_build.vendored_build_cache_dir`. Checked via `_cached_toolchain_env`
+    first (see its own doc for why `puccinialin.setup_rust` itself is not enough of a
+    no-op to skip calling): only a `_cached_toolchain_env` miss falls through to it
+    (and, with it, the `rust` extra's own import requirement -- an already-cached
+    toolchain needs `puccinialin` installed no more than it needs to run again).
     """
-    try:
-        import puccinialin
-    except ImportError as exc:
-        raise ImportError(
-            "puccinialin is not installed, so smelt cannot fetch a standalone Rust "
-            "toolchain. Install this package with the rust extra: "
-            "`uv pip install 'smelt[rust]'`."
-        ) from exc
-
     install_dir = Path(install_dir) if install_dir is not None else _RUST_TOOLCHAIN_CACHE_DIR
     install_dir.mkdir(parents=True, exist_ok=True)
-    extra_env = puccinialin.setup_rust(installation_dir=install_dir)
+
+    extra_env = _cached_toolchain_env(install_dir)
+    if extra_env is None:
+        try:
+            import puccinialin
+        except ImportError as exc:
+            raise ImportError(
+                "puccinialin is not installed, so smelt cannot fetch a standalone "
+                "Rust toolchain. Install this package with the rust extra: "
+                "`uv pip install 'smelt[rust]'`."
+            ) from exc
+        extra_env = puccinialin.setup_rust(installation_dir=install_dir)
+
     return RustToolchain(
         cargo_home=assert_path_exists(extra_env["CARGO_HOME"]),
         rustup_home=assert_path_exists(extra_env["RUSTUP_HOME"]),

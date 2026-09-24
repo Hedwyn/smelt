@@ -321,11 +321,12 @@ def is_cpu_cross_target(zig_target: str | None) -> bool:
     real; a different-arch target's cannot, so meta-python enters real `--host`/`--build`
     cross mode instead and applies its own `CROSS_FIXUPS`/`ArchProfile` pyconfig.h
     patches on top (see `cpu_cross_compile_pyconfig_plan.md`). Both
-    `_resolve_pyconfig_header` and `_build_interpreter` use this to know when they
-    must steer `openssl`/`sqlite` away from meta-python's static default, via
-    `_cross_unsupported_static_libraries` below -- that default isn't supported yet
-    for a CPU-arch cross build, and meta-python hard-panics rather than silently
-    building something broken.
+    `_resolve_pyconfig_header` and `_build_interpreter` use this to know when a
+    `LIBRARY_MODULES` entry needs steering away from meta-python's static default
+    for a CPU-arch cross build, via `_cross_unsupported_static_libraries` below --
+    empty today (both `openssl` and `sqlite` used to hard-panic there, meta-python
+    fixed both), but kept as its own check for whichever library hits this wall
+    next.
     """
     if zig_target is None:
         return False
@@ -335,10 +336,21 @@ def is_cpu_cross_target(zig_target: str | None) -> bool:
 
 
 #: `LIBRARY_MODULES` entries meta-python cannot yet link statically for a CPU-arch
-#: cross target -- `openssl-linkage=static`/`sqlite-linkage=static` hard-panic there
-#: (see `cpu_cross_compile_pyconfig_plan.md`), while every other library either has
-#: no static/dynamic distinction relevant here or hasn't been observed to fail.
-_CROSS_UNSAFE_STATIC_LIBRARIES: Final[tuple[str, ...]] = ("openssl", "sqlite")
+#: cross target. Empty now: both `openssl` and `sqlite` used to hard-panic there
+#: (see `cpu_cross_compile_pyconfig_plan.md`), but meta-python fixed both --
+#: `openssl` by vendoring it from scratch (arch-agnostic, no more x86_64-only
+#: asm), `sqlite` by resolving a build-root-relative dependency path that was
+#: silently pointing `./configure`'s own `-I` at a nonexistent directory (see
+#: `is_cpu_cross_target`'s own doc). Steering either away to `dynamic` instead
+#: was silently worse than doing nothing: meta-python's `dynamic` path runs a
+#: real `./configure` probe against *this host's* library, which can never
+#: answer for a foreign target, so the extension was quietly built for nobody
+#: rather than for the host -- dropped from the target's own module set with no
+#: skip message at all (unlike `_blake2`/`readline`/`nis`/`_uuid`, which do log
+#: one). Kept as a named, empty tuple rather than deleted outright: the next
+#: library that hits this same "static default not supported for a CPU-arch
+#: cross target" wall has a place to go.
+_CROSS_UNSAFE_STATIC_LIBRARIES: Final[tuple[str, ...]] = ()
 
 
 def _cross_unsupported_static_libraries(
@@ -1003,9 +1015,13 @@ def _resolve_pyconfig_header(
     matter.
 
     Mutates meta-python's shared checkout the same way a real build does (deletes
-    `cpython/Makefile`/`pyconfig.h`, clears `.zig-cache`), so the result is copied out
-    to `dest` (the caller's own build cache directory, not meta-python's shared one)
-    before the real build's *own* cleanup would remove it again. Like
+    `cpython/Makefile`/`pyconfig.h`, clears `.zig-cache`), so both the header *and*
+    the `Makefile` `./configure` wrote alongside it are copied out to `dest` (the
+    caller's own build cache directory, not meta-python's shared one) before the
+    real build's *own* cleanup would remove them again -- the `Makefile` is what
+    lets `target_sysconfigdata_for` derive a target's build-time variables the way
+    CPython's own `sysconfig._generate_posix_vars` does, without which `pyconfig.h`
+    alone is not enough (see that function's own doc). Like
     `_build_interpreter`, assumes the caller already holds `interpreter_build_lock` --
     it does *not* take the lock itself, since it is only ever called from inside a
     `with interpreter_build_lock():` block already (`fcntl.flock` is not reentrant
@@ -1054,14 +1070,16 @@ def _resolve_pyconfig_header(
     )
     cpython_dir = _cpython_source_dir(python_version)
     produced = cpython_dir / "pyconfig.h"
-    if not produced.is_file():
+    produced_makefile = cpython_dir / "Makefile"
+    if not produced.is_file() or not produced_makefile.is_file():
         raise OwnPythonError(
             f"./configure (via meta-python's 'configure' step) did not produce "
-            f"{produced} for target {target or 'native'!r}."
+            f"pyconfig.h/Makefile in {cpython_dir} for target {target or 'native'!r}."
         )
     dest.mkdir(parents=True, exist_ok=True)
     resolved = dest / "pyconfig.h"
     shutil.copy2(produced, resolved)
+    shutil.copy2(produced_makefile, dest / "Makefile")
     return assert_path_exists(resolved)
 
 
@@ -1135,13 +1153,19 @@ def pyconfig_header_for_target(
     irrelevant to a header used purely as an extension-compile include, so this
     always resolves the release-mode one.
 
+    The cache hit check also requires the companion `Makefile` (see
+    `makefile_for_target`) to already be there, not just `pyconfig.h` -- so a
+    directory cached by a version of this function older than `makefile_for_target`
+    (pyconfig.h alone) self-heals with one more (cheap, seconds-long) `./configure`
+    run instead of `makefile_for_target` finding it permanently missing.
+
     Consider `target_python_headers_for` instead: this returns `pyconfig.h` alone,
     which -- per `TargetPythonHeaders`'s own doc -- is not by itself enough to
     correctly compile a C source against a foreign target's Python C-API.
     """
     dest = own_python_cache_dir(target, python_version=python_version) / "pyconfig-only"
     cached = dest / "pyconfig.h"
-    if cached.is_file():
+    if cached.is_file() and (dest / "Makefile").is_file():
         return assert_path_exists(cached)
     with interpreter_build_lock():
         return _resolve_pyconfig_header(
@@ -1163,6 +1187,80 @@ def target_python_headers_for(
     return TargetPythonHeaders(
         include_dir=cpython_include_dir(python_version), pyconfig_dir=header.parent
     )
+
+
+def makefile_for_target(
+    target: str,
+    *,
+    python_version: str = DEFAULT_CPYTHON_VERSION,
+) -> PathExists:
+    """
+    Companion to `pyconfig_header_for_target`: the `Makefile` `./configure` wrote
+    alongside that `pyconfig.h`, from the same run -- cached in the same directory
+    (see `_resolve_pyconfig_header`). Needed to derive a target's build-time
+    variables (`SOABI`, `EXT_SUFFIX`, `Py_DEBUG`, ...) the way CPython's own
+    `sysconfig._generate_posix_vars` does; `pyconfig.h` alone only carries the
+    `#define`-shaped subset of those (see `target_sysconfigdata_for`).
+    """
+    dest = own_python_cache_dir(target, python_version=python_version) / "pyconfig-only"
+    cached = dest / "Makefile"
+    if not cached.is_file():
+        # Runs `./configure` and populates both `pyconfig.h` and `Makefile` in
+        # `dest` as a side effect -- same cache directory, same cache check.
+        pyconfig_header_for_target(target, python_version=python_version)
+    return assert_path_exists(cached)
+
+
+def target_sysconfigdata_for(
+    target: str,
+    *,
+    python_version: str = DEFAULT_CPYTHON_VERSION,
+) -> PathExists:
+    """
+    A `_sysconfigdata`-shaped module for `target`: `build_time_vars`, a dict of
+    every `Makefile` variable and `pyconfig.h` macro, generated the same way
+    CPython's own `sysconfig._generate_posix_vars` builds one during a real build
+    -- by reusing `sysconfig`'s own (private) `_parse_makefile`/`parse_config_h`
+    parsers against `makefile_for_target`/`pyconfig_header_for_target`'s pair,
+    rather than reimplementing that parsing by hand or re-deriving it from
+    `pyconfig.h` alone (which carries none of the `Makefile`-only variables, e.g.
+    `SOABI`).
+
+    Not a *real* target install's sysconfigdata -- no target interpreter was ever
+    built here (see `pyconfig_header_for_target`'s own doc) -- and not spelled the
+    way a real one would be either (that name embeds this *host's* own
+    `sys.platform`/multiarch, meaningless for a foreign target). Only meant to be
+    discovered by a build-time tool's own `_sysconfigdata*.py` glob (e.g.
+    `pyo3-build-config`'s `PYO3_CROSS_LIB_DIR` resolution -- see
+    `smelt.vendoring.cryptography`), never imported by a real running interpreter.
+
+    Cached under the same directory `pyconfig_header_for_target`/
+    `makefile_for_target` already cache into.
+    """
+    import pprint
+    import sysconfig as _sysconfig
+
+    dest = own_python_cache_dir(target, python_version=python_version) / "pyconfig-only"
+    sysconfigdata_path = dest / "_sysconfigdata__smelt.py"
+    if sysconfigdata_path.is_file():
+        return assert_path_exists(sysconfigdata_path)
+
+    makefile = makefile_for_target(target, python_version=python_version)
+    pyconfig_h = pyconfig_header_for_target(target, python_version=python_version)
+
+    build_time_vars: dict[str, object] = {}
+    _sysconfig._parse_makefile(str(makefile), build_time_vars)
+    with open(pyconfig_h, encoding="utf-8") as f:
+        _sysconfig.parse_config_h(f, build_time_vars)
+
+    with open(sysconfigdata_path, "w", encoding="utf-8") as f:
+        f.write(
+            "# Generated by smelt (smelt.own_python.target_sysconfigdata_for) -- "
+            "not a real target install's sysconfigdata, see that function's own doc.\n"
+        )
+        f.write("build_time_vars = ")
+        pprint.pprint(build_time_vars, stream=f)
+    return assert_path_exists(sysconfigdata_path)
 
 
 def own_python_cache_dir(

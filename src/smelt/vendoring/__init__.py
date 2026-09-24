@@ -27,10 +27,12 @@ from smelt.utils import PathExists, SmeltError, assert_path_exists, get_extensio
 from smelt.vendoring.base import VendoredExtension, VendoredProvider, VendoringDeclined
 from smelt.vendoring.cffi import CffiProvider
 from smelt.vendoring.cryptography import CryptographyProvider
+from smelt.vendoring.pyomq import PyomqProvider
 
 _PROVIDERS: dict[str, VendoredProvider] = {
     "cffi": CffiProvider(),
     "cryptography": CryptographyProvider(),
+    "pyomq": PyomqProvider(),
 }
 
 

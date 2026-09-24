@@ -368,6 +368,38 @@ def _find_shadowed_source(origin: PathExists, *, is_package: bool) -> PathExists
     return candidate if path_exists(candidate) else None
 
 
+def _spec_from_live_module(import_path: ImportPath) -> importlib.machinery.ModuleSpec | None:
+    """
+    Reconstructs a usable spec from an already-imported module's own `__file__`/
+    `__path__`, for the one shape `importlib.util.find_spec` refuses outright: a
+    module already sitting in `sys.modules` whose own `__spec__` is unset or
+    `None` (`find_spec` raises `ValueError` for exactly that case, rather than
+    falling back to anything).
+
+    Some libraries do this deliberately -- e.g. `cryptography.utils.
+    _ModuleWithDeprecations` replaces a deprecated submodule's own `sys.modules`
+    entry with a wrapper object that forwards attribute access (to warn on it)
+    but never sets `__spec__` -- even though the module is real, already loaded,
+    and has a perfectly good `__file__` (`cryptography.hazmat.primitives.
+    asymmetric.dh`/`ciphers.algorithms`/`ciphers.modes` all hit this).
+
+    Only recovers that one shape; returns `None` for anything else (a module
+    truly absent from `sys.modules`, or with no `__file__` either), so a
+    genuinely missing or broken import still falls through to
+    `ModuleKind.MISSING`.
+    """
+    module = sys.modules.get(import_path)
+    origin = getattr(module, "__file__", None)
+    if origin is None:
+        return None
+    search_locations = getattr(module, "__path__", None)
+    return importlib.util.spec_from_file_location(
+        import_path,
+        origin,
+        submodule_search_locations=list(search_locations) if search_locations is not None else None,
+    )
+
+
 def resolve_module(import_path: ImportPath) -> ResolvedModule:
     """
     Resolves `import_path` against the import machinery and classifies it.
@@ -388,9 +420,12 @@ def resolve_module(import_path: ImportPath) -> ResolvedModule:
         # platform-specific module, a custom meta-path finder's own errors, or a
         # package that refuses to be imported outside its own runtime. All of them
         # mean the same thing here -- this name cannot be resolved in this
-        # environment -- and none of them should abort a whole build.
-        _logger.debug("Could not resolve %s: %r", import_path, exc)
-        spec = None
+        # environment -- and none of them should abort a whole build. The one
+        # exception recoverable at all is an already-imported module with a dead
+        # `__spec__` (see `_spec_from_live_module`); everything else stays MISSING.
+        spec = _spec_from_live_module(import_path)
+        if spec is None:
+            _logger.debug("Could not resolve %s: %r", import_path, exc)
     if spec is None:
         return ResolvedModule(import_path, ModuleKind.MISSING, None, False, is_stdlib)
 

@@ -89,10 +89,11 @@ class MaturinBuildResult:
 
 def build_with_maturin(
     toolchain: RustToolchain,
-    manifest_path: Path,
+    manifest_path: Path | None,
     out_dir: Path,
     *,
     zig_target: str | None,
+    cwd: Path | None = None,
     interpreter: str | None = None,
     release: bool = True,
     emit_objects: bool = False,
@@ -110,6 +111,25 @@ def build_with_maturin(
     for a cross build a hybrid cffi/PyO3 crate's own build script needs to compile
     generated C code against the *target*'s `Python.h` rather than this host's own.
 
+    `manifest_path` is `None` for a project whose `pyproject.toml` cannot sit next to
+    its `Cargo.toml` -- e.g. `smelt.vendoring.pyomq`'s upstream layout: `pyproject.
+    toml` (and its own `python-source`) at the repo root, `Cargo.toml` nested under
+    `bindings/`, with `[tool.maturin] manifest-path` pointing down at it. `maturin`'s
+    own mixed-layout file walk (`write_python_part`) only ever descends into the
+    *pyproject.toml's own* directory looking for `python-source` files, so passing
+    `--manifest-path` pointing anywhere else silently drops every pure-Python file
+    from the wheel instead of failing loudly -- verified empirically against
+    `pyomq==0.21.0`: an explicit out-of-tree `--manifest-path` still builds and
+    produces a wheel, but with only the native module and an auto-generated stub
+    `__init__.py`, missing that project's entire real Python API. Passing `None`
+    here instead omits `--manifest-path` entirely (requires `cwd`: the directory
+    actually holding that project's `pyproject.toml`), letting `maturin` resolve
+    `manifest-path`/`python-source`/`features`/... itself, exactly as its own CI does.
+
+    `cwd` is the subprocess's working directory -- `None` inherits this process's
+    own, which is fine whenever `manifest_path` is given explicitly (`maturin` never
+    consults the working directory in that case).
+
     `zig_target` is this codebase's own Zig-triple-shaped target string (`None` for a
     native build, resolved to this host's own Rust triple via
     `smelt.rust.toolchain.host_rust_triple` so the produced layout -- see
@@ -123,14 +143,29 @@ def build_with_maturin(
     trailing `maturin build` rustc args) and returns this crate's own compiled object
     files (see `MaturinBuildResult.object_files`) -- smelt's static-link path
     (`smelt.static_python.build_static_interpreter`) needs these, not the finished,
-    dlopen-only `.so` a wheel alone provides.
+    dlopen-only `.so` a wheel alone provides. Requires an explicit `manifest_path`
+    (needed to locate both the crate's own `cargo`-derived lib name and its `target/`
+    directory) -- raises `MaturinBuildError` if combined with `manifest_path=None`.
 
-    Raises `MaturinBuildError` if `maturin build` itself fails; `ImportError` (not
-    `MaturinBuildError`) if `maturin`'s own executable cannot be found, matching every
-    other extra-gated import in this codebase (e.g. `smelt.isolated_build.fetch_wheel`).
+    Raises `MaturinBuildError` if `maturin build` itself fails, or if `manifest_path`
+    and `cwd` are both `None`; `ImportError` (not `MaturinBuildError`) if `maturin`'s
+    own executable cannot be found, matching every other extra-gated import in this
+    codebase (e.g. `smelt.isolated_build.fetch_wheel`).
     """
     maturin = _maturin_executable()
-    manifest_path = assert_path_exists(manifest_path)
+    if manifest_path is not None:
+        manifest_path = assert_path_exists(manifest_path)
+    elif cwd is None:
+        raise MaturinBuildError(
+            "build_with_maturin needs `cwd` (the directory holding that project's "
+            "pyproject.toml) when manifest_path is None."
+        )
+    if emit_objects and manifest_path is None:
+        raise MaturinBuildError(
+            "emit_objects=True needs an explicit manifest_path (to locate the "
+            "crate's own lib name and target/ directory) -- cannot combine with "
+            "manifest_path=None."
+        )
 
     rust_triple = (
         zig_target_to_rust_triple(zig_target) if zig_target is not None else host_rust_triple()
@@ -138,16 +173,10 @@ def build_with_maturin(
     ensure_rust_target(toolchain, rust_triple)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        maturin,
-        "build",
-        "--manifest-path",
-        str(manifest_path),
-        "--target",
-        rust_triple,
-        "-o",
-        str(out_dir),
-    ]
+    cmd = [maturin, "build"]
+    if manifest_path is not None:
+        cmd += ["--manifest-path", str(manifest_path)]
+    cmd += ["--target", rust_triple, "-o", str(out_dir)]
     if release:
         cmd.append("--release")
     if interpreter is not None:
@@ -161,11 +190,15 @@ def build_with_maturin(
         cmd += ["--", "-C", "save-temps"]
 
     result = subprocess.run(
-        cmd, env={**toolchain.subprocess_env(), **extra_env}, capture_output=True, text=True
+        cmd,
+        cwd=cwd,
+        env={**toolchain.subprocess_env(), **extra_env},
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         raise MaturinBuildError(
-            f"`maturin build` failed for {manifest_path} (target {rust_triple!r}):\n"
+            f"`maturin build` failed for {manifest_path or cwd} (target {rust_triple!r}):\n"
             f"{result.stdout}\n{result.stderr}"
         )
 
@@ -178,6 +211,8 @@ def build_with_maturin(
 
     object_files: list[PathExists] = []
     if emit_objects:
+        # Guaranteed above: raised already if emit_objects and manifest_path is None.
+        assert manifest_path is not None
         crate_name = _crate_lib_name(manifest_path)
         profile_dir = "release" if release else "debug"
         deps_dir = manifest_path.parent / "target" / rust_triple / profile_dir / "deps"

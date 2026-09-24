@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Final
 
 from smelt.isolated_build import extract_wheel, locate_native_in_wheel, vendored_build_cache_dir
-from smelt.own_python import TargetPythonHeaders
+from smelt.own_python import TargetPythonHeaders, target_sysconfigdata_for
 from smelt.rust.maturin import build_with_maturin
 from smelt.rust.toolchain import (
     ensure_rust_target,
@@ -58,18 +58,6 @@ _RUST_IMPORT_PATH: Final[ImportPath] = assert_is_valid_import_path(
     "cryptography.hazmat.bindings._rust"
 )
 
-#: Rust target arch -> pointer width, for the hand-written `PYO3_CONFIG_FILE` a
-#: cross build needs (see `_pyo3_cross_config`). Mirrors the arch set
-#: `smelt.rust.toolchain.zig_target_to_rust_triple` itself supports -- nothing
-#: to gain from a richer table here, since an unsupported arch already fails
-#: one step earlier, at the triple mapping.
-_ARCH_POINTER_WIDTH: Final[dict[str, int]] = {
-    "x86_64": 64,
-    "aarch64": 64,
-    "arm": 32,
-    "x86": 32,
-}
-
 
 class CryptographyVendoringError(SmeltError):
     """
@@ -94,76 +82,67 @@ def _extract_sdist(sdist_path: PathExists, dest_dir: Path) -> None:
 
 
 def _pyo3_cross_lib_dir(
-    py_headers: TargetPythonHeaders, python_version: tuple[int, int], *, cache_dir: Path
+    target: str,
+    py_headers: TargetPythonHeaders,
+    python_version: tuple[int, int],
+    *,
+    cache_dir: Path,
 ) -> Path:
     """
     A synthetic `<prefix>/lib/pythonX.Y` directory for `PYO3_CROSS_LIB_DIR` --
-    `cryptography`'s own `cryptography-cffi` build script (see this module's own
-    doc) derives its C-compile include path from it as
-    `<prefix>/include/pythonX.Y`, so that directory is populated with *both*
-    `Python.h` (and everything it pulls in, from `py_headers.include_dir`) *and*
-    the target-correct `pyconfig.h` (from `py_headers.pyconfig_dir`) side by side
-    -- same reasoning as `TargetPythonHeaders`'s own doc: `Python.h`'s `#include
-    "pyconfig.h"` is a quoted include resolved against its *own* directory first,
-    so the two have to actually sit together for the right one to be found at all.
+    both `cryptography`'s own `cryptography-cffi` build script (see this module's
+    own doc) and `maturin`/`pyo3-build-config`'s own cross-compile resolution read
+    from it:
 
-    Cached under `cache_dir` (keyed by the caller on distribution/target), so a
-    second build for the same target does not repopulate it.
+    * `cryptography-cffi`'s `build.rs` derives its C-compile include path from it
+      as `<prefix>/include/pythonX.Y`, populated here with *both* `Python.h` (and
+      everything it pulls in, from `py_headers.include_dir`) *and* the
+      target-correct `pyconfig.h` (from `py_headers.pyconfig_dir`) side by side --
+      same reasoning as `TargetPythonHeaders`'s own doc: `Python.h`'s `#include
+      "pyconfig.h"` is a quoted include resolved against its *own* directory
+      first, so the two have to actually sit together for the right one to be
+      found at all.
+    * `maturin`/`pyo3-build-config` glob `PYO3_CROSS_LIB_DIR` itself for a
+      `_sysconfigdata*.py` module, the way a real target Python install would
+      have one -- populated here from `smelt.own_python.target_sysconfigdata_for`.
+
+    `target_sysconfigdata_for` is called with its own default `python_version`
+    (a full pinned CPython version, e.g. `"3.12.13"`) rather than deriving one
+    from this function's own `python_version: tuple[int, int]` (major.minor
+    only, the ABI-relevant granularity `isolated-build` itself works in): that
+    default is exactly what `py_headers` was already resolved against (its
+    caller, `smelt.isolated_build.prepare_isolated_natives`, calls
+    `smelt.own_python.target_python_headers_for` the same way), and the two have
+    to come from the *same* `./configure` run -- see `TargetPythonHeaders`'s own
+    doc for why mismatched pairs are silently wrong rather than an error.
+    `python_version` (major.minor) is only used here to name the `pythonX.Y`
+    directories themselves, matching a real Python install's own convention.
+
+    Cached under `cache_dir` (keyed by the caller on distribution/target) -- keyed
+    on the `_sysconfigdata*.py` file itself (the last artifact written) rather than
+    `include_dir`'s own existence, so a run that failed partway through (e.g. before
+    `target_sysconfigdata_for` itself existed, or on a genuine failure) does not
+    leave a permanently-incomplete cache behind: the next call redoes the whole
+    thing rather than finding `include_dir` already there and stopping short of
+    ever (re)writing the sysconfigdata file.
     """
     py_ver = f"{python_version[0]}.{python_version[1]}"
     include_dir = cache_dir / "include" / f"python{py_ver}"
     lib_dir = cache_dir / "lib" / f"python{py_ver}"
-    if not include_dir.is_dir():
+    sysconfigdata_dest = lib_dir / "_sysconfigdata__smelt.py"
+    if not sysconfigdata_dest.is_file():
         lib_dir.mkdir(parents=True, exist_ok=True)
-        include_dir.mkdir(parents=True)
+        include_dir.mkdir(parents=True, exist_ok=True)
         for entry in py_headers.include_dir.iterdir():
             dest = include_dir / entry.name
             if entry.is_dir():
-                shutil.copytree(entry, dest)
+                shutil.copytree(entry, dest, dirs_exist_ok=True)
             else:
                 shutil.copy(entry, dest)
         shutil.copy(py_headers.pyconfig_dir / "pyconfig.h", include_dir / "pyconfig.h")
+        sysconfigdata = target_sysconfigdata_for(target)
+        shutil.copy(sysconfigdata, sysconfigdata_dest)
     return lib_dir
-
-
-def _pyo3_config_file(
-    zig_target: str, python_version: tuple[int, int], *, cache_dir: Path
-) -> Path:
-    """
-    A hand-written `PYO3_CONFIG_FILE` for a cross build, bypassing `maturin`'s own
-    default cross-compile resolution: that path looks for a target `_sysconfigdata*
-    .py` module under `PYO3_CROSS_LIB_DIR` (as a real target Python install would
-    have), which `smelt.own_python.target_python_headers_for` does not produce (it
-    resolves `pyconfig.h` alone, without building a full target interpreter -- see
-    its own doc). Since `cryptography`'s crate builds against the stable ABI
-    (`abi3`), every field this file needs is already known statically, with no
-    need to introspect a target interpreter at all.
-    """
-    arch = zig_target.partition("-")[0]
-    pointer_width = _ARCH_POINTER_WIDTH.get(arch)
-    if pointer_width is None:
-        raise CryptographyVendoringError(
-            f"No known pointer width for Zig arch {arch!r} (from {zig_target!r}) -- "
-            f"supported: {sorted(_ARCH_POINTER_WIDTH)}"
-        )
-    py_ver = f"{python_version[0]}.{python_version[1]}"
-    config_path = cache_dir / "pyo3-config.txt"
-    config_path.write_text(
-        "\n".join(
-            [
-                "implementation=CPython",
-                f"version={py_ver}",
-                "shared=true",
-                "abi3=true",
-                f"lib_name=python{py_ver}",
-                f"pointer_width={pointer_width}",
-                "build_flags=",
-                "suppress_build_script_link_lines=false",
-            ]
-        )
-        + "\n"
-    )
-    return config_path
 
 
 class CryptographyProvider:
@@ -249,10 +228,9 @@ class CryptographyProvider:
                     "Python headers (see smelt.own_python.target_python_headers_for)"
                 )
             extra_env["PYO3_CROSS_LIB_DIR"] = str(
-                _pyo3_cross_lib_dir(py_headers, python_version, cache_dir=cache_dir / "pyo3")
-            )
-            extra_env["PYO3_CONFIG_FILE"] = str(
-                _pyo3_config_file(target, python_version, cache_dir=cache_dir / "pyo3")
+                _pyo3_cross_lib_dir(
+                    target, py_headers, python_version, cache_dir=cache_dir / "pyo3"
+                )
             )
         else:
             rust_triple = host_rust_triple()

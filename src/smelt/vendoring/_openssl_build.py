@@ -73,9 +73,7 @@ def build_openssl(target: str | None, *, build_dir: Path) -> OpensslBuild:
                 "`uv pip install 'smelt[metapython]'`."
             ) from exc
 
-        openssl_project_dir = (
-            Path(metapython.__file__).parent / "_vendor" / "vendoring" / "openssl"
-        )
+        openssl_project_dir = Path(metapython.__file__).parent / "_vendor" / "vendoring" / "openssl"
         build_dir.mkdir(parents=True, exist_ok=True)
         zig = fetch.zig_toolchain()
         cmd = [str(zig), "build", "--prefix", str(build_dir)]
