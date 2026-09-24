@@ -24,9 +24,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
 
+from smelt.backend import _compile_place_or_stage, _cythonize_one, _mypycify_one
+from smelt.compiler import SupportedPlatforms
+from smelt.config import Backend, CythonExtension, MypycModule
 from smelt.explorer import ModuleKind, ResolvedModule
+from smelt.manifest import read_manifest_module
 from smelt.own_python import TargetPythonHeaders
-from smelt.utils import ImportPath, PathExists, SmeltError, assert_path_exists
+from smelt.utils import (
+    GenericExtension,
+    ImportPath,
+    PathExists,
+    PathSolver,
+    SmeltError,
+    assert_path_exists,
+)
 
 if TYPE_CHECKING:
     # `smelt.vendoring` imports back from this module (see `prepare_isolated_natives`'s
@@ -394,6 +405,172 @@ class IsolatedNativesResult:
     static_modules: dict[ImportPath, list[PathExists]] = field(default_factory=dict)
 
 
+def rebuild_manifested_extensions(
+    dist_name: str,
+    closure: dict[ImportPath, ResolvedModule],
+    *,
+    target: str | None,
+    python_version: tuple[int, int],
+    py_headers: TargetPythonHeaders | None,
+    static_build_dir: Path | None,
+) -> IsolatedNativesResult:
+    """
+    Rebuilds `dist_name`'s manifested (see `smelt.manifest`) `ModuleKind.EXTENSION`
+    closure entries from their shadowed `.py` source (`ResolvedModule.shadowed_source`)
+    instead of requiring a prebuilt wheel -- the manifest-driven counterpart to
+    `smelt.vendoring`'s hand-registered from-source providers, generic over any
+    distribution smelt itself compiled instead of needing one written per package.
+
+    Declines (returns an empty result, the same "nothing here" shape
+    `VendoringDeclined` gives `smelt.vendoring` callers) when `dist_name` has no
+    manifest at all. Per closure entry, also declines -- leaving that one import
+    path absent from the result -- when it names a `Backend.NUITKA` module (no
+    cross-compile pipeline exists for Nuitka anywhere in smelt yet, mirroring
+    `run_backend`'s own refusal), an import path the manifest does not know about,
+    or a manifested module with no `shadowed_source` left on disk. A declined entry
+    falls through to `prepare_isolated_natives`'s existing `smelt.vendoring`/
+    `fetch_wheel` path unchanged.
+
+    `python_version` is accepted for symmetry with `smelt.vendoring.
+    build_vendored_extension`'s own signature (every other `prepare_isolated_natives`
+    branch takes it) but unused here: `_mypycify_one`/`_cythonize_one` compile
+    against whichever interpreter smelt itself is currently running under, same as
+    `run_backend` compiling a project's own modules.
+    """
+    empty = IsolatedNativesResult()
+    dist_entries = {
+        import_path: resolved
+        for import_path, resolved in closure.items()
+        if resolved.kind == ModuleKind.EXTENSION and owning_distribution(import_path) == dist_name
+    }
+    if not dist_entries:
+        return empty
+    # `dist_name` (a PyPI distribution name) and the *import* top-level package name
+    # usually coincide, but are not guaranteed to (e.g. "Pillow" installs "PIL") --
+    # `read_manifest_module` needs the latter, so it is taken from an actual closure
+    # entry rather than assumed equal to `dist_name`.
+    top_level_package = next(iter(dist_entries)).partition(".")[0]
+    manifest = read_manifest_module(top_level_package)
+    if not manifest:
+        return empty
+
+    crosscompile = SupportedPlatforms.from_triple(target) if target is not None else None
+    target_triple = crosscompile.get_triple_name() if crosscompile is not None else None
+    rebuild_dest_folder = (
+        isolated_build_cache_dir(dist_name, importlib.metadata.version(dist_name), target)
+        / "rebuilt"
+    )
+    path_solver = PathSolver()
+
+    #: The top-level package's own directory, symlinked into an otherwise-empty
+    #: staging directory the first time it is needed, then reused. Compiling
+    #: `shadowed_source` straight from its real location (normally inside the
+    #: dependency's own `site-packages` install) makes mypyc's own mypy typecheck
+    #: walk up from it looking for the nearest ancestor with no `__init__.py`, which
+    #: lands on `site-packages` itself -- every unrelated top-level module living
+    #: there is then misread as part of *this* build's own first-party code, which
+    #: collides with same-named modules mypy separately expects from typeshed.
+    #: Confirmed against `sockcan`: mypy refused to typecheck `_protocol.py` at all,
+    #: citing "site-packages/typing_extensions.py shadows library module
+    #: 'typing_extensions'". Staging just the one package elsewhere keeps that
+    #: walk-up from ever reaching `site-packages`.
+    staged_package_root: Path | None = None
+
+    def _staged_source(source: PathExists) -> PathExists:
+        nonlocal staged_package_root
+        package_root = next(
+            (parent for parent in source.parents if parent.name == top_level_package), None
+        )
+        assert package_root is not None, (
+            f"{source} does not sit under a {top_level_package!r} package directory -- "
+            "every manifested import path has at least one dot, so its top-level "
+            "package must be a real directory, not a bare top-level module."
+        )
+        if staged_package_root is None:
+            stage_dir = rebuild_dest_folder.parent / "src-stage"
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            staged_package_root = stage_dir / top_level_package
+            if not staged_package_root.exists():
+                staged_package_root.symlink_to(package_root)
+        return assert_path_exists(staged_package_root / source.relative_to(package_root))
+
+    #: One rebuild per manifested module, however many closure entries reference it
+    #: (the module itself, plus its `__mypyc` runtime companion when the closure
+    #: lists that separately -- see below) -- memoized so a distribution with
+    #: several manifested modules, or a module referenced both ways, is only
+    #: compiled once per import path.
+    built: dict[ImportPath, tuple[GenericExtension, list[PathExists] | None]] = {}
+
+    def _build(
+        base_import_path: ImportPath, resolved: ResolvedModule
+    ) -> tuple[GenericExtension, list[PathExists] | None] | None:
+        if base_import_path in built:
+            return built[base_import_path]
+        backend = manifest.get(base_import_path)
+        if backend not in (Backend.MYPYC, Backend.CYTHON) or resolved.shadowed_source is None:
+            return None
+        rebuild_dest_folder.mkdir(parents=True, exist_ok=True)
+        source = _staged_source(resolved.shadowed_source)
+        ext = (
+            _mypycify_one(
+                MypycModule(base_import_path, source=source),
+                path_solver,
+                dest_folder=rebuild_dest_folder,
+            )
+            if backend is Backend.MYPYC
+            else _cythonize_one(
+                CythonExtension(base_import_path, source=source),
+                path_solver,
+                dest_folder=rebuild_dest_folder,
+            )
+        )
+        outcome = (
+            ext,
+            _compile_place_or_stage(ext, static_build_dir, crosscompile, py_headers=py_headers),
+        )
+        built[base_import_path] = outcome
+        return outcome
+
+    replacements: dict[ImportPath, PathExists] = {}
+    static_modules: dict[ImportPath, list[PathExists]] = {}
+
+    for import_path, resolved in dist_entries.items():
+        base_import_path = import_path
+        is_runtime_companion = False
+        if import_path not in manifest and import_path.endswith("__mypyc"):
+            candidate = ImportPath(import_path.removesuffix("__mypyc"))
+            if manifest.get(candidate) is Backend.MYPYC:
+                base_import_path, is_runtime_companion = candidate, True
+
+        base_resolved = dist_entries.get(base_import_path) or closure.get(base_import_path)
+        if base_resolved is None:
+            continue
+        outcome = _build(base_import_path, base_resolved)
+        if outcome is None:
+            continue
+        ext, staged = outcome
+
+        if is_runtime_companion:
+            if staged is not None or ext.runtime is None:
+                # A statically-linked runtime's object code is already folded into
+                # the base module's own `static_modules` entry below -- mirrors
+                # `run_backend`'s own `static_modules[ext.import_path] = objects`,
+                # which never adds a second entry for the runtime, since it has no
+                # `PyInit_` of its own to register separately with
+                # `PyImport_AppendInittab`. Nothing to add for this closure entry:
+                # declined, same as any other case this rebuild cannot serve.
+                continue
+            replacements[import_path] = assert_path_exists(ext.get_runtime_dest_path(target_triple))
+            continue
+
+        if staged is not None:
+            static_modules[import_path] = staged
+        else:
+            replacements[import_path] = assert_path_exists(ext.get_dest_path(target_triple))
+
+    return IsolatedNativesResult(replacements, static_modules)
+
+
 def prepare_isolated_natives(
     closure: dict[ImportPath, ResolvedModule],
     payload_root: Path,
@@ -416,22 +593,28 @@ def prepare_isolated_natives(
     (native) build, and unused for the wheel-fetch path (a prebuilt wheel compiles
     nothing here).
 
-    Checked *first*, before any wheel lookup: whether `owning_distribution` has a
-    `smelt.vendoring` provider registered for it (see `smelt.vendoring.get_provider`)
-    -- a registered distribution is built from source instead and never touches
-    `unearth`/the package index at all. A distribution with no provider, or whose
-    provider declines this resolved version/target (see
-    `smelt.vendoring.VendoringDeclined` -- e.g. `cryptography` below its Rust
-    transition), falls through to fetching a prebuilt wheel (see `fetch_wheel`)
-    instead, same as before.
+    Checked *first*, before any wheel lookup, in two steps:
 
-    A vendored provider's build is either linked into a loose `.so` (returned via
-    `IsolatedNativesResult.replacements`, same as a wheel-derived one) or, when
-    `static_build_dir` is given, staged for static linking instead (returned via
-    `IsolatedNativesResult.static_modules`) -- mirroring
-    `smelt.backend._compile_place_or_stage`'s own branch for every other backend.
-    A wheel-derived replacement is always a finished, already-linked `.so`: there is
-    no object-file seam for a prebuilt wheel, so it only ever populates
+    1. Whether `owning_distribution` was itself compiled by smelt (see
+       `smelt.manifest`) -- if so, `rebuild_manifested_extensions` recompiles
+       whichever of its manifested modules it can from their shadowed source,
+       straight from this same closure, and never touches `unearth`/the package
+       index for those import paths at all.
+    2. For anything that step left unhandled, whether `owning_distribution` has a
+       `smelt.vendoring` provider registered for it instead (see
+       `smelt.vendoring.get_provider`) -- likewise built from source instead of
+       fetched. A distribution with no provider, or whose provider declines this
+       resolved version/target (see `smelt.vendoring.VendoringDeclined` -- e.g.
+       `cryptography` below its Rust transition), falls through to fetching a
+       prebuilt wheel (see `fetch_wheel`) instead, same as before.
+
+    Either a manifest rebuild or a vendored provider's build is linked into a loose
+    `.so` (returned via `IsolatedNativesResult.replacements`, same as a
+    wheel-derived one) or, when `static_build_dir` is given, staged for static
+    linking instead (returned via `IsolatedNativesResult.static_modules`) --
+    mirroring `smelt.backend._compile_place_or_stage`'s own branch for every other
+    backend. A wheel-derived replacement is always a finished, already-linked `.so`:
+    there is no object-file seam for a prebuilt wheel, so it only ever populates
     `replacements`.
 
     Also places that distribution's whole sibling tree directly into `payload_root`
@@ -449,6 +632,13 @@ def prepare_isolated_natives(
     static_modules: dict[ImportPath, list[PathExists]] = {}
     extracted_roots: dict[str, Path] = {}
     vendored_builds: dict[str, tuple[VendoredExtension, PathExists | None]] = {}
+    #: One `rebuild_manifested_extensions` call per distribution, covering every one
+    #: of its manifested modules found anywhere in `closure` at once -- cached so a
+    #: second import path from the same distribution reuses it rather than
+    #: recompiling. An empty result (no manifest, or nothing in it usable) is cached
+    #: the same as a successful one: either way there is nothing more to learn about
+    #: this distribution from a second call.
+    rebuilt_natives: dict[str, IsolatedNativesResult] = {}
     #: Distributions whose provider declined this resolved version/target (see
     #: `smelt.vendoring.VendoringDeclined`) -- cached the same way `vendored_builds`
     #: caches a success, so a second import path from the same distribution does not
@@ -461,6 +651,29 @@ def prepare_isolated_natives(
             continue
         dist_name = owning_distribution(import_path)
         if dist_name is None:
+            continue
+
+        # Checked before any `smelt.vendoring` provider or wheel lookup: a
+        # distribution smelt itself compiled (see `smelt.manifest`) already carries
+        # everything needed to rebuild it for `target` from source, so there is
+        # nothing left for either of those slower paths to add for it. In practice a
+        # distribution never has both a manifest and a registered `vendoring`
+        # provider, so the ordering between them should not matter.
+        if dist_name not in rebuilt_natives:
+            rebuilt_natives[dist_name] = rebuild_manifested_extensions(
+                dist_name,
+                closure,
+                target=target,
+                python_version=python_version,
+                py_headers=py_headers,
+                static_build_dir=static_build_dir,
+            )
+        rebuilt = rebuilt_natives[dist_name]
+        if import_path in rebuilt.replacements:
+            replacements[import_path] = rebuilt.replacements[import_path]
+            continue
+        if import_path in rebuilt.static_modules:
+            static_modules[import_path] = rebuilt.static_modules[import_path]
             continue
 
         # Local import: `smelt.vendoring` imports back from this module (for

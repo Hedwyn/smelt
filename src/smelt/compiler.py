@@ -405,6 +405,14 @@ def _compile_extension_sources(
             "Do not assume stability from the built artifacts"
         )
         extra_preargs.append(f"--target={crosscompile.value}")
+        # Unlike a host-native build (where the toolchain's own default already
+        # produces relocatable code), Zig's cross-compile codegen for some targets
+        # (observed on aarch64) defaults to non-PIC, absolute-addressed object code
+        # -- fine for a `.o` on its own, but refused at link time once it is linked
+        # into a `.so` ("relocation R_AARCH64_ABS64 cannot be used against symbol
+        # ...; recompile with -fPIC"). Forced explicitly here rather than relying on
+        # the target's own default.
+        extra_preargs.append("-fPIC")
         if py_headers is not None:
             include_dirs = [str(py_headers.include_dir), str(py_headers.pyconfig_dir)]
         else:

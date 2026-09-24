@@ -81,9 +81,16 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-def _mypycify_one(module: MypycModule, path_solver: PathSolver) -> GenericExtension:
+def _mypycify_one(
+    module: MypycModule, path_solver: PathSolver, *, dest_folder: Path | None = None
+) -> GenericExtension:
     """
     Runs mypyc's codegen step for a single module, without compiling the result.
+
+    `dest_folder`, when given, overrides the default (next to `module`'s own source)
+    -- used by `smelt.isolated_build.rebuild_manifested_extensions` to compile a
+    dependency's shadowed source into a cache directory instead of back into its
+    (possibly read-only) install location.
     """
     ext_path = module.source or path_solver.resolve_import_path(module.import_path)
     runtime, module_ext = mypycify([str(ext_path)], include_runtime_files=True)
@@ -92,7 +99,7 @@ def _mypycify_one(module: MypycModule, path_solver: PathSolver) -> GenericExtens
         import_path=module.import_path,
         extension=module_ext,
         runtime=runtime,
-        dest_folder=ext_path.parent,
+        dest_folder=dest_folder or ext_path.parent,
     )
 
 
@@ -263,9 +270,14 @@ def _cythonize_one(
     module: CythonExtension,
     path_solver: PathSolver,
     options: dict[str, Any] | None = None,
+    *,
+    dest_folder: Path | None = None,
 ) -> GenericExtension:
     """
     Runs cythonize for a single module, without compiling the result.
+
+    `dest_folder`, when given, overrides the default (next to `module`'s own source)
+    -- see `_mypycify_one`'s own doc for why.
     """
     options = options or {}
     try:
@@ -286,7 +298,7 @@ def _cythonize_one(
         src_path=source_path,
         import_path=import_path,
         extension=base_ext,
-        dest_folder=Path(source_path).parent,
+        dest_folder=dest_folder or Path(source_path).parent,
     )
 
 
