@@ -12,14 +12,17 @@ import logging
 import os
 import platform
 import shutil
+import subprocess
+import sys
 import sysconfig
 import tempfile
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Final, Iterable
 
 from mypyc.build import mypycify
+from setuptools import Extension
 
 from smelt.compiler import (
     SupportedPlatforms,
@@ -55,8 +58,10 @@ from smelt.nuitkaify import (
 )
 from smelt.own_python import (
     TargetPythonHeaders,
+    host_zig_arch,
     resolve_own_python_version,
     target_python_headers_for,
+    target_sysconfigdata_for,
 )
 from smelt.utils import (
     GenericExtension,
@@ -81,8 +86,143 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
+#: Every `setuptools.Extension` field a downstream compile/link step actually reads
+#: off a mypyc-produced `Extension` -- `sources`/`include_dirs`/`extra_compile_args`/
+#: `define_macros` in `compiler._compile_extension_sources`, `name`/`libraries`/
+#: `library_dirs`/`runtime_library_dirs` in `compiler.link_extension_objects` (via
+#: `compile_generic_extension`/`link_generic_extension`). Everything else `Extension`
+#: can carry is unused anywhere in this pipeline. `define_macros` entries are
+#: `(name, value | None)` pairs; JSON has no tuple, so they round-trip as 2-element
+#: lists and are turned back into tuples on the way out (`_extension_from_serialized`).
+_EXTENSION_FIELDS: Final = (
+    "name",
+    "sources",
+    "include_dirs",
+    "extra_compile_args",
+    "define_macros",
+    "libraries",
+    "library_dirs",
+    "runtime_library_dirs",
+)
+
+#: The subprocess script `_mypycify_cross` runs: same `mypycify` call `_mypycify_one`
+#: makes in-process, except run under an interpreter primed (via env vars set before
+#: it even starts) to answer every `sysconfig.get_config_var(...)` query -- and so
+#: every word-size-derived constant mypyc's own codegen computes from one -- with the
+#: cross target's own values instead of this host's. Writes its result as JSON to
+#: `sys.argv[2]` rather than stdout, which mypy/mypyc's own progress and warning
+#: output already uses.
+_MYPYC_CROSS_CODEGEN_SCRIPT = """
+import json, sys
+from mypyc.build import mypycify
+
+FIELDS = %r
+
+def _ser(ext):
+    if ext is None:
+        return None
+    return {field: getattr(ext, field, None) for field in FIELDS}
+
+runtime, module_ext = mypycify([sys.argv[1]], include_runtime_files=True)
+with open(sys.argv[2], "w", encoding="utf-8") as f:
+    json.dump({"runtime": _ser(runtime), "module": _ser(module_ext)}, f)
+""" % (_EXTENSION_FIELDS,)
+
+
+def _str_list(value: object) -> list[str]:
+    assert isinstance(value, list)
+    return [str(v) for v in value]
+
+
+def _extension_from_serialized(serialized: dict[str, object] | None) -> Extension | None:
+    if serialized is None:
+        return None
+    name = serialized["name"]
+    assert isinstance(name, str)
+    macros = serialized["define_macros"]
+    assert macros is None or isinstance(macros, list)
+    return Extension(
+        name=name,
+        sources=_str_list(serialized["sources"]),
+        include_dirs=_str_list(serialized["include_dirs"]),
+        extra_compile_args=_str_list(serialized["extra_compile_args"]),
+        define_macros=[(str(m[0]), None if m[1] is None else str(m[1])) for m in macros or []],
+        libraries=_str_list(serialized["libraries"]),
+        library_dirs=_str_list(serialized["library_dirs"]),
+        runtime_library_dirs=_str_list(serialized["runtime_library_dirs"]),
+    )
+
+
+def _mypycify_cross(
+    ext_path: PathExists, crosscompile: SupportedPlatforms
+) -> tuple[Extension | None, Extension]:
+    """
+    `mypycify`'s codegen step for `ext_path`, cross-compiled for `crosscompile`.
+
+    mypyc's own generated C bakes in several word-size-derived constants (e.g. the
+    `PyObject_VectorcallMethod` `nargsf` flag, `PY_VECTORCALL_ARGUMENTS_OFFSET` in
+    `mypyc/irbuild/ll_builder.py`) computed once, in Python, from
+    `sysconfig.get_config_var("SIZEOF_SIZE_T")` -- of *whichever interpreter is
+    running mypyc*, not the target `zig cc --target=...` is later told to compile
+    for. Calling `mypycify` in-process (as `_mypycify_one` does for a native build)
+    is therefore silently wrong the moment host and target word sizes differ (e.g.
+    this host's 8-byte `x86_64` compiling for `arm-linux-gnueabihf`'s 4-byte
+    `size_t`): a 64-bit-shaped literal gets baked into the generated C regardless
+    of the `-target` flag the C *compiler* sees afterward, which only takes effect
+    once mypyc has already emitted (wrong) C text.
+
+    Fixed here by running mypyc's codegen in a **fresh subprocess** with
+    `_PYTHON_SYSCONFIGDATA_NAME`/`PYTHONPATH` pointed at
+    `smelt.own_python.target_sysconfigdata_for`'s generated, target-correct
+    `_sysconfigdata` module (the same real `./configure` output
+    `TargetPythonHeaders`/`pyconfig.h` already come from) -- CPython's own,
+    standard cross-compile hook (`sysconfig._get_sysconfigdata_name`), set before
+    the interpreter even starts so every `sysconfig.get_config_var(...)` call made
+    while importing `mypyc` answers with the target's own values from the first
+    call, not the host's. A subprocess is required, not an in-process env var
+    flip: `mypyc.common`'s word-size constants (and every submodule that already
+    did `from mypyc.common import PLATFORM_SIZE`) are computed once, at first
+    import, and this process may have already imported `mypyc` natively earlier
+    in the same run.
+
+    Every `Extension` field a downstream compile/link step actually reads
+    (`_EXTENSION_FIELDS`) survives the subprocess boundary via a JSON file (not
+    stdout -- mypy/mypyc's own progress output already uses that). This matters for
+    more than just `sources`: `_compile_extension_sources`'s cross-compile branch
+    *adds* `py_headers`'s target-correct include dirs to `extension_obj.include_dirs`
+    rather than replacing it (mypyc's own runtime headers, e.g. `mypyc/lib-rt`'s
+    `init.c`, still have to be found) -- dropping that field here previously
+    produced a *different* failure (`'init.c' file not found`) once the word-size
+    fix above got past the original `-Wconstant-conversion` one.
+    """
+    target_triple = crosscompile.get_triple_name()
+    sysconfigdata = target_sysconfigdata_for(
+        target_triple, python_version=resolve_own_python_version(None)
+    )
+    env = dict(os.environ)
+    env["_PYTHON_SYSCONFIGDATA_NAME"] = sysconfigdata.stem
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(sysconfigdata.parent), env.get("PYTHONPATH")) if p
+    )
+    with tempfile.TemporaryDirectory() as scratch_dir:
+        result_path = Path(scratch_dir) / "mypycify_result.json"
+        subprocess.run(
+            [sys.executable, "-c", _MYPYC_CROSS_CODEGEN_SCRIPT, str(ext_path), str(result_path)],
+            env=env,
+            check=True,
+        )
+        payload = json.loads(result_path.read_text())
+    module_ext = _extension_from_serialized(payload["module"])
+    assert module_ext is not None, "mypycify always returns a module extension"
+    return _extension_from_serialized(payload["runtime"]), module_ext
+
+
 def _mypycify_one(
-    module: MypycModule, path_solver: PathSolver, *, dest_folder: Path | None = None
+    module: MypycModule,
+    path_solver: PathSolver,
+    *,
+    dest_folder: Path | None = None,
+    crosscompile: SupportedPlatforms | None = None,
 ) -> GenericExtension:
     """
     Runs mypyc's codegen step for a single module, without compiling the result.
@@ -91,9 +231,17 @@ def _mypycify_one(
     -- used by `smelt.isolated_build.rebuild_manifested_extensions` to compile a
     dependency's shadowed source into a cache directory instead of back into its
     (possibly read-only) install location.
+
+    `crosscompile`, when given, routes codegen through `_mypycify_cross` instead of
+    calling `mypycify` directly -- see that function's own doc for why cross-target
+    mypyc codegen cannot just reuse the in-process call.
     """
     ext_path = module.source or path_solver.resolve_import_path(module.import_path)
-    runtime, module_ext = mypycify([str(ext_path)], include_runtime_files=True)
+    runtime, module_ext = (
+        _mypycify_cross(ext_path, crosscompile)
+        if crosscompile is not None
+        else mypycify([str(ext_path)], include_runtime_files=True)
+    )
     return GenericExtension.factory(
         src_path=ext_path,
         import_path=module.import_path,
@@ -325,13 +473,17 @@ def _compile_and_place(ext: GenericExtension) -> GenericExtension:
 
 
 def _generate_with_backend(
-    backend: Backend, import_path: ImportPath, path_solver: PathSolver
+    backend: Backend,
+    import_path: ImportPath,
+    path_solver: PathSolver,
+    *,
+    crosscompile: SupportedPlatforms | None = None,
 ) -> GenericExtension:
     match backend:
         case Backend.NUITKA:
             return nuitkaify_module(NuitkaModule(import_path), path_solver=path_solver)
         case Backend.MYPYC:
-            return _mypycify_one(MypycModule(import_path), path_solver)
+            return _mypycify_one(MypycModule(import_path), path_solver, crosscompile=crosscompile)
         case Backend.CYTHON:
             return _cythonize_one(CythonExtension(import_path), path_solver)
 
@@ -460,7 +612,9 @@ def compile_module_with_fallback(
     last_exc: Exception | None = None
     for backend in backend_priority_order:
         try:
-            ext = _generate_with_backend(backend, import_path, path_solver)
+            ext = _generate_with_backend(
+                backend, import_path, path_solver, crosscompile=crosscompile
+            )
             objects = _compile_place_or_stage(
                 ext, static_build_dir, crosscompile, py_headers=py_headers
             )
@@ -951,6 +1105,18 @@ def run_backend(
         )
         return BackendResult([])
 
+    build_arch = (
+        crosscompile.value.partition("-")[0] if crosscompile is not None else host_zig_arch()
+    )
+    if (archs := config.archs) is not None and build_arch not in archs:
+        if stdout is None:
+            return BackendResult([])
+        printer = _logger.info if stdout == "logger" else print
+        printer(
+            f"Building for {build_arch!r}, build hook is restricted to {archs}, skipping extension building"
+        )
+        return BackendResult([])
+
     built_artifacts: list[Path] = []
     static_modules: dict[ImportPath, list[PathExists]] = {}
     compiled_backends: dict[ImportPath, Backend] = {}
@@ -1021,7 +1187,7 @@ def run_backend(
     shared_runtime_extensions: set[str] = set()
 
     for module in config.mypyc_modules:
-        mypyc_ext = _mypycify_one(module, path_solver)
+        mypyc_ext = _mypycify_one(module, path_solver, crosscompile=crosscompile)
         compiled_backends[module.import_path] = Backend.MYPYC
         if _place_or_stage(mypyc_ext):
             continue
@@ -1176,7 +1342,7 @@ def run_backend(
                     no_cache=no_cache,
                 )
 
-    manifest_modules = write_manifest_module(compiled_backends, path_solver)
+    manifest_modules = write_manifest_module(compiled_backends, path_solver, archs=config.archs)
     return BackendResult(
         built_artifacts, static_modules, static_build_dir, compiled_backends, manifest_modules
     )

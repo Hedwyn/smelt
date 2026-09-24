@@ -31,12 +31,13 @@ from smelt.utils import ImportPath, PathExists, PathSolver, get_module_name, pat
 MANIFEST_MODULE_NAME: Final[str] = "_smelt_manifest"
 
 
-def _render_manifest_module(modules: dict[ImportPath, Backend]) -> str:
+def _render_manifest_module(modules: dict[ImportPath, Backend], archs: Iterable[str] | None) -> str:
     entries = ",\n".join(
         f'    "{import_path}": "{backend.value}"'
         for import_path, backend in sorted(modules.items())
     )
     body = f"{entries}\n" if entries else ""
+    archs_literal = "None" if archs is None else repr(tuple(sorted(archs)))
     return (
         '"""\n'
         "Smelt build manifest -- generated, do not edit.\n"
@@ -49,18 +50,29 @@ def _render_manifest_module(modules: dict[ImportPath, Backend]) -> str:
         "from __future__ import annotations\n"
         "\n"
         f"MODULES: dict[str, str] = {{\n{body}}}\n"
+        "\n"
+        f"ARCHS: tuple[str, ...] | None = {archs_literal}\n"
     )
 
 
 def write_manifest_module(
     compiled_backends: dict[ImportPath, Backend],
     path_solver: PathSolver,
+    *,
+    archs: Iterable[str] | None = None,
 ) -> list[Path]:
     """
     Writes `_smelt_manifest.py` into every package root (`path_solver.known_roots`)
     that owns at least one entry of `compiled_backends`, so it ships inside that
     package's own wheel next to its `__init__.py`. A root with nothing to declare
     gets no file at all. Returns the paths written.
+
+    `archs` is this build's own `SmeltConfig.archs` (the CPU architectures this
+    package's native code claims to support, `None` meaning unrestricted) -- written
+    into every generated manifest alongside `MODULES` unchanged, so
+    `read_manifest_archs` can tell a downstream cross-build not to attempt a target
+    this package never claimed to support, instead of it failing deep inside a
+    backend-specific compile step.
     """
     written: list[Path] = []
     for root_import_path, root_path in path_solver.known_roots:
@@ -72,7 +84,7 @@ def write_manifest_module(
         if not under_root:
             continue
         dest = root_path / f"{MANIFEST_MODULE_NAME}.py"
-        dest.write_text(_render_manifest_module(under_root))
+        dest.write_text(_render_manifest_module(under_root, archs))
         written.append(dest)
     return written
 
@@ -100,6 +112,31 @@ def read_manifest_module(top_level_package: str) -> dict[ImportPath, Backend] | 
         module = importlib.import_module(qualified)
         raw = module.MODULES
         return {ImportPath(import_path): Backend(backend) for import_path, backend in raw.items()}
+    except Exception:
+        return None
+
+
+def read_manifest_archs(top_level_package: str) -> tuple[str, ...] | None:
+    """
+    Reads back the `archs` a manifest was written with (see `write_manifest_module`)
+    for the installed top-level package `top_level_package`.
+
+    `None` covers three cases a caller does not need to tell apart -- no manifest at
+    all, a manifest predating this field (`ARCHS` absent, via `getattr`'s default),
+    or an explicit `ARCHS = None` (unrestricted) -- all three mean the same thing to
+    a caller deciding whether to attempt a build: nothing says not to.
+    """
+    qualified = f"{top_level_package}.{MANIFEST_MODULE_NAME}"
+    try:
+        spec = importlib.util.find_spec(qualified)
+    except Exception:
+        return None
+    if spec is None:
+        return None
+    try:
+        module = importlib.import_module(qualified)
+        archs = getattr(module, "ARCHS", None)
+        return tuple(archs) if archs is not None else None
     except Exception:
         return None
 

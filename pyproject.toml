@@ -25,7 +25,15 @@ Homepage = "https://github.com/Hedwyn/smelt"
 # librt.internal uses unknown slot ID 85` before anything else runs. Below 1.19
 # there is no `librt` dependency at all. Lift the cap once mypy ships
 # 3.15-compatible `librt` wheels.
-tests = ["pytest", "mypy[mypyc]; python_version < '3.15'", "mypy[mypyc]<1.19; python_version >= '3.15'"]
+tests = [
+  "pytest",
+  "mypy[mypyc]; python_version < '3.15'",
+  "mypy[mypyc]<1.19; python_version >= '3.15'",
+  # `smelt.backend`/`smelt.utils` construct `setuptools.Extension` directly (mypyc's
+  # own return type) -- without this, `mypy --strict` reports "Library stubs not
+  # installed for 'setuptools'" rather than actually checking those call sites.
+  "types-setuptools",
+]
 mypyc = ["mypy[mypyc]; python_version < '3.15'", "mypy[mypyc]<1.19; python_version >= '3.15'"]
 cli = ["click"]
 # patchelf: Nuitka needs it for RPATH rewrites in standalone/onefile mode on Linux;

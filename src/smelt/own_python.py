@@ -299,7 +299,10 @@ def is_windows_zig_target(zig_target: str | None) -> bool:
 #: target triple's own leading component. Mirrors meta-python's own (private)
 #: `metapython.pyconfig._UNAME_TO_ZIG_ARCH` -- kept as a small local copy rather than
 #: reaching across the package boundary for a name that isn't part of its public API.
-_UNAME_TO_ZIG_ARCH: Final[dict[str, str]] = {
+#: Public (unlike that one): `smelt.backend`/`smelt.isolated_build` also need it, to
+#: compare a build's *own* host arch against `SmeltConfig.archs`/a manifest's `ARCHS`
+#: (see `host_zig_arch`), not just meta-python's cross-vs-native distinction below.
+UNAME_TO_ZIG_ARCH: Final[dict[str, str]] = {
     "amd64": "x86_64",
     "arm64": "aarch64",
     "i386": "x86",
@@ -307,6 +310,16 @@ _UNAME_TO_ZIG_ARCH: Final[dict[str, str]] = {
     "armv7l": "arm",
     "armv6l": "arm",
 }
+
+
+def host_zig_arch() -> str:
+    """
+    This machine's own CPU architecture, spelled the way a Zig target triple's
+    leading component would spell it (`UNAME_TO_ZIG_ARCH`) -- what a *native* build
+    (`zig_target=None`, no `--target` involved at all) is building for, in the same
+    vocabulary a cross build's own `zig_target.partition("-")[0]` already uses.
+    """
+    return UNAME_TO_ZIG_ARCH.get(platform.machine(), platform.machine())
 
 
 def is_cpu_cross_target(zig_target: str | None) -> bool:
@@ -331,8 +344,7 @@ def is_cpu_cross_target(zig_target: str | None) -> bool:
     if zig_target is None:
         return False
     arch, _, _ = zig_target.partition("-")
-    host_arch = _UNAME_TO_ZIG_ARCH.get(platform.machine(), platform.machine())
-    return arch != host_arch
+    return arch != host_zig_arch()
 
 
 #: `LIBRARY_MODULES` entries meta-python cannot yet link statically for a CPU-arch

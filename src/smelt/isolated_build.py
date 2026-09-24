@@ -28,8 +28,8 @@ from smelt.backend import _compile_place_or_stage, _cythonize_one, _mypycify_one
 from smelt.compiler import SupportedPlatforms
 from smelt.config import Backend, CythonExtension, MypycModule
 from smelt.explorer import ModuleKind, ResolvedModule
-from smelt.manifest import read_manifest_module
-from smelt.own_python import TargetPythonHeaders
+from smelt.manifest import read_manifest_archs, read_manifest_module
+from smelt.own_python import TargetPythonHeaders, host_zig_arch
 from smelt.utils import (
     GenericExtension,
     ImportPath,
@@ -453,6 +453,16 @@ def rebuild_manifested_extensions(
     manifest = read_manifest_module(top_level_package)
     if not manifest:
         return empty
+    build_arch = target.partition("-")[0] if target is not None else host_zig_arch()
+    archs = read_manifest_archs(top_level_package)
+    if archs is not None and build_arch not in archs:
+        # `dist_name` itself declared (via `SmeltConfig.archs`, see `smelt.manifest`)
+        # that it does not support `build_arch` -- declining here, before any compile
+        # is attempted, turns what would otherwise be a backend-specific crash deep
+        # inside `_mypycify_one`/`_cythonize_one` into the same clean fall-through
+        # every other declined case gets (wheel-fetch next, `IsolatedBuildError` if
+        # that has nothing either).
+        return empty
 
     crosscompile = SupportedPlatforms.from_triple(target) if target is not None else None
     target_triple = crosscompile.get_triple_name() if crosscompile is not None else None
@@ -516,6 +526,7 @@ def rebuild_manifested_extensions(
                 MypycModule(base_import_path, source=source),
                 path_solver,
                 dest_folder=rebuild_dest_folder,
+                crosscompile=crosscompile,
             )
             if backend is Backend.MYPYC
             else _cythonize_one(

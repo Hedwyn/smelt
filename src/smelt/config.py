@@ -332,6 +332,17 @@ class SmeltConfig:
     c_extensions: list[NativeExtension] = field(default_factory=list)
     zig_modules: list[ZigModule] = field(default_factory=list)
     platforms: Iterable[str] | None = None
+    #: CPU-architecture counterpart to `platforms`, restricting `run_backend` to
+    #: build only for the listed Zig-spelled architectures (e.g. `["x86_64",
+    #: "aarch64"]`) -- checked against the cross target's own arch when `run_backend`
+    #: is given one, or this machine's own arch for a native build (see
+    #: `smelt.own_python.host_zig_arch`). Skipped (not failed) the same way `platforms`
+    #: is, and -- unlike `platforms` -- also written into the built package's own
+    #: manifest (`smelt.manifest.write_manifest_module`), so a downstream project
+    #: cross-compiling *this* package as a dependency (`smelt.isolated_build.
+    #: rebuild_manifested_extensions`) can see the restriction too, instead of
+    #: attempting (and failing) a build this package never claimed to support.
+    archs: Iterable[str] | None = None
     entrypoints: dict[str, EntrypointOptions] = field(default_factory=dict)
     script_names: dict[str, str] = field(default_factory=dict)
     debug: bool = False
