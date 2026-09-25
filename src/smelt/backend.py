@@ -29,6 +29,7 @@ from smelt.compiler import (
     compile_extension_objects,
     compile_zig_module,
     link_extension_objects,
+    python_import_library_link_args,
 )
 from smelt.config import (
     Backend,
@@ -315,6 +316,11 @@ def link_generic_extension(
     passed to the link step itself as `--target=` (`compile_extension`'s own link call
     does the same -- without it the link step defaults to the host arch, producing an
     ELF whose arch does not match the just-compiled target objects).
+
+    Also wires in `python_import_library_link_args()` (a no-op except on Windows,
+    where the Python C-API's `__declspec(dllimport)` symbols must be resolved against
+    `pythonXY.lib` at link time, unlike ELF/Mach-O -- see that function's own doc),
+    same as `compile_extension` already does for its own link step.
     """
     ext = compiled.generic
     target_triple = crosscompile.get_triple_name() if crosscompile is not None else None
@@ -324,14 +330,23 @@ def link_generic_extension(
         else sysconfig.get_config_var("EXT_SUFFIX")
     )
     extra_preargs = [f"--target={crosscompile.value}"] if crosscompile is not None else []
+    win_library_dirs, win_libraries = python_import_library_link_args()
     module_so_path = link_extension_objects(
-        compiled.objects, ext.extension.name + so_suffix, extra_preargs=extra_preargs
+        compiled.objects,
+        ext.extension.name + so_suffix,
+        libraries=win_libraries,
+        library_dirs=win_library_dirs,
+        extra_preargs=extra_preargs,
     )
     shutil.move(module_so_path, str(ext.get_dest_path(target_triple)))
     if compiled.runtime_objects is not None:
         assert ext.runtime is not None, "runtime_objects is only ever set alongside a runtime"
         runtime_so_path = link_extension_objects(
-            compiled.runtime_objects, ext.runtime.name + so_suffix, extra_preargs=extra_preargs
+            compiled.runtime_objects,
+            ext.runtime.name + so_suffix,
+            libraries=win_libraries,
+            library_dirs=win_library_dirs,
+            extra_preargs=extra_preargs,
         )
         shutil.move(runtime_so_path, str(ext.get_runtime_dest_path(target_triple)))
     return ext
