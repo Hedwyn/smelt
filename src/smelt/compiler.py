@@ -215,7 +215,7 @@ def zig_build_lib(
     """
     cmd = ["python", "-m", "ziglang", "build-lib"]
     if crosscompile is not None:
-        cmd.extend(["-target", crosscompile.value])
+        cmd.extend(["-target", crosscompile.get_triple_name()])
     # we need position independant code
     cmd.append("-dynamic")
     # as we'll wrapp this into a shared library later
@@ -269,7 +269,7 @@ def zig_build_exe(
     """
     cmd = ["python", "-m", "ziglang", "build-exe"]
     if crosscompile is not None:
-        cmd.extend(["-target", crosscompile.value])
+        cmd.extend(["-target", crosscompile.get_triple_name()])
     # we need position independant code
     # Python itself is only linked at runtime,
     # so we need to allow undefined symbols
@@ -308,7 +308,7 @@ def compile_zig_module(
         # "a project's own build.zig ... drives zig build end-to-end"), so it is on
         # that build.zig to forward the target to every step that needs it,
         # including locating Python headers for the target.
-        flags.append(f"-Dtarget={crosscompile.value}")
+        flags.append(f"-Dtarget={crosscompile.get_triple_name()}")
     with contextlib.chdir(folder):
         call_command("zig", "build", *flags)
         lib_path = Path.cwd() / "zig-out" / "lib" / _zig_shared_lib_name(name)
@@ -404,7 +404,7 @@ def _compile_extension_sources(
             "Support for cross-compiling is experimental.\n"
             "Do not assume stability from the built artifacts"
         )
-        extra_preargs.append(f"--target={crosscompile.value}")
+        extra_preargs.append(f"--target={crosscompile.get_triple_name()}")
         # Unlike a host-native build (where the toolchain's own default already
         # produces relocatable code), Zig's cross-compile codegen for some targets
         # (observed on aarch64) defaults to non-PIC, absolute-addressed object code
@@ -534,7 +534,7 @@ def compile_extension(
     # Compile the C file
     if crosscompile is not None:
         so_suffix = get_extension_suffix(crosscompile.get_triple_name())
-        extra_preargs = [f"--target={crosscompile.value}"]
+        extra_preargs = [f"--target={crosscompile.get_triple_name()}"]
     else:
         so_suffix = sysconfig.get_config_var("EXT_SUFFIX")
         extra_preargs = []

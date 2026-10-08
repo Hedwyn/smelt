@@ -329,7 +329,7 @@ def link_generic_extension(
         if target_triple is not None
         else sysconfig.get_config_var("EXT_SUFFIX")
     )
-    extra_preargs = [f"--target={crosscompile.value}"] if crosscompile is not None else []
+    extra_preargs = [f"--target={target_triple}"] if target_triple is not None else []
     win_library_dirs, win_libraries = python_import_library_link_args()
     module_so_path = link_extension_objects(
         compiled.objects,

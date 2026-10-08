@@ -1171,13 +1171,28 @@ def pyconfig_header_for_target(
     (pyconfig.h alone) self-heals with one more (cheap, seconds-long) `./configure`
     run instead of `makefile_for_target` finding it permanently missing.
 
+    Also requires the fetched CPython source itself (`_fetched_cpython_source_dir`)
+    to still be there. That source lives under the installed `metapython` package's
+    own `_vendor` directory, in site-packages -- unlike this function's cache, which
+    lives under `own_python_cache_dir` and survives independently of any given
+    install. A `smelt`/`metapython` reinstall (e.g. a local path dependency rebuilt
+    during development) wipes and recreates `_vendor`, taking the fetched source
+    with it, while leaving this cache untouched -- so a cache hit alone would hand
+    back a `pyconfig.h` whose companion source `cpython_include_dir` needs next is
+    gone, and every caller of `target_python_headers_for` after a reinstall would
+    fail with a confusing "has not fetched" error instead of just re-fetching.
+
     Consider `target_python_headers_for` instead: this returns `pyconfig.h` alone,
     which -- per `TargetPythonHeaders`'s own doc -- is not by itself enough to
     correctly compile a C source against a foreign target's Python C-API.
     """
     dest = own_python_cache_dir(target, python_version=python_version) / "pyconfig-only"
     cached = dest / "pyconfig.h"
-    if cached.is_file() and (dest / "Makefile").is_file():
+    if (
+        cached.is_file()
+        and (dest / "Makefile").is_file()
+        and _fetched_cpython_source_dir(python_version) is not None
+    ):
         return assert_path_exists(cached)
     with interpreter_build_lock():
         return _resolve_pyconfig_header(
