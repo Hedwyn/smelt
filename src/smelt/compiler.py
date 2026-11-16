@@ -333,6 +333,28 @@ def compile_zig_module(
     return target_path
 
 
+def compile_zig_executable(
+    exe_name: str,
+    folder: PathExists,
+    flags: list[str] | None = None,
+) -> PathExists:
+    """
+    Runs `zig build` in `folder` and returns the executable `exe_name` that the
+    project's `build.zig` installed in `zig-out/bin`. Host builds only.
+    """
+    with contextlib.chdir(folder):
+        call_command("zig", "build", *(flags or []))
+        file_name = f"{exe_name}.exe" if platform.system() == "Windows" else exe_name
+        exe_path = Path.cwd() / "zig-out" / "bin" / file_name
+    if not path_exists(exe_path):
+        raise SmeltError(
+            f"Ran `zig build` successfully, but no executable `{exe_path}` was found "
+            "afterwards. Check the `exe` name of the project and that your build.zig "
+            "installs the executable (`b.installArtifact`)."
+        )
+    return exe_path
+
+
 def python_import_library_link_args() -> tuple[list[str], list[str]]:
     """
     Extra `library_dirs`/`libraries` needed to resolve the Python C-API at link time.

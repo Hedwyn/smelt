@@ -236,6 +236,23 @@ class ZigModule:
     extras: list[str] = field(default_factory=list)
 
 
+@dataclass
+class ZigExecutable:
+    """
+    Executable produced by a project's own `build.zig`, installed as a wheel script.
+
+    `name` is the command name after installation (like a `[project.scripts]` key).
+    `exe` is the file name `zig build` leaves in `zig-out/bin` (without `.exe`),
+    defaulting to `name`.
+    """
+
+    name: str
+    exe: str | None = None
+    folder: PathExists = assert_path_exists(".")
+    flags: list[str] = field(default_factory=list)
+    extras: list[str] = field(default_factory=list)
+
+
 EntrypointOptions = TypedDict(
     "EntrypointOptions",
     {
@@ -331,6 +348,7 @@ class SmeltConfig:
     nuitka_modules: list[NuitkaModule] = field(default_factory=list)
     c_extensions: list[NativeExtension] = field(default_factory=list)
     zig_modules: list[ZigModule] = field(default_factory=list)
+    zig_executables: list[ZigExecutable] = field(default_factory=list)
     platforms: Iterable[str] | None = None
     #: CPU-architecture counterpart to `platforms`, restricting `run_backend` to
     #: build only for the listed Zig-spelled architectures (e.g. `["x86_64",
@@ -422,6 +440,14 @@ class SmeltConfig:
             )
             for decl in zig_modules_decl
         ]
+        # zig executables
+        zig_executables_decl = toml_data.pop("zig_executables", [])
+        zig_executables = [
+            build_datacls_from_toml(
+                ZigExecutable, decl, context=["zig_executables"], project_root=project_root
+            )
+            for decl in zig_executables_decl
+        ]
         # mypyc modules
         mypyc_modules_decl = toml_data.pop("mypyc_modules", [])
         mypyc_modules = [
@@ -475,7 +501,7 @@ class SmeltConfig:
                 f"Unknown option(s) in [tool.smelt]: {unknown}. Modules are declared "
                 "in their own sections ([[tool.smelt.mypyc_modules]], "
                 "[[tool.smelt.c_extensions]], [[tool.smelt.cython_modules]], "
-                "[[tool.smelt.nuitka_modules]], [[tool.smelt.zig_modules]]), and "
+                "[[tool.smelt.nuitka_modules]], [[tool.smelt.zig_modules]], [[tool.smelt.zig_executables]]), and "
                 "entrypoints in [project.scripts] or [tool.smelt.entrypoints] -- which "
                 "is what the singular `entrypoint` option was replaced by."
             )
@@ -484,6 +510,7 @@ class SmeltConfig:
             mypyc_modules=mypyc_modules,
             c_extensions=native_extensions,
             zig_modules=zig_modules,
+            zig_executables=zig_executables,
             cython_modules=cython_modules,
             nuitka_modules=nuitka_modules,
             auto_mode=auto_mode,

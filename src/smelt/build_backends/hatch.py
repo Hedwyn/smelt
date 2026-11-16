@@ -171,18 +171,35 @@ class HatchlingBuildHook(BuildHookInterface):
         config.nuitka_modules = self._filter_modules_by_extras(config.nuitka_modules)
         config.c_extensions = self._filter_modules_by_extras(config.c_extensions)
         config.zig_modules = self._filter_modules_by_extras(config.zig_modules)
+        kept_executables = []
+        for zig_exe in config.zig_executables:
+            if reason := self._skip_reason(zig_exe.extras):
+                self.debug_log(f"Smelt: skipping script {zig_exe.name}: {reason}")
+                continue
+            kept_executables.append(zig_exe)
+        config.zig_executables = kept_executables
         try:
-            built_artifacts = run_backend(
+            result = run_backend(
                 config,
                 strategy=ModpathType.FS,
                 without_entrypoint=True,
                 stdout="stdout",
-            ).artifacts
+            )
+            built_artifacts = result.artifacts
         except Exception as exc:
             raise RuntimeError(f"Smelt build failed: {exc}")
         finally:
             if config.report_path is not None:
                 write_auto_mode_report(config.report_path)
+
+        if result.scripts:
+            shared_scripts = build_data.setdefault("shared_scripts", {})
+            assert isinstance(shared_scripts, dict)
+            for script_name, exe_path in result.scripts.items():
+                suffix = ".exe" if exe_path.suffix == ".exe" else ""
+                shared_scripts[str(exe_path.resolve())] = f"{script_name}{suffix}"
+            build_data["pure_python"] = False
+            build_data["infer_tag"] = True
 
         if built_artifacts:
             # Hatchling's default global exclude (`*.py[cdo]`, meant for stray .pyc/.pyo

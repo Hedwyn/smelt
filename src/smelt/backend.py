@@ -27,6 +27,7 @@ from setuptools import Extension
 from smelt.compiler import (
     SupportedPlatforms,
     compile_extension_objects,
+    compile_zig_executable,
     compile_zig_module,
     link_extension_objects,
     python_import_library_link_args,
@@ -1037,6 +1038,9 @@ class BackendResult:
     static_build_dir: Path | None = None
     compiled_backends: dict[ImportPath, Backend] = field(default_factory=dict)
     manifest_modules: list[Path] = field(default_factory=list)
+    #: Zig executables built from `config.zig_executables`, keyed by installed
+    #: script name; meant to be shipped as wheel scripts.
+    scripts: dict[str, Path] = field(default_factory=dict)
 
 
 def run_backend(
@@ -1132,6 +1136,12 @@ def run_backend(
         )
         return BackendResult([])
 
+    if crosscompile is not None and config.zig_executables:
+        raise SmeltError(
+            "`zig_executables` cannot be built when cross-compiling; remove them or "
+            "build for the host."
+        )
+    scripts: dict[str, Path] = {}
     built_artifacts: list[Path] = []
     static_modules: dict[ImportPath, list[PathExists]] = {}
     compiled_backends: dict[ImportPath, Backend] = {}
@@ -1177,6 +1187,11 @@ def run_backend(
                 path_solver=path_solver,
                 crosscompile=crosscompile,
             )
+        )
+
+    for zig_exe in config.zig_executables:
+        scripts[zig_exe.name] = compile_zig_executable(
+            zig_exe.exe or zig_exe.name, zig_exe.folder, flags=zig_exe.flags
         )
 
     # Handwritten C extensions -- eligible for static linking, same as mypyc/Cython:
@@ -1359,5 +1374,10 @@ def run_backend(
 
     manifest_modules = write_manifest_module(compiled_backends, path_solver, archs=config.archs)
     return BackendResult(
-        built_artifacts, static_modules, static_build_dir, compiled_backends, manifest_modules
+        built_artifacts,
+        static_modules,
+        static_build_dir,
+        compiled_backends,
+        manifest_modules,
+        scripts,
     )
