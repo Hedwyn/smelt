@@ -7,6 +7,7 @@ Build hook hatchling backend.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import fields
 from functools import cached_property
@@ -64,7 +65,7 @@ class HatchlingBuildHook(BuildHookInterface):
 
     @cached_property
     def is_debug(self) -> bool:
-        if not self.smelt_config.debug:
+        if not os.environ.get("SMELT_DEBUG"):
             return False
         print("Smelt: SMELT_DEBUG is set, enabling debug mode")
         return True
@@ -81,7 +82,6 @@ class HatchlingBuildHook(BuildHookInterface):
                 "Valid [tool.smelt] parameters are:\n"
                 f"{[toml_key(f.name) for f in fields(ProjectConfig)]}"
             ) from exc
-        config.load_env()
         return config
 
     @cached_property
@@ -190,8 +190,8 @@ class HatchlingBuildHook(BuildHookInterface):
         except Exception as exc:
             raise RuntimeError(f"Smelt build failed: {exc}")
         finally:
-            if config.report_path is not None:
-                write_auto_mode_report(config.report_path)
+            if report_path := os.environ.get("SMELT_REPORT"):
+                write_auto_mode_report(report_path)
 
         if result.scripts:
             shared_scripts = build_data.setdefault("shared_scripts", {})

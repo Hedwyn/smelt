@@ -240,6 +240,42 @@ def test_group_options_apply_to_every_command(
     assert report.exists()
 
 
+@pytest.mark.parametrize("command", ["build", "nuitka-binary"])
+def test_report_flag_beats_env_and_writes_one_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """`--report` wins over `SMELT_REPORT`; exactly one report file is written."""
+    from click.testing import CliRunner
+
+    from smelt import frontend
+
+    (tmp_path / "pyproject.toml").write_text(NUITKA_PROJECT)
+    _stub_run_backend(monkeypatch)
+    flag_report = tmp_path / "flag.log"
+    env_report = tmp_path / "env.log"
+    monkeypatch.setenv("SMELT_REPORT", str(env_report))
+    result = CliRunner().invoke(
+        frontend.smelt, ["-p", str(tmp_path), "--report", str(flag_report), command]
+    )
+    assert result.exit_code == 0, result.output
+    assert flag_report.exists()
+    assert not env_report.exists()
+
+
+def test_report_env_used_without_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from click.testing import CliRunner
+
+    from smelt import frontend
+
+    (tmp_path / "pyproject.toml").write_text(NUITKA_PROJECT)
+    _stub_run_backend(monkeypatch)
+    env_report = tmp_path / "env.log"
+    monkeypatch.setenv("SMELT_REPORT", str(env_report))
+    result = CliRunner().invoke(frontend.smelt, ["-p", str(tmp_path), "build"])
+    assert result.exit_code == 0, result.output
+    assert env_report.exists()
+
+
 @pytest.mark.parametrize(
     ("old", "new", "project_flag"),
     [

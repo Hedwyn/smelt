@@ -8,6 +8,7 @@ Command-line interface for Smelt
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import shutil
 import sys
@@ -28,7 +29,6 @@ from smelt.backend import (
     compile_mypyc_extensions,
     nuitkaify_module,
     run_backend,
-    write_auto_mode_report,
 )
 from smelt.compiler import SupportedPlatforms, compile_extension
 from smelt.config import (
@@ -211,22 +211,33 @@ def error_exit(msg: str, code: int = 1) -> NoReturn:
     "-l",
     "--log-level",
     type=LOG_LEVELS,
-    default="warning",
-    help="Logging level to apply. Logs are emitted to stdout.",
+    default=None,
+    help="Logging level to apply. Logs are emitted to stdout. Default: 'warning', or "
+    "'debug' when SMELT_DEBUG is set.",
 )
-@click.option("--report", type=str, default=None, help="Write a report to the given path.")
+@click.option(
+    "--report",
+    type=str,
+    default=None,
+    help="Write a report to the given path. Default: the SMELT_REPORT environment variable.",
+)
 @click.pass_context
-def smelt(ctx: Context, project: PathExists, log_level: str, report: str | None) -> None:
+def smelt(ctx: Context, project: PathExists, log_level: str | None, report: str | None) -> None:
     """
     Entrypoint for Smelt frontend
     """
+    # Command-line flags win over the environment variables.
+    if log_level is None:
+        log_level = "debug" if os.environ.get("SMELT_DEBUG") else "warning"
+    if report is None:
+        report = os.environ.get("SMELT_REPORT") or None
     ctx.obj = CliState(project=project, log_level=log_level, report=report)
     enable_global_context()
     logging.basicConfig(level=logging._nameToLevel[log_level.upper()])
     click.echo(SMELT_ASCCI_ART)
 
 
-def _load_config(state: CliState, *, load_env: bool = True) -> SmeltConfig:
+def _load_config(state: CliState) -> SmeltConfig:
     """
     Parses the project's `[tool.smelt]` config, exiting with a message when the
     project has no readable pyproject.toml.
@@ -239,10 +250,7 @@ def _load_config(state: CliState, *, load_env: bool = True) -> SmeltConfig:
             toml_data = tomllib.load(f)
         except tomllib.TOMLDecodeError as exc:
             error_exit(f"Invalid TOML file [{pyproject_path}]: {exc}")
-    config = parse_config_from_pyproject(toml_data, project_root=state.project)
-    if load_env:
-        config.load_env()
-    return config
+    return parse_config_from_pyproject(toml_data, project_root=state.project)
 
 
 def _write_global_report(state: CliState) -> None:
@@ -274,7 +282,7 @@ def config_command(state: CliState) -> None:
     of every entrypoint, each with the level it came from (default, pyproject table
     or CLI).
     """
-    config = _load_config(state, load_env=False)
+    config = _load_config(state)
     click.echo(config)
     for spec, levels in config.entrypoints.items():
         resolved = resolve_bundle(levels)
@@ -305,9 +313,7 @@ def build(state: CliState) -> None:
             without_entrypoint=True,
         )
     finally:
-        if config.report_path is not None:
-            write_auto_mode_report(config.report_path)
-    _write_global_report(state)
+        _write_global_report(state)
 
 
 @smelt.command("nuitka-binary")
@@ -380,9 +386,7 @@ def nuitka_binary(
             no_cache=no_cache,
         )
     finally:
-        if config.report_path is not None:
-            write_auto_mode_report(config.report_path)
-    _write_global_report(state)
+        _write_global_report(state)
 
 
 @smelt.command("bundle")
@@ -584,7 +588,7 @@ def clean(state: CliState, *, shadowed_only: bool) -> None:
     project, unshadowing their `.py` counterpart back to being the one Python
     imports.
     """
-    config = _load_config(state, load_env=False)
+    config = _load_config(state)
     path_solver = config.get_path_solver(project_root=state.project)
     deleted = clean_all_artifacts(config, path_solver, shadowed_only=shadowed_only)
 

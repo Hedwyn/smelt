@@ -62,8 +62,8 @@ All of the following keys live under `[tool.smelt]`. The `[tool.hatch.build.hook
 | `extensions.auto.mode` | `"off"` \| `"package"` \| `"all"` | Instead of listing modules by hand, walk the package tree and propose every `.py` file as a compile target (see limitation below). |
 | `extensions.auto.backends` | list of `"nuitka"`/`"mypyc"`/`"cython"`/`"bytecode"` | Backends tried in order, per module discovered by auto mode. Defaults to `["nuitka"]`. `"bytecode"` compiles nothing: the module stays pure Python (shipped as `.pyc` by `smelt bundle`, left as source in a wheel). Listing it last means auto mode never fails a build; `["bytecode"]` alone compiles nothing. |
 | `supported-targets` | list of str | Zig-triple patterns (`x86_64-linux-*`, `*-linux-*`, `host`). The native build is skipped (not failed) for any target not matching, host included. Also written into the package's manifest, so downstream cross-builds skip it too. Replaces `platforms` and `archs`. |
-| `debug` | bool | Enables verbose logging from the build hook. Also settable via the `SMELT_DEBUG` environment variable. |
-| `report_path` | str | If set, writes a build report to this path once the hook completes. Also settable via the `SMELT_REPORT` environment variable. |
+
+The hook has no command line: set `SMELT_DEBUG` (verbose logging) and `SMELT_REPORT` (path of the auto-mode report, written when the hook completes) in the environment. The CLI reads the same variables; `-l/--log-level` and `--report` win over them.
 
 ### `extras`-gated modules
 

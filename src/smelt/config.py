@@ -247,10 +247,8 @@ class SmeltConfig:
     #: `[tool.smelt.nuitka-binary]` options per entrypoint.
     nuitka_binary: dict[str, NuitkaBinaryOptions] = field(default_factory=dict)
     script_names: dict[str, str] = field(default_factory=dict)
-    debug: bool = False
     auto_mode: AutoMode = "off"
     backend_priority_order: list[Backend] = field(default_factory=lambda: [Backend.NUITKA])
-    report_path: str | None = None
     #: Raw `[project.dependencies]` specifier strings (PEP 621), for `isolated-build`'s
     #: `"pyproject"` version-resolution strategy -- see
     #: `smelt.isolated_build.resolve_isolated_build_version`.
@@ -435,15 +433,6 @@ class SmeltConfig:
                 value = "".join(("\n * " + f"{key} -> {val}" for key, val in value.items()))
             lines.append(f"{field_name:20}: {value}")
         return "\n".join(lines)
-
-    def load_env(self) -> None:
-        """
-        Updates internal values based on set environement variables.
-        """
-        if os.environ.get("SMELT_DEBUG"):
-            self.debug = True
-        if report_path := os.environ.get("SMELT_REPORT"):
-            self.report_path = report_path
 
 
 def parse_config_from_pyproject(
