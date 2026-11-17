@@ -9,7 +9,10 @@ description = "Binary orchestrator for Python packages"
 requires-python = ">=3.12"
 authors = [{ name = "Baptiste Pestourie" }]
 readme = "README.md"
-dependencies = ["setuptools", "ziglang"]
+# ziglang: Zig changes its language and build API between minor releases; smelt's own
+# Zig sources, its `.zig` extension handling (no `@cImport` since 0.17) and the
+# vendored build.zig recipes target the 0.17 series.
+dependencies = ["setuptools", "ziglang>=0.17,<0.18"]
 
 [project.scripts]
 smelt = "smelt.frontend:smelt"
