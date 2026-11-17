@@ -32,7 +32,7 @@ def test_call_command_success() -> None:
     Tests the successful execution of a command, checking exit code and stdout.
     The command should run to completion.
     """
-    result = call_command(CMD)
+    result = call_command("bash", "-c", CMD)
 
     assert result.success is True
     assert result.exit_code == 0
@@ -53,7 +53,7 @@ def test_call_command_printer_timing() -> None:
     def printer_with_timestamp(line: str) -> None:
         received_lines_with_ts.append((line, time.time()))
 
-    result = call_command(CMD, printer=printer_with_timestamp)
+    result = call_command("bash", "-c", CMD, printer=printer_with_timestamp)
 
     assert result.exit_code == 0
 
@@ -81,7 +81,7 @@ def test_call_command_timeout() -> None:
     # Total command time is > 0.3s. A timeout of 0.15s should cut it off after the first echo.
     timeout = 0.15
 
-    result = call_command(CMD, timeout=timeout)
+    result = call_command("bash", "-c", CMD, timeout=timeout)
     assert result.success is False
     # On Unix, a process terminated by SIGINT (like Ctrl+C) often returns 130.
     assert result.exit_code == 130
@@ -114,9 +114,9 @@ def test_gc_sigkill_fallback(tmp_path: Path) -> None:
     custom_gc.start()
 
     # 3. Run the command that will time out
-    command_to_run = f"{sys.executable} {script_path}"
+    command_to_run = (sys.executable, str(script_path))
     result = call_command(
-        command_to_run,
+        *command_to_run,
         timeout=timeout,
         process_gc=custom_gc,
         on_popen=procs.append,
@@ -156,9 +156,9 @@ def test_gc_atexit_handler(tmp_path: Path) -> None:
     custom_gc.start()
 
     # 3. Run the command that will time out
-    command_to_run = f"{sys.executable} {script_path}"
+    command_to_run = (sys.executable, str(script_path))
     result = call_command(
-        command_to_run,
+        *command_to_run,
         timeout=0.1,
         process_gc=custom_gc,
         on_popen=procs.append,

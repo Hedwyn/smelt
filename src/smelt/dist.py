@@ -2069,10 +2069,12 @@ def build_dist(
     # compile primitives take (see `SupportedPlatforms.from_triple`'s own doc) --
     # raises for a target outside today's 3 supported members (e.g. musl, Windows,
     # macOS): `run_backend` cross-compiling extensions does not extend there yet,
-    # unlike interpreter/wheel targeting elsewhere in this function.
+    # unlike interpreter/wheel targeting elsewhere in this function. Only resolved
+    # when `run_backend` actually runs, so such targets stay usable with
+    # `build_extensions=False` (wheel-based isolated builds).
     backend_crosscompile = (
         SupportedPlatforms.from_triple(resolved_target_platform)
-        if resolved_target_platform is not None
+        if resolved_target_platform is not None and build_extensions
         else None
     )
     # Auto-discovery (`run_backend(static_link=True)`)
@@ -2314,7 +2316,17 @@ def build_dist(
     # built for a different target) via the same `./configure`-only step, cached
     # per target.
     resolved_isolated_py_headers: TargetPythonHeaders | None = None
-    if resolved_isolated_build and resolved_target_platform is not None:
+    # Headers only matter for building from source, which `prepare_isolated_natives`
+    # can only do for a target `SupportedPlatforms` knows (it raises `SmeltError`
+    # otherwise); for any other target (musl, Windows...) only wheels can be used, and
+    # resolving headers would run a pointless, possibly failing, configure step.
+    source_build_possible = True
+    if resolved_target_platform is not None:
+        try:
+            SupportedPlatforms.from_triple(resolved_target_platform)
+        except SmeltError:
+            source_build_possible = False
+    if resolved_isolated_build and resolved_target_platform is not None and source_build_possible:
         isolated_python_version = (
             python_version if resolved_python == "own" else resolve_own_python_version(None)
         )

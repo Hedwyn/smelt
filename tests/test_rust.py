@@ -16,12 +16,14 @@ from __future__ import annotations
 import shutil
 import socket
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from smelt.rust.maturin import build_with_maturin
 from smelt.rust.toolchain import (
+    RustToolchain,
     RustToolchainError,
     compile_rust_source_for_target,
     ensure_rust_target,
@@ -87,9 +89,22 @@ def test_zig_target_to_rust_triple_malformed() -> None:
 # --- toolchain fetch + cross-compile (needs network) --------------------------------
 
 
+@pytest.fixture(scope="session")
+def rust_toolchain(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RustToolchain]:
+    """
+    One toolchain install (~770 MB) shared by every test, removed at session end,
+    instead of one per test.
+    """
+    root = tmp_path_factory.mktemp("rust-toolchain")
+    try:
+        yield ensure_rust_toolchain(root / "toolchain")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 @needs_rust_network
-def test_cross_compile_hello_world_for_armv7(tmp_path: Path) -> None:
-    toolchain = ensure_rust_toolchain(tmp_path / "toolchain")
+def test_cross_compile_hello_world_for_armv7(tmp_path: Path, rust_toolchain: RustToolchain) -> None:
+    toolchain = rust_toolchain
 
     source = tmp_path / "hello.rs"
     source.write_text('fn main() { println!("Hello, world!"); }')
@@ -107,12 +122,14 @@ def test_cross_compile_hello_world_for_armv7(tmp_path: Path) -> None:
 
 
 @needs_rust_network
-def test_cross_compile_static_musl_runs_under_qemu(tmp_path: Path) -> None:
+def test_cross_compile_static_musl_runs_under_qemu(
+    tmp_path: Path, rust_toolchain: RustToolchain
+) -> None:
     qemu = shutil.which("qemu-arm-static") or shutil.which("qemu-arm")
     if qemu is None:
         pytest.skip("needs qemu-arm(-static) to actually run the produced binary")
 
-    toolchain = ensure_rust_toolchain(tmp_path / "toolchain")
+    toolchain = rust_toolchain
     source = tmp_path / "hello.rs"
     source.write_text('fn main() { println!("Hello, world!"); }')
     output = tmp_path / "hello_armv7_musl"
@@ -125,8 +142,8 @@ def test_cross_compile_static_musl_runs_under_qemu(tmp_path: Path) -> None:
 
 
 @needs_rust_network
-def test_ensure_rust_target_is_idempotent(tmp_path: Path) -> None:
-    toolchain = ensure_rust_toolchain(tmp_path / "toolchain")
+def test_ensure_rust_target_is_idempotent(tmp_path: Path, rust_toolchain: RustToolchain) -> None:
+    toolchain = rust_toolchain
     ensure_rust_target(toolchain, "armv7-unknown-linux-gnueabihf")
     # A second call must not fail: rustup itself no-ops on an already-installed target.
     ensure_rust_target(toolchain, "armv7-unknown-linux-gnueabihf")
@@ -179,9 +196,9 @@ def maturin_crate(tmp_path: Path) -> Path:
 
 @needs_rust_network
 def test_build_with_maturin_cross_compiles_and_emits_objects(
-    maturin_crate: Path, tmp_path: Path
+    maturin_crate: Path, tmp_path: Path, rust_toolchain: RustToolchain
 ) -> None:
-    toolchain = ensure_rust_toolchain(tmp_path / "toolchain")
+    toolchain = rust_toolchain
 
     result = build_with_maturin(
         toolchain,

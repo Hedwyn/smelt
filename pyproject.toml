@@ -152,6 +152,12 @@ build = [
   "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@6d2756d",
 ]
 
+[tool.pytest.ini_options]
+# Delete tmp dirs as soon as a test passes and never keep previous runs: some tests
+# produce hundreds of MB each (toolchains, distributions).
+tmp_path_retention_count = 0
+tmp_path_retention_policy = "failed"
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 

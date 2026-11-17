@@ -292,7 +292,7 @@ def test_prepare_isolated_natives_replaces_extension_entries_for_the_target(
         versions="local",
         dependencies={},
     )
-    replacement = replacements.get(resolved.import_path)
+    replacement = replacements.replacements.get(resolved.import_path)
     assert replacement is not None
     assert "musl" in replacement.name
 

@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -1020,7 +1021,7 @@ def test_resolve_dist_python_lets_the_cli_win() -> None:
 
 
 @pytest.fixture(scope="module")
-def hatchdemo_dist(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def hatchdemo_dist(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
     """
     A mode `own` distribution of `examples/hatchdemo`, built once for the whole
     module.
@@ -1048,7 +1049,10 @@ def hatchdemo_dist(tmp_path_factory: pytest.TempPathFactory) -> Path:
         tailor_interpreter=False,
     )
     assert report.interpreter is not None, "--python own must stage an interpreter"
-    return report.dist_root
+    try:
+        yield report.dist_root
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
 
 
 def _run_without_an_environment(dist_root: Path, *args: str) -> str:

@@ -16,7 +16,7 @@ import sysconfig
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Final, Generator, Literal, assert_never, cast, get_args
+from typing import Final, Generator, Literal, assert_never, get_args
 
 import pytest
 from mypyc.build import mypycify
@@ -102,9 +102,8 @@ def test_pyconfig_headers_bundled(python_version: str, platform_triple: str) -> 
 def build_temp_extension(
     ext_name: TestModule | TestExtension,
     crosscompile: SupportedPlatforms | None = None,
-) -> Generator[str, None, None]:
+) -> Generator[Path, None, None]:
     if ext_name in AVAILABLE_MODULES:
-        cast(TestModule, ext_name)
         (extension,) = mypycify_module(ext_name)
         shared_lib_path = compile_extension(extension, crosscompile=crosscompile)
     else:
@@ -168,7 +167,7 @@ def test_compiler_builds_so(ext_name: TestExtension) -> None:
     """
     with build_temp_extension(ext_name) as shared_lib_path:
         assert os.path.exists(shared_lib_path)
-        assert shared_lib_path.endswith(".so")
+        assert shared_lib_path.suffix == ".so"
     assert not os.path.exists(shared_lib_path), (
         "`build_temp_extension` fixture did not clean-up properly"
     )
@@ -184,18 +183,19 @@ def test_compiler_crosscompiled_so(ext_name: TestExtension, platform: SupportedP
     """
     with build_temp_extension(ext_name, crosscompile=platform) as shared_lib_path:
         assert os.path.exists(shared_lib_path)
-        assert shared_lib_path.endswith(".so")
+        assert shared_lib_path.suffix == ".so"
     assert not os.path.exists(shared_lib_path), (
         "`build_temp_extension` fixture did not clean-up properly"
     )
 
 
 @pytest.mark.parametrize("ext_name", AVAILABLE_EXTENSIONS)
-def test_built_so(ext_name: TestExtension) -> None:
+def test_built_so(ext_name: TestExtension, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     Verifies that the built shared library works
     """
-    with build_temp_extension(ext_name):
+    with build_temp_extension(ext_name) as shared_lib_path:
+        monkeypatch.syspath_prepend(str(shared_lib_path.parent))
         ext_mod = importlib.import_module(ext_name)
 
     match ext_name:
@@ -211,15 +211,16 @@ def test_built_so(ext_name: TestExtension) -> None:
 def test_compiler_compliant_with_mypyc(mod_name: TestModule) -> None:
     with build_temp_extension(mod_name) as shared_lib_path:
         assert os.path.exists(shared_lib_path)
-        assert shared_lib_path.endswith(".so")
+        assert shared_lib_path.suffix == ".so"
     assert not os.path.exists(shared_lib_path)
 
 
 @pytest.mark.parametrize("mod_name", AVAILABLE_MODULES)
-def test_compiler_built_mypyc(mod_name: TestModule) -> None:
+def test_compiler_built_mypyc(mod_name: TestModule, monkeypatch: pytest.MonkeyPatch) -> None:
     with build_temp_extension(mod_name) as shared_lib_path:
         assert os.path.exists(shared_lib_path)
-        assert shared_lib_path.endswith(".so")
+        assert shared_lib_path.suffix == ".so"
+        monkeypatch.syspath_prepend(str(shared_lib_path.parent))
         ext_mod = importlib.import_module(mod_name)
 
         match mod_name:
