@@ -507,9 +507,11 @@ def test_stage_interpreter_prunes_what_the_closure_did_not_reach(tmp_path: Path)
     assert staged.pruned_modules == ["json"]
     assert staged.pruned_extensions == ["_json"]
     # Not every library: `bz2` and `lzma` are reachable from the `zipfile` that every
-    # interpreter carries behind `importlib.readers`, so nothing can turn them off
-    # without `--drop-optional-imports`.
-    assert {"openssl", "sqlite", "libffi", "tk"} <= set(staged.disabled_libraries)
+    # interpreter carries behind `importlib.readers`, and so is `openssl` (through
+    # `importlib.resources` -> `tempfile` -> `random` -> `hashlib`, whose `_hashlib` is
+    # an optional import): nothing can turn them off without `--drop-optional-imports`.
+    assert {"sqlite", "libffi", "tk"} <= set(staged.disabled_libraries)
+    assert "openssl" not in staged.disabled_libraries
     assert not (stdlib / "json").exists()
     assert not (stdlib / "lib-dynload" / "_json.cpython-312-x86_64-linux-gnu.so").exists()
     # `os` is in ALWAYS_KEEP, which is also what stops the landmark being prunable
@@ -677,8 +679,10 @@ def test_stage_interpreter_prunes_inside_a_kept_package(tmp_path: Path) -> None:
     )
 
     stdlib = dist_root / "lib" / "python3.12"
-    # `logging` goes whole, the closure not having reached it at all
-    assert staged.pruned_modules == ["logging"]
+    # `logging` stays: every interpreter carries `importlib.readers`, which reaches
+    # `hashlib` (through `tempfile` and `random`), and `hashlib` imports `logging`
+    assert staged.pruned_modules == []
+    assert (stdlib / "logging").exists()
     assert staged.pruned_submodules == ["json.tool"]
     assert not (stdlib / "json" / "tool.pyc").exists()
     # what `json/__init__.py` itself imports stays, `__init__` included

@@ -333,9 +333,10 @@ def link_generic_extension(
     module_so_path = link_extension_objects(
         compiled.objects,
         ext.extension.name + so_suffix,
-        libraries=win_libraries,
-        library_dirs=win_library_dirs,
-        extra_preargs=extra_preargs,
+        libraries=[*ext.extension.libraries, *win_libraries],
+        library_dirs=[*ext.extension.library_dirs, *win_library_dirs],
+        runtime_library_dirs=ext.extension.runtime_library_dirs,
+        extra_preargs=[*extra_preargs, *(ext.extension.extra_link_args or [])],
     )
     shutil.move(module_so_path, str(ext.get_dest_path(target_triple)))
     if compiled.runtime_objects is not None:
@@ -343,9 +344,10 @@ def link_generic_extension(
         runtime_so_path = link_extension_objects(
             compiled.runtime_objects,
             ext.runtime.name + so_suffix,
-            libraries=win_libraries,
-            library_dirs=win_library_dirs,
-            extra_preargs=extra_preargs,
+            libraries=[*ext.runtime.libraries, *win_libraries],
+            library_dirs=[*ext.runtime.library_dirs, *win_library_dirs],
+            runtime_library_dirs=ext.runtime.runtime_library_dirs,
+            extra_preargs=[*extra_preargs, *(ext.runtime.extra_link_args or [])],
         )
         shutil.move(runtime_so_path, str(ext.get_runtime_dest_path(target_triple)))
     return ext
