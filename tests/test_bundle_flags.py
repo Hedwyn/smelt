@@ -39,7 +39,7 @@ def _project(tmp_path: Path, extra: str = "") -> Path:
 
 
 def _run(project: Path, *args: str) -> tuple[int, str]:
-    result = CliRunner().invoke(frontend.smelt, ["bundle", "-p", str(project), *args])
+    result = CliRunner().invoke(frontend.smelt, ["-p", str(project), "bundle", *args])
     return result.exit_code, result.output
 
 

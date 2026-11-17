@@ -43,10 +43,10 @@ See [Build Hook](build-hook.md) for the full configuration reference (mypyc, Cyt
 
 Installing Smelt with the `cli` extra (`pip install "smelt[cli]"`) also gives you the `smelt` command, which can drive the same `fib-demo` project by hand - handy to inspect or rebuild extensions without going through a full `pip install`/`build`. `smelt --help` lists every available command; see [CLI](cli.md) for the full reference. A few of them, run from the `fib-demo` project root:
 
-**`smelt show-config`** parses `pyproject.toml` and prints the config Smelt actually resolved - useful to confirm your `extensions` declarations were picked up correctly:
+**`smelt config`** parses `pyproject.toml` and prints the config Smelt actually resolved, with the source of each bundler setting - useful to confirm your `extensions` declarations were picked up correctly:
 
 ```
-$ smelt show-config
+$ smelt config
 SmeltConfig(packages_location={'fib_demo': 'src/fib_demo'},
             ...
             mypyc_modules=[MypycModule(import_path='fib_demo.fib',
@@ -55,20 +55,20 @@ SmeltConfig(packages_location={'fib_demo': 'src/fib_demo'},
             ...)
 ```
 
-**`smelt build-extensions`** runs the same compilation step the build hook runs during `pip install`/`build`, without needing a full build. For `fib-demo` this compiles `fib.py` with mypyc and drops two files next to it: the compiled module itself, and its small mypyc runtime:
+**`smelt build`** runs the same compilation step the build hook runs during `pip install`/`build`, without needing a full build. For `fib-demo` this compiles `fib.py` with mypyc and drops two files next to it: the compiled module itself, and its small mypyc runtime:
 
 ```
-$ smelt build-extensions
+$ smelt build
 $ ls src/fib_demo
 __init__.py  fib.cpython-312-x86_64-linux-gnu.so  fib__mypyc.cpython-312-x86_64-linux-gnu.so  fib.py
 ```
 
 `fib.py` is still there, but it's now shadowed: `import fib_demo.fib` loads the compiled `.so`, not the source file.
 
-**`smelt clean-artifacts`** reverses that: it deletes the compiled `.so`s (and the mypyc runtime alongside them), unshadowing `fib.py` back to being the one Python imports - handy to reset a checkout to pure Python:
+**`smelt clean`** reverses that: it deletes the compiled `.so`s (and the mypyc runtime alongside them), unshadowing `fib.py` back to being the one Python imports - handy to reset a checkout to pure Python:
 
 ```
-$ smelt clean-artifacts
+$ smelt clean
 Deleted following artifacts:
 fib_demo.fib:
   - src/fib_demo/fib.cpython-312-x86_64-linux-gnu.so (was shadowing src/fib_demo/fib.py)

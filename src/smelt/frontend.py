@@ -13,8 +13,9 @@ import shutil
 import sys
 import sysconfig
 import tomllib
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Literal, NoReturn, ParamSpec, TypeVar
 
@@ -41,6 +42,7 @@ from smelt.config import (
 )
 from smelt.context import enable_global_context, get_context
 from smelt.bundle_flags import add_bundle_options, settings_from_params
+from smelt.schema import toml_key
 from smelt.dist import (
     assert_supported_platforms,
     build_dist,
@@ -78,13 +80,19 @@ SMELT_ASCCI_ART: str = r"""
 
 """
 
-add_logging_option = click.option(
-    "-l",
-    "--logging-level",
-    type=click.Choice(list(logging._nameToLevel), case_sensitive=False),
-    help="Logging level to apply. Logs are emitted to stdout",
-    default="warning",
-)
+LOG_LEVELS = click.Choice(list(logging._nameToLevel), case_sensitive=False)
+
+
+@dataclass
+class CliState:
+    """
+    Options shared by every command, set on the `smelt` group and passed down through
+    the click context.
+    """
+
+    project: Path
+    log_level: str
+    report: str | None
 
 
 class CliImportPath(ParamType):
@@ -192,46 +200,117 @@ def error_exit(msg: str, code: int = 1) -> NoReturn:
 
 
 @click.group()
-def smelt() -> None:
+@click.option(
+    "-p",
+    "--project",
+    default=".",
+    type=CliExistingPath(),
+    help="Project to act on: a folder holding a pyproject.toml. Default: the current folder.",
+)
+@click.option(
+    "-l",
+    "--log-level",
+    type=LOG_LEVELS,
+    default="warning",
+    help="Logging level to apply. Logs are emitted to stdout.",
+)
+@click.option("--report", type=str, default=None, help="Write a report to the given path.")
+@click.pass_context
+def smelt(ctx: Context, project: PathExists, log_level: str, report: str | None) -> None:
     """
     Entrypoint for Smelt frontend
     """
+    ctx.obj = CliState(project=project, log_level=log_level, report=report)
     enable_global_context()
+    logging.basicConfig(level=logging._nameToLevel[log_level.upper()])
     click.echo(SMELT_ASCCI_ART)
 
 
-@smelt.command()
-@click.option(
-    "-p",
-    "--path",
-    default=".",
-    type=CliExistingPath(),
-)
-@wrap_smelt_errors()
-def show_config(*, path: PathExists) -> None:
+def _load_config(state: CliState, *, load_env: bool = True) -> SmeltConfig:
     """
-    Shows the smelt config as defined in the passed file
+    Parses the project's `[tool.smelt]` config, exiting with a message when the
+    project has no readable pyproject.toml.
     """
-    from pprint import pprint
-
-    try:
-        with (path / "pyproject.toml").open("rb") as f:
+    pyproject_path = state.project / "pyproject.toml"
+    if not path_exists(pyproject_path):
+        error_exit("No pyproject.toml found in project folder")
+    with pyproject_path.open("rb") as f:
+        try:
             toml_data = tomllib.load(f)
-    except FileNotFoundError:
-        click.echo("No pyproject.toml not found.")
+        except tomllib.TOMLDecodeError as exc:
+            error_exit(f"Invalid TOML file [{pyproject_path}]: {exc}")
+    config = parse_config_from_pyproject(toml_data, project_root=state.project)
+    if load_env:
+        config.load_env()
+    return config
+
+
+def _write_global_report(state: CliState) -> None:
+    if state.report is None:
         return
-    pprint(parse_config_from_pyproject(toml_data, project_root=path))
+    global_context = get_context()
+    assert global_context is not None, "enable_global_context() runs in the group callback"
+    Path(state.report).write_text(global_context.render())
 
 
-@smelt.command()
-@click.option(
-    "-p",
-    "--package-path",
-    default=".",
-    type=CliExistingPath(),
-)
-@add_logging_option
-@click.option("-r", "--report", type=str, default=None, help="Produces a report at the given path")
+def _flatten(settings: object, prefix: str = "") -> Iterator[tuple[str, object]]:
+    """Yields `(dotted kebab-case key, value)` for every leaf of a settings dataclass."""
+    assert is_dataclass(settings)
+    for f in fields(settings):
+        value = getattr(settings, f.name)
+        key = prefix + toml_key(f.name)
+        if is_dataclass(value):
+            yield from _flatten(value, f"{key}.")
+        else:
+            yield key, value
+
+
+@smelt.command("config")
+@click.pass_obj
+@wrap_smelt_errors()
+def config_command(state: CliState) -> None:
+    """
+    Shows the resolved config: the project-wide settings, then the bundler settings
+    of every entrypoint, each with the level it came from (default, pyproject table
+    or CLI).
+    """
+    config = _load_config(state, load_env=False)
+    click.echo(config)
+    for spec, levels in config.entrypoints.items():
+        resolved = resolve_bundle(levels)
+        click.echo(f"\nBundler settings of {spec}:")
+        for key, value in _flatten(resolved.settings):
+            sources = resolved.sources.get(key)
+            if key == "supported-targets":
+                for level in resolved.supported_targets:
+                    click.echo(f"  {key} = {list(level.patterns)}  [{level.source}]")
+            elif sources:
+                click.echo(f"  {key} = {value!r}  [{', '.join(sources)}]")
+
+
+@smelt.command("build")
+@click.pass_obj
+@wrap_smelt_errors()
+def build(state: CliState) -> None:
+    """
+    Builds the extensions declared in the project's Smelt config, in place.
+    """
+    config = _load_config(state)
+    path_solver = config.get_path_solver(project_root=state.project)
+    try:
+        run_backend(
+            config,
+            stdout="stdout",
+            path_solver=path_solver,
+            without_entrypoint=True,
+        )
+    finally:
+        if config.report_path is not None:
+            write_auto_mode_report(config.report_path)
+    _write_global_report(state)
+
+
+@smelt.command("nuitka-binary")
 @click.option(
     "-e",
     "--entrypoint",
@@ -239,7 +318,8 @@ def show_config(*, path: PathExists) -> None:
     default=None,
     help="Restrict the build to this entrypoint: either its script name as declared in "
     "[project.scripts] (e.g. 'afpu'), or its 'module.path'/'module.path:func_name' key "
-    "as declared in [tool.smelt.entrypoints]. Builds all configured entrypoints if omitted.",
+    "as declared in [tool.smelt.nuitka-binary.entrypoints]. Builds all configured "
+    "entrypoints if omitted.",
 )
 @click.option(
     "--package-data",
@@ -264,38 +344,32 @@ def show_config(*, path: PathExists) -> None:
     default=False,
     help="Disable Nuitka's build cache, forcing a full rebuild.",
 )
+@click.pass_obj
 @wrap_smelt_errors()
-def build_standalone_binary(
-    package_path: PathExists,
-    logging_level: str,
-    report: str | None,
+def nuitka_binary(
+    state: CliState,
     entrypoint: str | None,
     package_data: tuple[str, ...],
     embed_files: tuple[tuple[PathExists, ImportPath], ...],
     no_cache: bool,
 ) -> None:
+    """
+    Builds a Nuitka whole-program executable per entrypoint, configured by
+    [tool.smelt.nuitka-binary].
+    """
     if embed_files:
         click.echo(
             "Warning: --embed-file is deprecated and will be removed in 0.9; "
             "declare the file's package under package-data in [tool.smelt.nuitka-binary].",
             err=True,
         )
-    levelno = logging._nameToLevel[logging_level]
-    logging.basicConfig(level=levelno)
-    try:
-        with (package_path / "pyproject.toml").open("rb") as f:
-            toml_data = tomllib.load(f)
-    except FileNotFoundError:
-        click.echo("No pyproject.toml not found.")
-        return
-    config = parse_config_from_pyproject(toml_data, project_root=package_path)
-    config.load_env()
+    config = _load_config(state)
     if package_data:
         cli_package_data = package_data_from_cli(package_data)
         for options in config.nuitka_binary.values():
             for package, patterns in cli_package_data.items():
                 options.package_data.setdefault(package, []).extend(patterns)
-    path_solver = config.get_path_solver(project_root=package_path)
+    path_solver = config.get_path_solver(project_root=state.project)
     try:
         run_backend(
             config,
@@ -308,20 +382,10 @@ def build_standalone_binary(
     finally:
         if config.report_path is not None:
             write_auto_mode_report(config.report_path)
-    if report is not None:
-        global_context = get_context()
-        assert global_context is not None
-        Path(report).write_text(global_context.render())
+    _write_global_report(state)
 
 
 @smelt.command("bundle")
-@click.option(
-    "-p",
-    "--project",
-    default=".",
-    type=CliExistingPath(),
-    help="Project to bundle: a folder holding a pyproject.toml. Default: the current folder.",
-)
 @click.option(
     "-e",
     "--entrypoint",
@@ -358,24 +422,15 @@ def build_standalone_binary(
     "`supported-targets` declared, else host.",
 )
 @add_bundle_options
-@click.option(
-    "-l",
-    "--log-level",
-    type=click.Choice(list(logging._nameToLevel), case_sensitive=False),
-    help="Logging level to apply. Logs are emitted to stdout",
-    default="warning",
-)
-@click.option("--report", type=str, default=None, help="Write a report to the given path.")
+@click.pass_obj
 @wrap_smelt_errors()
 def bundle(
+    state: CliState,
     *,
-    project: PathExists,
     entrypoint: str | None,
     output_dir: Path,
     no_build: bool,
     targets: tuple[tuple[str, ...], ...],
-    log_level: str,
-    report: str | None,
     **flags: object,
 ) -> None:
     """
@@ -388,15 +443,8 @@ def bundle(
     the ones above has a [tool.smelt.bundle] key of the same name and overrides it.
     Run instructions are printed at the end and written into the folder.
     """
-    logging.basicConfig(level=logging._nameToLevel[log_level])
-    try:
-        with (project / "pyproject.toml").open("rb") as f:
-            toml_data = tomllib.load(f)
-    except FileNotFoundError:
-        error_exit("No pyproject.toml found in passed folder")
-    config = parse_config_from_pyproject(toml_data, project_root=project)
-    config.load_env()
-    path_solver = config.get_path_solver(project_root=project)
+    config = _load_config(state)
+    path_solver = config.get_path_solver(project_root=state.project)
 
     cli_settings = settings_from_params(flags)
     entrypoint_spec = resolve_entrypoint_spec(config, entrypoint)
@@ -424,34 +472,14 @@ def bundle(
         click.echo(dist_report.render())
         click.echo("")
         click.echo(run_instructions(dist_report))
-        if report is not None:
-            report_path = Path(report)
+        if state.report is not None:
+            report_path = Path(state.report)
             if nested:
                 report_path = report_path.with_stem(f"{report_path.stem}-{target_label}")
             report_path.write_text(dist_report.render())
 
 
-@smelt.command()
-@click.argument(
-    "entrypoint-path",
-    type=ImportPath,
-)
-@add_logging_option
-@wrap_smelt_errors()
-def nuitkaify(entrypoint_path: ImportPath, logging_level: str) -> None:
-    """
-    Standalone command to run the nuitka wrapper in this package.
-    This is mainly intended for manual self-testing, if you only need nuitka
-    features you should probably just call nuitka directly.
-    """
-    from smelt.nuitkaify import compile_with_nuitka
-
-    levelno = logging._nameToLevel[logging_level]
-    logging.basicConfig(level=levelno)
-    compile_with_nuitka(entrypoint_path, stdout="stdout")
-
-
-@smelt.command()
+@smelt.command("compile")
 @click.argument(
     "module-import-path",
     type=CliImportPath(),
@@ -474,16 +502,18 @@ def nuitkaify(entrypoint_path: ImportPath, logging_level: str) -> None:
     "compiled extension is built per platform, nested under a <triple>/ folder "
     "whenever this flag is passed explicitly. Defaults to a single native build.",
 )
+@click.pass_obj
 @wrap_smelt_errors()
-def compile_module(
+def compile_command(
+    state: CliState,
     module_import_path: ImportPath,
     backend: Literal["mypyc", "nuitka", "cython"],
     target_platforms: tuple[tuple[str, ...], ...],
 ) -> None:
     """
-    Standalone command to run the nuitka wrapper in this package.
-    This is mainly intended for manual self-testing, if you only need nuitka
-    features you should probably just call nuitka directly.
+    One-off compile of a single installed module with the chosen backend, optionally
+    for other platforms. Mainly for trying a backend on a module outside a project
+    build; project builds go through `smelt build`.
     """
     path_solver = PathSolver.from_installed_import_paths(module_import_path)
     click.echo(f"Compiling module {module_import_path}")
@@ -535,52 +565,10 @@ def compile_module(
             )
             shutil.move(runtime_compiled_so, dest_folder / runtime_compiled_so)
         click.echo(f"Compiled so path: {dest_path}")
+    _write_global_report(state)
 
 
-@smelt.command
-@click.option(
-    "-p",
-    "--package",
-    type=CliExistingPath(),
-    help="Path the the package to build extensions for, expects to find a pyproject.toml",
-    default=Path.cwd(),
-)
-def build_extensions(*, package: PathExists) -> None:
-    """
-    Runs the smelt backend on the passed project and builds all extensions
-    defined by smelt.
-    """
-    pyproject_path = package / "pyproject.toml"
-    if not path_exists(pyproject_path):
-        error_exit("No pyproject.toml found in passed folder")
-    with pyproject_path.open("rb") as f:
-        try:
-            toml_data = tomllib.load(f)
-        except tomllib.TOMLDecodeError as exc:
-            error_exit(f"Invalid TOML file [{pyproject_path}]: {exc}")
-        config = parse_config_from_pyproject(toml_data, project_root=package)
-        config.load_env()
-        path_solver = config.get_path_solver(project_root=package)
-        try:
-            run_backend(
-                config,
-                stdout="stdout",
-                path_solver=path_solver,
-                without_entrypoint=True,
-            )
-        finally:
-            if config.report_path is not None:
-                write_auto_mode_report(config.report_path)
-
-
-@smelt.command()
-@click.option(
-    "-p",
-    "--package",
-    type=CliExistingPath(),
-    help="Path the the package to clean built artifacts for, expects to find a pyproject.toml",
-    default=Path.cwd(),
-)
+@smelt.command("clean")
 @click.option(
     "--shadowed-only",
     is_flag=True,
@@ -588,24 +576,17 @@ def build_extensions(*, package: PathExists) -> None:
     help="Only clean modules with a pure-Python fallback to unshadow, "
     "excluding handwritten C/Zig extensions",
 )
+@click.pass_obj
 @wrap_smelt_errors()
-def clean_artifacts(*, package: PathExists, shadowed_only: bool) -> None:
+def clean(state: CliState, *, shadowed_only: bool) -> None:
     """
     Deletes built dynlibs (and their mypyc runtime, where applicable) for the
-    passed project, unshadowing their `.py` counterpart back to being the one
-    Python imports.
+    project, unshadowing their `.py` counterpart back to being the one Python
+    imports.
     """
-    pyproject_path = package / "pyproject.toml"
-    if not path_exists(pyproject_path):
-        error_exit("No pyproject.toml found in passed folder")
-    with pyproject_path.open("rb") as f:
-        try:
-            toml_data = tomllib.load(f)
-        except tomllib.TOMLDecodeError as exc:
-            error_exit(f"Invalid TOML file [{pyproject_path}]: {exc}")
-        config = parse_config_from_pyproject(toml_data, project_root=package)
-        path_solver = config.get_path_solver(project_root=package)
-        deleted = clean_all_artifacts(config, path_solver, shadowed_only=shadowed_only)
+    config = _load_config(state, load_env=False)
+    path_solver = config.get_path_solver(project_root=state.project)
+    deleted = clean_all_artifacts(config, path_solver, shadowed_only=shadowed_only)
 
     if not deleted:
         click.echo("No built artifacts found.")
@@ -620,3 +601,97 @@ def clean_artifacts(*, package: PathExists, shadowed_only: bool) -> None:
                 continue
             pure_python_path = artifact.with_name(f"{artifact.name.removesuffix(suffix)}.py")
             click.echo(f"  - {artifact} (was shadowing {pure_python_path})")
+
+
+# --- Deprecated command names ---------------------------------------------------------
+# Every released command name keeps working as a hidden alias of its replacement, taking
+# the options the old command had (project path and logging/report flags included, now
+# group-level). Removed in 0.9.
+
+
+def _deprecated_alias(
+    old_name: str,
+    new_command: click.Command,
+    *,
+    project_flags: tuple[str, ...] = (),
+    log_flags: tuple[str, ...] = (),
+    report_flags: tuple[str, ...] = (),
+) -> click.Command:
+    legacy: list[click.Parameter] = []
+    if project_flags:
+        legacy.append(
+            click.Option(
+                [*project_flags, "legacy_project"], type=CliExistingPath(), default=None, hidden=True
+            )
+        )
+    if log_flags:
+        legacy.append(
+            click.Option([*log_flags, "legacy_log_level"], type=LOG_LEVELS, default=None, hidden=True)
+        )
+    if report_flags:
+        legacy.append(click.Option([*report_flags, "legacy_report"], default=None, hidden=True))
+    legacy_names = {param.name for param in legacy}
+    forwarded = {param.name for param in new_command.params}
+
+    def callback(**kwargs: object) -> None:
+        ctx = click.get_current_context()
+        state = ctx.obj
+        assert isinstance(state, CliState)
+        click.echo(
+            f"Warning: `smelt {old_name}` is deprecated and will be removed in 0.9; "
+            f"use `smelt {new_command.name}`.",
+            err=True,
+        )
+        if (project := kwargs.get("legacy_project")) is not None:
+            assert isinstance(project, Path)
+            state.project = project
+        if (level := kwargs.get("legacy_log_level")) is not None:
+            assert isinstance(level, str)
+            state.log_level = level
+            logging.getLogger().setLevel(logging._nameToLevel[level.upper()])
+        if (report := kwargs.get("legacy_report")) is not None:
+            assert isinstance(report, str)
+            state.report = report
+        ctx.invoke(
+            new_command,
+            **{k: v for k, v in kwargs.items() if k in forwarded and k not in legacy_names},
+        )
+
+    alias = click.Command(
+        old_name,
+        params=[*new_command.params, *legacy],
+        callback=callback,
+        hidden=True,
+        help=new_command.help,
+    )
+    smelt.add_command(alias)
+    return alias
+
+
+_deprecated_alias("show-config", config_command, project_flags=("-p", "--path"))
+_deprecated_alias("build-extensions", build, project_flags=("-p", "--package"))
+_deprecated_alias(
+    "build-standalone-binary",
+    nuitka_binary,
+    project_flags=("-p", "--package-path"),
+    log_flags=("-l", "--logging-level"),
+    report_flags=("-r", "--report"),
+)
+_deprecated_alias("compile-module", compile_command)
+_deprecated_alias("clean-artifacts", clean, project_flags=("-p", "--package"))
+
+
+@smelt.command("nuitkaify", hidden=True)
+@click.argument("entrypoint-path", type=ImportPath)
+def nuitkaify(entrypoint_path: ImportPath) -> None:
+    """
+    Deprecated: run `python -m smelt.nuitkaify ENTRYPOINT_PATH` instead.
+    """
+    from smelt.nuitkaify import compile_with_nuitka
+
+    click.echo(
+        "Warning: `smelt nuitkaify` is deprecated and will be removed in 0.9; "
+        "use `python -m smelt.nuitkaify`.",
+        err=True,
+    )
+    compile_with_nuitka(entrypoint_path, stdout="stdout")

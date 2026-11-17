@@ -47,6 +47,7 @@ compiled once. See `build_nuitka_runtime` and `patch_module_constants_calls`.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import platform
@@ -55,7 +56,7 @@ import shutil
 import sys
 import sysconfig
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -837,3 +838,25 @@ def nuitkaify_module(
         extension=setup_tools_ext,
         dest_folder=dest_folder,
     )
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """
+    Self-test entry: compiles one entrypoint with the Nuitka wrapper, bypassing the
+    rest of Smelt. If you only need Nuitka's features, call Nuitka directly.
+    """
+    parser = argparse.ArgumentParser(prog="python -m smelt.nuitkaify")
+    parser.add_argument("entrypoint", help="Path of the entrypoint to compile")
+    parser.add_argument(
+        "-l",
+        "--log-level",
+        default="warning",
+        choices=[name.lower() for name in logging._nameToLevel],
+    )
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging._nameToLevel[args.log_level.upper()])
+    compile_with_nuitka(args.entrypoint, stdout="stdout")
+
+
+if __name__ == "__main__":
+    main()

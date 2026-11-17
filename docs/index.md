@@ -43,7 +43,7 @@ While Nuitka is designed for that purpose and already capable by itself of doing
 
 * Plugging the pipeline for the other supported binary backends (Cython/mypyc) into Nuitka. Smelt will pre-build the native extensions, and hand the built files to Nuitka (some backends like mypyc generate additional runtime files that are not discovered by Nuitka automatically).
 * Using the Zig compiler with Nuitka (**Note: Nuitka >=4.0.0 now supports the Zig compiler natively, but it was not the case before**) - and thus benefits from its standalone nature.
-* Defining the flags for Nuitka from `[tool.smelt.nuitka-binary]`, so that the build command is as simple as `smelt build-standalone-binary`. For an application folder (or single file) with bytecode and an optional own interpreter, see `smelt bundle` first ([Bundler](bundler-get-started.md)); the Nuitka route is for a whole-program compile.
+* Defining the flags for Nuitka from `[tool.smelt.nuitka-binary]`, so that the build command is as simple as `smelt nuitka-binary`. For an application folder (or single file) with bytecode and an optional own interpreter, see `smelt bundle` first ([Bundler](bundler-get-started.md)); the Nuitka route is for a whole-program compile.
 
 ### Where to go next
 

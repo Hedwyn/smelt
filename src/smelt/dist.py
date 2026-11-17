@@ -674,6 +674,8 @@ class ResolvedBundle:
     #: Every level declaring `supported-targets`, least specific first.
     supported_targets: tuple[TargetLevel, ...]
     sources: dict[str, tuple[str, ...]]
+    #: The merged settings the fields above are read from, for display.
+    settings: BundleSettings
 
 
 def _defaulted[T](value: T | None, key: str) -> T:
@@ -731,6 +733,7 @@ def resolve_bundle(
         isolated_build_versions=_defaulted(v.isolated_build.versions, "isolated-build.versions"),
         supported_targets=resolved.supported_targets,
         sources=resolved.sources,
+        settings=v,
     )
 
 
