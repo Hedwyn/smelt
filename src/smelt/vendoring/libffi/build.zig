@@ -3,9 +3,8 @@
 //! already depends on the exact same package (see its own `build.zig.zon`) to
 //! link libffi into CPython's `_ctypes`, but only as an internal build-graph
 //! artifact it never installs anywhere outside its own `zig-out`: there is no
-//! path/env var smelt can already read a built libffi from (see
-//! cffi_vendoring_plan.md), hence this standalone copy of the same dependency
-//! edge.
+//! path/env var smelt can already read a built libffi from, hence this
+//! standalone copy of the same dependency edge.
 //!
 //! NOTE: this has not been exercised against the real `allyourcodebase/libffi`
 //! package yet (no network access to fetch it while this was written) --

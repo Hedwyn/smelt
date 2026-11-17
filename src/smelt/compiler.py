@@ -439,7 +439,7 @@ def _compile_extension_sources(
             include_dirs = [str(py_headers.include_dir), str(py_headers.pyconfig_dir)]
         else:
             # TODO: generate/obtain pyconfig.h for the target platform -- this
-            # branch is known broken (see cpu_cross_compile_pyconfig_plan.md):
+            # branch is known broken:
             # `PYCONFIG_PATH` never itself holds a `pyconfig.h`, and even if it
             # did, the host's own `Python.h` (still first in `include_dirs`)
             # would still resolve its own, wrong, same-directory `pyconfig.h`

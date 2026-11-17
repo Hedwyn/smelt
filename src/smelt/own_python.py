@@ -111,7 +111,7 @@ DEFAULT_OWN_PYTHON_TARGET: Final[str | None] = None
 #: `python-linkage=dynamic` -- a real `libpythonX.Y.so`, ordinary `dlopen()`'d
 #: `lib-dynload/*.so` extension modules. `"static"` is `libc-linkage=static` +
 #: `python-linkage=off` -- one monolithic, static-PIE `bin/python` with no
-#: `libpythonX.Y.so` at all. Verified end to end (meta-python's own `roadmap.md`)
+#: `libpythonX.Y.so` at all. Verified end to end
 #: only for `x86_64-linux-musl`: musl is specifically documented/designed to support
 #: `dlopen()` from a static executable, which is what makes bypassing it (see
 #: `static_modules` below) worth doing there. glibc's static `dlopen()` fails
@@ -333,7 +333,7 @@ def is_cpu_cross_target(zig_target: str | None) -> bool:
     binaries can still execute on this machine, so `./configure` runs its checks for
     real; a different-arch target's cannot, so meta-python enters real `--host`/`--build`
     cross mode instead and applies its own `CROSS_FIXUPS`/`ArchProfile` pyconfig.h
-    patches on top (see `cpu_cross_compile_pyconfig_plan.md`). Both
+    patches on top. Both
     `_resolve_pyconfig_header` and `_build_interpreter` use this to know when a
     `LIBRARY_MODULES` entry needs steering away from meta-python's static default
     for a CPU-arch cross build, via `_cross_unsupported_static_libraries` below --
@@ -348,8 +348,8 @@ def is_cpu_cross_target(zig_target: str | None) -> bool:
 
 
 #: `LIBRARY_MODULES` entries meta-python cannot yet link statically for a CPU-arch
-#: cross target. Empty now: both `openssl` and `sqlite` used to hard-panic there
-#: (see `cpu_cross_compile_pyconfig_plan.md`), but meta-python fixed both --
+#: cross target. Empty now: both `openssl` and `sqlite` used to hard-panic there,
+#: but meta-python fixed both --
 #: `openssl` by vendoring it from scratch (arch-agnostic, no more x86_64-only
 #: asm), `sqlite` by resolving a build-root-relative dependency path that was
 #: silently pointing `./configure`'s own `-I` at a nonexistent directory (see
@@ -1439,7 +1439,7 @@ def build_own_python(
     named modules are compiled straight into `bin/python` (`-Dstatic-modules=`, CPython's
     own "builtin module" mechanism -- a `PyInit_<name>` linked in and registered in a
     static `_PyImport_Inittab`, no `.so`, no `dlopen()` of any kind). Verified end to end
-    for `x86_64-linux-musl` only (see meta-python's own `roadmap.md`); not blocked for a
+    for `x86_64-linux-musl` only; not blocked for a
     glibc target, but every accelerator module *not* named in `static_modules` is simply
     unusable there, since glibc's static `dlopen()` has no fix to lean on.
 

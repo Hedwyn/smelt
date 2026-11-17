@@ -136,9 +136,8 @@ def _find_libpython(prefix: PathExists) -> tuple[PathExists, bool]:
 def _unexpected_dependencies(binary_path: PathExists) -> list[str]:
     """
     Tier 2 (authoritative, after the trial static link) of the static-linking
-    eligibility check described in `compiling_pipeline_refactor.md`: every shared
-    library `binary_path` declares that is neither host-supplied
-    (`INTERPRETER_HOST_DLL_PREFIXES`) nor `libpython` itself.
+    eligibility check: every shared library `binary_path` declares that is neither
+    host-supplied (`INTERPRETER_HOST_DLL_PREFIXES`) nor `libpython` itself.
 
     Tier 1 (`smelt.backend.is_static_link_eligible`) only catches a module that
     *declares* an external library via `Extension.libraries`/`extra_link_args`; this

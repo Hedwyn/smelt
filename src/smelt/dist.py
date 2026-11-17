@@ -245,11 +245,11 @@ DEFAULT_DROP_OPTIONAL_IMPORTS: Final[bool] = False
 #: distribution's `bin/python` with a freshly built one (see `smelt.static_python`),
 #: and unlike every other flag here that only prunes or reorganises the folder, a
 #: broken build of *this* has no fallback -- there is no other `bin/python` to fall
-#: back to once the original has been overwritten. The eligibility checks in
-#: `compiling_pipeline_refactor.md` (Tier 1 structural, Tier 2 an `ldd` pass over the
-#: trial link) now guard every module this flag lets through either way it reaches
-#: `static_modules`, but this stays an explicit opt-in on top of them regardless,
-#: rather than defaulting on the moment they land.
+#: back to once the original has been overwritten. The static-linking eligibility
+#: checks (Tier 1 structural, `smelt.backend.is_static_link_eligible`; Tier 2 an `ldd`
+#: pass over the trial link, `smelt.static_python`) guard every module this flag lets
+#: through either way it reaches `static_modules`, but this stays an explicit opt-in
+#: on top of them regardless.
 DEFAULT_USE_INITTAB: Final[bool] = False
 
 #: Whether the `python = "own"` interpreter is built as one monolithic, static-PIE
@@ -2003,7 +2003,7 @@ def build_dist(
     Left empty (the default), `static_modules` fills itself in: when `use_inittab`
     resolves true and this is a mode `own` build, `run_backend` is asked to compile
     every pinned mypyc, Cython and handwritten C/Zig module (Nuitka and `zig build`
-    projects are out of scope, see `compiling_pipeline_refactor.md`) and stage the
+    projects are out of scope) and stage the
     Tier-1-eligible ones (no external `libraries`/`extra_link_args`, see
     `smelt.backend.is_static_link_eligible`) instead of linking them into a `.so`.
     Passing `static_modules` explicitly instead -- import path -> its already-compiled
@@ -2096,7 +2096,7 @@ def build_dist(
         if resolved_target_platform is not None
         else None
     )
-    # Auto-discovery (`run_backend(static_link=True)`, see `compiling_pipeline_refactor.md`)
+    # Auto-discovery (`run_backend(static_link=True)`)
     # only kicks in when the caller left `static_modules` for us to fill in ourselves --
     # one who hand-supplies it already did their own eligibility judgment, and gets the
     # exact caller-supplied behavior this parameter has always had.

@@ -256,8 +256,7 @@ def _mypycify_one(
 @dataclass
 class CompiledExtension:
     """
-    A `GenericExtension`'s object files, compiled but not yet linked (see
-    `compiling_pipeline_refactor.md`).
+    A `GenericExtension`'s object files, compiled but not yet linked.
 
     `runtime_objects` is mypyc's shared runtime's own object files, present exactly
     when `generic.runtime` is -- a runtime needs no `PyInit_` of its own, just its
@@ -282,8 +281,7 @@ def compile_generic_extension(
 
     This is the object-file stage `link_generic_extension` (today's default: ship a
     loose `.so`) and static linking (`smelt.static_python.build_static_interpreter`)
-    both build on -- the seam `compiling_pipeline_refactor.md` opens between codegen
-    and "compile-and-place".
+    both build on -- the seam between codegen and "compile-and-place".
 
     `crosscompile`/`py_headers` are forwarded verbatim to `compile_extension_objects`
     (see its own doc for why both are needed together for a cross build).
@@ -355,8 +353,8 @@ def link_generic_extension(
 
 def is_static_link_eligible(ext: GenericExtension) -> bool:
     """
-    Tier 1 (structural, before compiling anything) of `compiling_pipeline_refactor.md`'s
-    static-linking eligibility check: whether `ext` could safely be folded straight
+    Tier 1 (structural, before compiling anything) of the static-linking eligibility
+    check: whether `ext` could safely be folded straight
     into `bin/python` instead of shipped as a loose `.so`.
 
     An extension (or its mypyc runtime) that names an external library via
@@ -1072,7 +1070,7 @@ def run_backend(
 
     `static_link` opts every pinned mypyc, Cython, Nuitka and handwritten C/Zig
     (`config.c_extensions`) module into Tier 1 eligibility checking (see
-    `is_static_link_eligible` and `compiling_pipeline_refactor.md`): one that passes
+    `is_static_link_eligible`): one that passes
     is compiled but left unlinked, its object files reported in the result's
     `static_modules` instead of shipped as a `.so`. A Nuitka module genuinely goes
     through the same `GenericExtension` + compile step as the others (`nuitkaify_module`
@@ -1111,7 +1109,7 @@ def run_backend(
     and forwarding both down to each backend's own compile step. The one exception is
     the Nuitka entrypoint compilation at the bottom of this function
     (`compile_with_nuitka`): that shells out to Nuitka's own build pipeline, which has
-    no cross-compile story today (see `cross_compilation_audit.md`), so it raises
+    no cross-compile story today, so it raises
     rather than silently emitting a host-arch binary mislabeled as the target's.
     """
     local_platform = platform.system().lower()

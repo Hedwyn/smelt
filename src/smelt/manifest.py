@@ -1,7 +1,7 @@
 """
 Exposes a package's own smelt-compiled modules to a downstream build once this
 package is installed, since `pyproject.toml` (where they were declared) does not
-survive installation -- see `transitive_smelt_data_review.md`.
+survive installation.
 
 Written by `smelt.backend.run_backend` as a plain Python module living inside the
 package itself (`write_manifest_module`), so a consumer needs no `smelt` dependency

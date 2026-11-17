@@ -34,7 +34,10 @@ tests = [
   # installed for 'setuptools'" rather than actually checking those call sites.
   "types-setuptools",
 ]
-mypyc = ["mypy[mypyc]; python_version < '3.15'", "mypy[mypyc]<1.19; python_version >= '3.15'"]
+mypyc = [
+  "mypy[mypyc]; python_version < '3.15'",
+  "mypy[mypyc]<1.19; python_version >= '3.15'",
+]
 cli = ["click"]
 # patchelf: Nuitka needs it for RPATH rewrites in standalone/onefile mode on Linux;
 # bundling a known-good build keeps smelt self-contained rather than relying on the
@@ -63,8 +66,8 @@ cython = ["Cython"]
 # with `AttributeError: type object 'BuildStep' has no attribute 'CONFIGURE'`.
 # 0812d8e is the first that makes `./configure` itself cross-aware (real
 # `--host=`/`--build=` for a CPU-arch cross target, not just for musl) and applies
-# the resulting `CROSS_FIXUPS`/`ArchProfile` pyconfig.h patches automatically --
-# see cpu_cross_compile_pyconfig_plan.md. Anything older produces a pyconfig.h that
+# the resulting `CROSS_FIXUPS`/`ArchProfile` pyconfig.h patches automatically.
+# Anything older produces a pyconfig.h that
 # is silently wrong (not an error) for any target whose CPU differs from the host's.
 # 1b625dc replaces the single hard-coded `cpython` submodule with a
 # `-Dcpython-version=<name>` build option, fetching one of several curated CPython
@@ -118,7 +121,9 @@ cython = ["Cython"]
 # `python_version`, since `writeBuildPythonStub` is unconditional whenever cross_arch is
 # true. Anything older hits one or both of these for `own-python-target`
 # `arm-linux-gnueabihf` (or any other CPU-arch cross target).
-metapython = ["metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@6d2756d"]
+metapython = [
+  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@6d2756d",
+]
 # unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
 # without needing to actually run there. packaging: listed explicitly (not just relied

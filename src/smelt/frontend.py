@@ -555,7 +555,7 @@ def build_standalone_binary(
     "interpreter (PyImport_AppendInittab) instead of shipping them as .so files -- "
     "skips dlopen() and RPATH for those modules entirely. Off by default: this "
     "replaces the interpreter's own entrypoint, and a bad build has no .so fallback "
-    "to fall back to. Still experimental -- see compiling_pipeline_refactor.md.",
+    "to fall back to. Still experimental.",
 )
 @click.option(
     "--own-python-static/--no-own-python-static",

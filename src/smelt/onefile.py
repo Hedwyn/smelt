@@ -329,10 +329,9 @@ def _normalized(entry: tarfile.TarInfo) -> tarfile.TarInfo:
     Strips everything from a tar entry that describes *this* machine rather than the
     file: timestamps, ownership, and the permission bits beyond the executable one.
 
-    Byte-for-byte reproducibility of a build is an acceptance criterion of the folder
-    (see `bytecode-dist-plan.md`, §11.9) and there is no reason for the packed form to
-    give it up. Keeping the executable bit is not cosmetic: `bin/python` and the
-    generated shim are unusable without it.
+    Byte-for-byte reproducibility of a build is a requirement of the dist folder, and
+    there is no reason for the packed form to give it up. Keeping the executable bit is
+    not cosmetic: `bin/python` and the generated shim are unusable without it.
     """
     entry.mtime = 0
     entry.uid = 0
