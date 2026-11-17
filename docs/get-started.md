@@ -47,13 +47,15 @@ Installing Smelt with the `cli` extra (`pip install "smelt[cli]"`) also gives yo
 
 ```
 $ smelt config
-SmeltConfig(packages_location={'fib_demo': 'src/fib_demo'},
-            ...
-            mypyc_modules=[MypycModule(import_path='fib_demo.fib',
-                                       source=None,
-                                       extras=[])],
-            ...)
+[tool.smelt]
+  package-dirs = {fib_demo = "src/fib_demo"}
+  supported-targets = (not set)
+  extensions.mypyc = [{import-path = "fib_demo.fib"}]
+  extensions.cython = []
+  ...
 ```
+
+A project with `[project.scripts]` entries also gets a "Bundler settings" block per entrypoint, each value tagged with where it came from (`default`, a `pyproject.toml` table, or the command line).
 
 **`smelt build`** runs the same compilation step the build hook runs during `pip install`/`build`, without needing a full build. For `fib-demo` this compiles `fib.py` with mypyc and drops two files next to it: the compiled module itself, and its small mypyc runtime:
 

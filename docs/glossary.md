@@ -174,8 +174,10 @@ smelt bundle --python own --drop-stdlib-group international_hostnames
 or per entrypoint:
 
 ```toml
-[tool.smelt.entrypoints."pkg.cli:main"]
+[tool.smelt.bundle.entrypoints."pkg.cli:main"]
 python = "own"
+
+[tool.smelt.bundle.entrypoints."pkg.cli:main".interpreter]
 drop-stdlib-groups = ["international_hostnames"]
 ```
 

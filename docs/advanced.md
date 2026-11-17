@@ -6,7 +6,7 @@ Smelt provides experimental support for cross-compiling native extensions, lever
 
 ### Building for another platform
 
-Cross-compilation is driven by the `-t/--target` option of [`smelt compile`](cli.md#other-commands):
+Cross-compilation is driven by the `-t/--target` option of [`smelt compile`](cli.md#compile):
 
 ```
 smelt compile my_project.hello --backend nuitka --target aarch64-linux-gnu
@@ -20,9 +20,10 @@ Under the hood this passes `-target <triple>` to `zig cc`/`zig build-lib`, the s
 
 Cross-compilation in Smelt is still an experimental, narrow feature - keep the following in mind before relying on it:
 
-* **Only the handwritten C/Zig extension path cross-compiles today.** `extensions.c` and `extensions.zig` are cross-compiled correctly. The `mypyc`, `cython` and `nuitka` backends don't participate in cross-compilation yet: passing `--target` alongside `--backend mypyc|cython|nuitka` on `compile` is currently a no-op for those backends.
-* **Linux-only targets, for now.** Only three target triples are currently supported: `aarch64-linux`, `arm-linux-gnueabihf` (armv7l) and `x86_64-linux`. There is no cross-compiling target for Windows or macOS yet.
-* **A matching `pyconfig.h` is required for the target.** Building a Python C extension needs a `pyconfig.h` matching the target platform's Python ABI. Smelt bundles pre-generated ones for the triples above, but currently only for Python 3.12 - cross-compiling against a different interpreter version isn't supported out of the box.
+* **Supported targets are three Linux triples:** `aarch64-linux-gnu`, `arm-linux-gnueabihf` (armv7l) and `x86_64-linux-gnu`. musl, Windows and macOS targets are not supported for extension cross-compilation yet (they are for `smelt bundle --python own` interpreters, see [Bundler: Reference](bundler-reference.md)).
+* **`smelt compile` cross-compiles the C each backend emits, not the backend's own code generation.** For `extensions.c`/`extensions.zig` this makes no difference. For mypyc, the C is generated for the host. `smelt bundle -t <triple>` cross-compiles the project's extensions fully, code generation included.
+* **Nuitka whole-program binaries (`smelt nuitka-binary`) are host-only.** The command has no target option.
+* **A target `pyconfig.h` is generated on demand.** Building an extension needs a `pyconfig.h` matching the target's Python ABI; Smelt generates one by running CPython's `./configure` for the target (through meta-python, so the `metapython` extra is required) and caches it.
 * **Stability isn't guaranteed.** Smelt emits a runtime warning whenever cross-compilation is used; treat produced artifacts as experimental rather than production-ready until this matures.
 
 ## Nuitka internals

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from collections.abc import Callable, Iterable
@@ -421,18 +421,28 @@ class SmeltConfig:
             project_root=root,
         )
 
-    def __str__(self) -> str:
-        """
-        A human-friendly stringified version of this config.
-        """
-        lines: list[str] = []
-        for field_name, value in asdict(self).items():
-            if isinstance(value, list):
-                value = ",".join(value)
-            if isinstance(value, dict):
-                value = "".join(("\n * " + f"{key} -> {val}" for key, val in value.items()))
-            lines.append(f"{field_name:20}: {value}")
-        return "\n".join(lines)
+
+@dataclass(frozen=True)
+class PyprojectConfig:
+    """
+    What Smelt reads from a `pyproject.toml`: the `[tool.smelt]` table validated
+    against the schema, plus the `[project]` fields it depends on. Kept apart from
+    `SmeltConfig` so that user-facing output (`smelt config`) can show the keys as
+    the user writes them.
+    """
+
+    schema: ProjectConfig
+    scripts: dict[str, str]
+    dependencies: list[str]
+
+    def resolve(self, project_root: Path | None = None) -> SmeltConfig:
+        """Derives the internal config the build code consumes."""
+        return SmeltConfig.from_project_config(
+            self.schema,
+            project_root=project_root,
+            project_scripts=self.scripts,
+            project_dependencies=self.dependencies,
+        )
 
 
 def parse_config_from_pyproject(
@@ -442,6 +452,17 @@ def parse_config_from_pyproject(
     """
     Extracts Smelt config from TOML data coming out of a pyproject.toml.
     Shared by the CLI and the build hook, so both see the same config.
+    """
+    return load_pyproject_config(toml_data, project_root).resolve(project_root)
+
+
+def load_pyproject_config(
+    toml_data: TomlData,
+    project_root: Path | None = None,
+) -> PyprojectConfig:
+    """
+    Validates the Smelt-relevant parts of a pyproject.toml's TOML data, without
+    deriving the internal config yet (see `PyprojectConfig.resolve`).
     """
     tool_config = toml_data.get("tool", {})
     if not isinstance(tool_config, dict):
@@ -476,9 +497,8 @@ def parse_config_from_pyproject(
             )
         project_dependencies.append(dependency)
 
-    return SmeltConfig.from_toml_data(
-        smelt_config,
-        project_root=project_root,
-        project_scripts=project_scripts,
-        project_dependencies=project_dependencies,
+    return PyprojectConfig(
+        schema=parse_project_config(smelt_config, project_root=project_root),
+        scripts=project_scripts,
+        dependencies=project_dependencies,
     )

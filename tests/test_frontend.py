@@ -323,3 +323,52 @@ def test_config_shows_sources(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "python = " in result.output and "own" in result.output
     assert "[default]" in result.output
+
+
+def test_config_command_shows_schema_keys(tmp_path: Path) -> None:
+    """
+    `smelt config` renders every module declaration with the keys the user writes
+    (kebab-case, paths relative to the project), never the internal field names.
+    """
+    from click.testing import CliRunner
+
+    from smelt import frontend
+
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "hello.c").write_text("")
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "pkg"
+version = "0.1.0"
+
+[project.scripts]
+pkg = "pkg.cli:main"
+
+[tool.smelt]
+package-dirs = { pkg = "src/pkg" }
+
+[tool.smelt.extensions]
+mypyc = ["pkg.fib", { import-path = "pkg.utils", extras = ["fast"] }]
+
+[[tool.smelt.extensions.c]]
+import-path = "pkg.hello"
+sources = ["src/pkg/hello.c"]
+
+[tool.smelt.bundle]
+python = "own"
+"""
+    )
+    result = CliRunner().invoke(frontend.smelt, ["-p", str(tmp_path), "config"])
+    assert result.exit_code == 0, result.output
+    assert 'package-dirs = {pkg = "src/pkg"}' in result.output
+    assert (
+        'extensions.mypyc = [{import-path = "pkg.fib"}, '
+        '{import-path = "pkg.utils", extras = ["fast"]}]' in result.output
+    )
+    assert 'extensions.c = [{import-path = "pkg.hello", sources = ["src/pkg/hello.c"]}]' in (
+        result.output
+    )
+    assert 'python = "own"  [[tool.smelt.bundle]]' in result.output
+    assert "mypyc_modules" not in result.output
+    assert "packages_location" not in result.output

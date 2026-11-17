@@ -7,9 +7,11 @@ Command-line interface for Smelt
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
+import re
 import shutil
 import sys
 import sysconfig
@@ -35,8 +37,10 @@ from smelt.config import (
     CythonExtension,
     MypycModule,
     NuitkaModule,
+    PyprojectConfig,
     SmeltConfig,
     TomlData,
+    load_pyproject_config,
     parse_config_from_pyproject,
     toml_get_nested_section,
 )
@@ -237,10 +241,10 @@ def smelt(ctx: Context, project: PathExists, log_level: str | None, report: str 
     click.echo(SMELT_ASCCI_ART)
 
 
-def _load_config(state: CliState) -> SmeltConfig:
+def _load_pyproject(state: CliState) -> PyprojectConfig:
     """
-    Parses the project's `[tool.smelt]` config, exiting with a message when the
-    project has no readable pyproject.toml.
+    Reads and validates the project's pyproject.toml, exiting with a message when the
+    project has no readable one.
     """
     pyproject_path = state.project / "pyproject.toml"
     if not path_exists(pyproject_path):
@@ -250,7 +254,12 @@ def _load_config(state: CliState) -> SmeltConfig:
             toml_data = tomllib.load(f)
         except tomllib.TOMLDecodeError as exc:
             error_exit(f"Invalid TOML file [{pyproject_path}]: {exc}")
-    return parse_config_from_pyproject(toml_data, project_root=state.project)
+    return load_pyproject_config(toml_data, project_root=state.project)
+
+
+def _load_config(state: CliState) -> SmeltConfig:
+    """The project's resolved internal config (see `_load_pyproject`)."""
+    return _load_pyproject(state).resolve(project_root=state.project)
 
 
 def _write_global_report(state: CliState) -> None:
@@ -273,6 +282,47 @@ def _flatten(settings: object, prefix: str = "") -> Iterator[tuple[str, object]]
             yield key, value
 
 
+_BARE_TOML_KEY = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _render_value(value: object, root: Path) -> str:
+    """
+    TOML-like rendering of a config value, as the user would write it: kebab-case
+    keys, paths relative to the project root, unset or empty fields of a table left out.
+    """
+    if value is None:
+        return "(not set)"
+    if is_dataclass(value) and not isinstance(value, type):
+        entries = {
+            toml_key(f.name): getattr(value, f.name)
+            for f in fields(value)
+            if getattr(value, f.name) not in (None, [], {})
+        }
+        return _render_value(entries, root)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, Path):
+        try:
+            value = value.resolve().relative_to(root.resolve())
+        except ValueError:
+            pass
+        return json.dumps(str(value))
+    if isinstance(value, str):
+        return json.dumps(str(value))
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_render_value(item, root) for item in value) + "]"
+    if isinstance(value, dict):
+        items = (
+            f"{key if _BARE_TOML_KEY.fullmatch(str(key)) else json.dumps(str(key))} = "
+            f"{_render_value(item, root)}"
+            for key, item in value.items()
+        )
+        return "{" + ", ".join(items) + "}"
+    return repr(value)
+
+
 @smelt.command("config")
 @click.pass_obj
 @wrap_smelt_errors()
@@ -282,8 +332,14 @@ def config_command(state: CliState) -> None:
     of every entrypoint, each with the level it came from (default, pyproject table
     or CLI).
     """
-    config = _load_config(state)
-    click.echo(config)
+    pyproject = _load_pyproject(state)
+    config = pyproject.resolve(project_root=state.project)
+    click.echo("[tool.smelt]")
+    for key, value in _flatten(pyproject.schema):
+        # bundler settings are shown resolved, per entrypoint, below
+        if key.startswith("bundle."):
+            continue
+        click.echo(f"  {key} = {_render_value(value, state.project)}")
     for spec, levels in config.entrypoints.items():
         resolved = resolve_bundle(levels)
         click.echo(f"\nBundler settings of {spec}:")
@@ -291,9 +347,11 @@ def config_command(state: CliState) -> None:
             sources = resolved.sources.get(key)
             if key == "supported-targets":
                 for level in resolved.supported_targets:
-                    click.echo(f"  {key} = {list(level.patterns)}  [{level.source}]")
+                    rendered = _render_value(list(level.patterns), state.project)
+                    click.echo(f"  {key} = {rendered}  [{level.source}]")
             elif sources:
-                click.echo(f"  {key} = {value!r}  [{', '.join(sources)}]")
+                rendered = _render_value(value, state.project)
+                click.echo(f"  {key} = {rendered}  [{', '.join(sources)}]")
 
 
 @smelt.command("build")

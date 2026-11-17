@@ -10,8 +10,10 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
+import sysconfig
 import tempfile
 
+import pytest
 from test_compiler import get_module_path
 
 from smelt.nuitkaify import compile_with_nuitka
@@ -24,6 +26,29 @@ def fib(n: int) -> int:
         return fib(n - 2) + fib(n - 1)
 
 
+def _python_links_static_libatomic() -> bool:
+    """
+    python-build-standalone interpreters (what `uv` installs) leak `-l:libatomic.a`
+    from their own build into `sysconfig`'s `MODLIBS`, which Nuitka's backend then
+    passes to the linker. Zig's linker cannot resolve the `-l:<file>` spelling, even
+    with `-L` pointing at the directory holding the archive, so the Nuitka build fails
+    at link time with `unable to find library -l:libatomic.a`. Hits distributions
+    that keep `libatomic.a` in a GCC-private directory (e.g. Arch).
+    """
+    return any(
+        "-l:libatomic.a" in (sysconfig.get_config_var(name) or "")
+        for name in ("MODLIBS", "LOCALMODLIBS", "LIBS")
+    )
+
+
+@pytest.mark.skipif(
+    _python_links_static_libatomic(),
+    reason=(
+        "python-build-standalone interpreter requests `-l:libatomic.a`, which Zig's "
+        "linker cannot resolve (astral-sh/python-build-standalone#616, still open); "
+        "run the tests with a different CPython build to exercise this one"
+    ),
+)
 def test_nuitkaify() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         # Set the temporary directory as the current working directory
