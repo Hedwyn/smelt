@@ -44,6 +44,7 @@ from smelt.bundle_flags import add_bundle_options, settings_from_params
 from smelt.dist import (
     assert_supported_platforms,
     build_dist,
+    package_data_from_cli,
     resolve_bundle,
     resolve_entrypoint_spec,
     resolve_target_platforms,
@@ -241,12 +242,21 @@ def show_config(*, path: PathExists) -> None:
     "as declared in [tool.smelt.entrypoints]. Builds all configured entrypoints if omitted.",
 )
 @click.option(
+    "--package-data",
+    "package_data",
+    type=str,
+    multiple=True,
+    help="Collect a package's data files into the binary, on top of "
+    "[tool.smelt.nuitka-binary] package-data. Syntax: PACKAGE[:PATTERN,...] "
+    "(e.g. 'mypkg:*.json,*.yaml'). Repeatable.",
+)
+@click.option(
     "--embed-file",
     "embed_files",
     type=CliEmbedFile(),
     multiple=True,
-    help="Embed a data file into the built binary. Syntax: DATA_FILE_PATH=IMPORT_PATH. "
-    "Adds a --include-package-data flag to Nuitka for the given file. Repeatable.",
+    hidden=True,
+    help="Deprecated: use --package-data. Syntax: DATA_FILE_PATH=IMPORT_PATH.",
 )
 @click.option(
     "--no-cache",
@@ -260,9 +270,16 @@ def build_standalone_binary(
     logging_level: str,
     report: str | None,
     entrypoint: str | None,
+    package_data: tuple[str, ...],
     embed_files: tuple[tuple[PathExists, ImportPath], ...],
     no_cache: bool,
 ) -> None:
+    if embed_files:
+        click.echo(
+            "Warning: --embed-file is deprecated and will be removed in 0.9; "
+            "declare the file's package under package-data in [tool.smelt.nuitka-binary].",
+            err=True,
+        )
     levelno = logging._nameToLevel[logging_level]
     logging.basicConfig(level=levelno)
     try:
@@ -273,6 +290,11 @@ def build_standalone_binary(
         return
     config = parse_config_from_pyproject(toml_data, project_root=package_path)
     config.load_env()
+    if package_data:
+        cli_package_data = package_data_from_cli(package_data)
+        for options in config.nuitka_binary.values():
+            for package, patterns in cli_package_data.items():
+                options.package_data.setdefault(package, []).extend(patterns)
     path_solver = config.get_path_solver(project_root=package_path)
     try:
         run_backend(

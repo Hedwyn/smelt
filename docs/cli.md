@@ -41,12 +41,33 @@ Options:
                                   either its script name as declared in
                                   [project.scripts] (e.g. 'afpu'), or its
                                   'module.path'/'module.path:func_name' key as
-                                  declared in [tool.smelt.entrypoints]. Builds
-                                  all configured entrypoints if omitted.
+                                  declared in [tool.smelt.bundle.entrypoints]
+                                  or [tool.smelt.nuitka-binary.entrypoints].
+                                  Builds all configured entrypoints if omitted.
+  --package-data TEXT             Collect a package's data files into the
+                                  binary. Syntax: PACKAGE[:PATTERN,...].
+                                  Repeatable.
+  --no-cache                      Disable Nuitka's build cache.
   --help                          Show this message and exit.
 ```
 
-Without `-e/--entrypoint`, every entrypoint declared in `[project.scripts]` (plus any extra entrypoint declared under `entrypoints` in the Smelt config) is built. Per-entrypoint options such as extra Nuitka flags or forced module/package inclusion are set via the `entrypoints` table described in [Build Hook](build-hook.md#configuration-reference).
+Without `-e/--entrypoint`, every entrypoint declared in `[project.scripts]` (plus any declared under `[tool.smelt.nuitka-binary.entrypoints]` or `[tool.smelt.bundle.entrypoints]`) is built.
+
+Options live in `[tool.smelt.nuitka-binary]`, which is independent from `[tool.smelt.bundle]`; `[tool.smelt.nuitka-binary.entrypoints.<ep>]` overrides them per entrypoint (scalars replace, lists append):
+
+```toml
+[tool.smelt.nuitka-binary]
+extra-flags = ["--lto=yes"]            # passed to Nuitka as is
+zig = true                             # compile with Smelt's Zig toolchain (default)
+include-modules = ["pkg.plugins.a"]    # modules Nuitka's import-follower can't see
+include-packages = ["pkg.plugins"]
+package-data = { pkg = ["*.json"] }    # data files collected from a package
+
+[tool.smelt.nuitka-binary.entrypoints.greet]
+extra-flags = ["--onefile"]
+```
+
+`--package-data PACKAGE[:PATTERN,...]` adds to `package-data` for the run. The former `--embed-file` is deprecated in favor of it.
 
 This compiles the whole program to native code via Nuitka. For an application that assembles bytecode and compiled extensions into a distribution folder instead - optionally with its own bundled interpreter - see `bundle` below, and the [Bundler](bundler-get-started.md) section.
 

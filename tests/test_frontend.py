@@ -171,3 +171,43 @@ def test_parse_reports_an_option_that_is_not_one() -> None:
 def test_parse_requires_a_smelt_section() -> None:
     with pytest.raises(SmeltConfigError, match="No smelt config"):
         parse_config_from_pyproject(tomllib.loads('[project]\nname = "minimal"\n'))
+
+
+def test_build_standalone_binary_passes_nuitka_binary_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`[tool.smelt.nuitka-binary]` options reach `run_backend`; `--package-data` appends."""
+    from click.testing import CliRunner
+
+    from smelt import frontend
+
+    (tmp_path / "pyproject.toml").write_text(
+        """\
+[project]
+name = "demo"
+
+[project.scripts]
+demo = "demo.cli:main"
+
+[tool.smelt.nuitka-binary]
+extra-flags = ["--lto=yes"]
+package-data = { demo = ["*.json"] }
+"""
+    )
+    seen: dict[str, object] = {}
+
+    def fake_run_backend(config: object, **kwargs: object) -> None:
+        seen["config"] = config
+        seen["kwargs"] = kwargs
+
+    monkeypatch.setattr(frontend, "run_backend", fake_run_backend)
+    result = CliRunner().invoke(
+        frontend.smelt,
+        ["build-standalone-binary", "-p", str(tmp_path), "--package-data", "demo:*.yaml"],
+    )
+    assert result.exit_code == 0, result.output
+    config = seen["config"]
+    assert isinstance(config, frontend.SmeltConfig)
+    options = config.nuitka_binary["demo.cli:main"]
+    assert options.extra_flags == ["--lto=yes"]
+    assert options.package_data == {"demo": ["*.json", "*.yaml"]}
