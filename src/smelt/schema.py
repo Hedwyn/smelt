@@ -110,7 +110,7 @@ class ZigExecutableEntry:
 class AutoConfig:
     mode: Literal["off", "package", "all"] = "off"
     #: Backends tried in order, per module.
-    backends: list[Literal["nuitka", "mypyc", "cython"]] = field(default_factory=lambda: ["nuitka"])
+    backends: list[Literal["nuitka", "mypyc", "cython", "bytecode"]] = field(default_factory=lambda: ["nuitka"])
 
 
 @dataclass

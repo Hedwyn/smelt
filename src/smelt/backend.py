@@ -500,6 +500,8 @@ def _generate_with_backend(
             return _mypycify_one(MypycModule(import_path), path_solver, crosscompile=crosscompile)
         case Backend.CYTHON:
             return _cythonize_one(CythonExtension(import_path), path_solver)
+        case Backend.BYTECODE:
+            raise AssertionError("the bytecode backend produces no extension")
 
 
 @dataclass
@@ -607,7 +609,7 @@ def compile_module_with_fallback(
     static_build_dir: PathLike[str] | None = None,
     crosscompile: SupportedPlatforms | None = None,
     py_headers: TargetPythonHeaders | None = None,
-) -> tuple[GenericExtension, list[PathExists] | None, Backend]:
+) -> tuple[GenericExtension | None, list[PathExists] | None, Backend]:
     """
     Compiles `import_path` trying each backend in `backend_priority_order` in turn,
     falling back to the next one when a backend fails to produce a working extension.
@@ -618,13 +620,17 @@ def compile_module_with_fallback(
     it, Nuitka included (it only ever fails Tier 1 on the merits, see `run_backend`'s
     own doc, not because it is auto-discovered). The second element of the returned
     tuple is that staging's own object files, or `None` when linked+placed normally.
-    The third is whichever backend actually succeeded.
+    The third is whichever backend actually succeeded. When that is `Backend.BYTECODE`
+    nothing is compiled: the first element is `None` and the module stays pure Python.
 
     `crosscompile`/`py_headers` are forwarded the same way, to `_compile_place_or_stage`.
     """
     auto_context = _get_auto_mode_context()
     last_exc: Exception | None = None
     for backend in backend_priority_order:
+        if backend is Backend.BYTECODE:
+            auto_context.record_attempt(import_path, backend, error=None)
+            return None, None, backend
         try:
             ext = _generate_with_backend(
                 backend, import_path, path_solver, crosscompile=crosscompile
@@ -1257,6 +1263,9 @@ def run_backend(
             )
         except SmeltError as exc:
             _logger.warning("Skipping auto-discovered module %s: %s", import_path, exc)
+            continue
+        if auto_ext is None:
+            # bytecode: stays pure Python, so it is not a native module (no manifest entry)
             continue
         compiled_backends[auto_ext.import_path] = auto_backend
         if auto_objects is not None:

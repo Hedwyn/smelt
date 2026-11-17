@@ -18,20 +18,15 @@ package-dir = { "" = "src" }
 # source it is built from. `[project.scripts]` above is what declares the entrypoint --
 # smelt picks every one of them up on its own.
 
-[[tool.smelt.c_extensions]]
-import_path = "minimal.hello"
+[[tool.smelt.extensions.c]]
+import-path = "minimal.hello"
 sources = ["src/minimal/hello.c"]
 
-[[tool.smelt.mypyc_modules]]
-import_path = "minimal.fib"
-source = "src/minimal/fib.py"
-
+[tool.smelt.extensions]
+mypyc = [{ import-path = "minimal.fib", source = "src/minimal/fib.py" }]
 # Two cython modules, and deliberately from two different kinds of source: the same
 # pure-python `fib.py` that mypyc compiles above, and a real `.pyx`.
-[[tool.smelt.cython_modules]]
-import_path = "minimal.fib_cython_nopyx"
-source = "src/minimal/fib.py"
-
-[[tool.smelt.cython_modules]]
-import_path = "minimal.fib_cython"
-source = "src/minimal/fib_cython.pyx"
+cython = [
+  { import-path = "minimal.fib_cython_nopyx", source = "src/minimal/fib.py" },
+  { import-path = "minimal.fib_cython", source = "src/minimal/fib_cython.pyx" },
+]

@@ -340,3 +340,10 @@ def test_select_smelt_table_rejects_settings_in_both_tables() -> None:
 def test_select_smelt_table_requires_a_table() -> None:
     with pytest.raises(SmeltConfigError, match="No smelt config"):
         select_smelt_table(tomllib.loads('[project]\nname = "x"\n'))
+
+
+def test_auto_backends_accepts_bytecode() -> None:
+    from smelt.schema import parse_project_config
+
+    config = parse_project_config({"extensions": {"auto": {"backends": ["nuitka", "bytecode"]}}})
+    assert config.extensions.auto.backends == ["nuitka", "bytecode"]

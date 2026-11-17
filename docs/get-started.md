@@ -31,8 +31,8 @@ packages = ["src/fib_demo"]
 [tool.smelt]
 package-dirs = { "fib_demo" = "src/fib_demo" }
 
-[[tool.smelt.mypyc_modules]]
-import_path = "fib_demo.fib"
+[tool.smelt.extensions]
+mypyc = ["fib_demo.fib"]
 ```
 
 That's it - no `hello.c`, no manual `setup.py`. Building the project (e.g. `pip install .`, or `python -m build`) compiles `fib.py` with mypyc and drops a native `fib*.so` right next to it, which then shadows the pure-Python source: `import fib_demo.fib` transparently loads the compiled extension.
@@ -43,7 +43,7 @@ See [Build Hook](build-hook.md) for the full configuration reference (mypyc, Cyt
 
 Installing Smelt with the `cli` extra (`pip install "smelt[cli]"`) also gives you the `smelt` command, which can drive the same `fib-demo` project by hand - handy to inspect or rebuild extensions without going through a full `pip install`/`build`. `smelt --help` lists every available command; see [CLI](cli.md) for the full reference. A few of them, run from the `fib-demo` project root:
 
-**`smelt show-config`** parses `pyproject.toml` and prints the config Smelt actually resolved - useful to confirm your `mypyc_modules`/`c_extensions`/... declarations were picked up correctly:
+**`smelt show-config`** parses `pyproject.toml` and prints the config Smelt actually resolved - useful to confirm your `extensions` declarations were picked up correctly:
 
 ```
 $ smelt show-config

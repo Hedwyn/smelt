@@ -21,20 +21,17 @@ packages = ["src/hatchdemo"]
 [tool.smelt]
 package-dirs = { "hatchdemo" = "src/hatchdemo" }
 
-[[tool.smelt.mypyc_modules]]
-import_path = "hatchdemo.fib"
+[tool.smelt.extensions]
+mypyc = ["hatchdemo.fib"]
+nuitka = ["hatchdemo.cli"]
+cython = [
+  { import-path = "hatchdemo.fib_cython", source = "src/hatchdemo/fib_cython.pyx" },
+]
 
-[[tool.smelt.nuitka_modules]]
-import_path = "hatchdemo.cli"
-
-[[tool.smelt.c_extensions]]
-import_path = "hatchdemo.hello"
+[[tool.smelt.extensions.c]]
+import-path = "hatchdemo.hello"
 sources = ["src/hatchdemo/hello.c"]
 
-[[tool.smelt.c_extensions]]
-import_path = "hatchdemo.zighello"
+[[tool.smelt.extensions.c]]
+import-path = "hatchdemo.zighello"
 sources = ["src/hatchdemo/zighello.zig"]
-
-[[tool.smelt.cython_modules]]
-import_path = "hatchdemo.fib_cython"
-source = "src/hatchdemo/fib_cython.pyx"

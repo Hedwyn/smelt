@@ -111,7 +111,7 @@ compiled once and shared. The net effect matches the other backends: N thin modu
 
 ### Current limitation: packages themselves are not auto-compiled
 
-`auto_mode` (`"package"`/`"all"`) walks a package's filesystem tree and proposes every
+Auto mode (`extensions.auto.mode = "package"`/`"all"`) walks a package's filesystem tree and proposes every
 `.py` file it finds as a compile target — except a package's own `__init__.py`, at any
 depth. This isn't a discovery oversight; Nuitka has no way to do it that fits Smelt's
 model.
@@ -130,5 +130,5 @@ considers a same-named extension module in that directory, so the freshly compil
 
 Until Nuitka's whole-package compilation mode gets its own place in Smelt's model
 (package in, single replacement artifact out — a different shape from the shared-runtime
-scheme above), `auto_mode` skips packages entirely and only ever proposes their concrete
+scheme above), auto mode skips packages entirely and only ever proposes their concrete
 submodules.

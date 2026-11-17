@@ -20,14 +20,14 @@ Under the hood this passes `-target <triple>` to `zig cc`/`zig build-lib`, the s
 
 Cross-compilation in Smelt is still an experimental, narrow feature - keep the following in mind before relying on it:
 
-* **Only the handwritten C/Zig extension path cross-compiles today.** `c_extensions` and `zig_modules` are cross-compiled correctly. The `mypyc`, `cython` and `nuitka` backends don't participate in cross-compilation yet: passing `--target` alongside `--backend mypyc|cython|nuitka` on `compile-module` is currently a no-op for those backends.
+* **Only the handwritten C/Zig extension path cross-compiles today.** `extensions.c` and `extensions.zig` are cross-compiled correctly. The `mypyc`, `cython` and `nuitka` backends don't participate in cross-compilation yet: passing `--target` alongside `--backend mypyc|cython|nuitka` on `compile-module` is currently a no-op for those backends.
 * **Linux-only targets, for now.** Only three target triples are currently supported: `aarch64-linux`, `arm-linux-gnueabihf` (armv7l) and `x86_64-linux`. There is no cross-compiling target for Windows or macOS yet.
 * **A matching `pyconfig.h` is required for the target.** Building a Python C extension needs a `pyconfig.h` matching the target platform's Python ABI. Smelt bundles pre-generated ones for the triples above, but currently only for Python 3.12 - cross-compiling against a different interpreter version isn't supported out of the box.
 * **Stability isn't guaranteed.** Smelt emits a runtime warning whenever cross-compilation is used; treat produced artifacts as experimental rather than production-ready until this matures.
 
 ## Nuitka internals
 
-Nuitka is one of the binary backends Smelt orchestrates, but it fits the model differently from the others, and that difference drives a fair amount of machinery worth understanding if you rely on `nuitka_modules` heavily.
+Nuitka is one of the binary backends Smelt orchestrates, but it fits the model differently from the others, and that difference drives a fair amount of machinery worth understanding if you rely on `extensions.nuitka` heavily.
 
 ### The problem: Nuitka is whole-program, not per-module
 
@@ -60,8 +60,8 @@ Concretely this touches only Nuitka's constants entrypoints: the loader (`loadCo
 
 ### Current limitation: packages themselves are not auto-compiled
 
-`auto_mode` (`"package"`/`"all"`) walks a package's filesystem tree and proposes every `.py` file it finds as a compile target - except a package's own `__init__.py`, at any depth. This isn't a discovery oversight; Nuitka has no way to do it that fits Smelt's model.
+Auto mode (`extensions.auto.mode = "package"`/`"all"`) walks a package's filesystem tree and proposes every `.py` file it finds as a compile target - except a package's own `__init__.py`, at any depth. This isn't a discovery oversight; Nuitka has no way to do it that fits Smelt's model.
 
 Nuitka draws a hard line between compiling a *module* (point it at a `.py` file, get a `.so`) and compiling a *package* (point it at the package's *directory*, which transpiles the whole package - `__init__.py` and everything Nuitka can see under it - into a single artifact meant to *replace* that directory as the importable module). Smelt's per-module model, described above, keeps every original source file in place and drops a same-named `.so` next to it - there is no step where the source is removed. Applying that same model to a package's `__init__.py` would produce an `automode.cpython-*.so` sitting right next to the still-present `automode/` directory. Python's import system always resolves a name to a package directory before it considers a same-named extension module in that directory, so the freshly compiled `.so` would simply never be imported - dead weight, silently never taking effect.
 
-Until Nuitka's whole-package compilation mode gets its own place in Smelt's model (package in, single replacement artifact out - a different shape from the shared-runtime scheme above), `auto_mode` skips packages entirely and only ever proposes their concrete submodules.
+Until Nuitka's whole-package compilation mode gets its own place in Smelt's model (package in, single replacement artifact out - a different shape from the shared-runtime scheme above), auto mode skips packages entirely and only ever proposes their concrete submodules.

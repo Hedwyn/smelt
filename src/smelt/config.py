@@ -125,12 +125,18 @@ def toml_get_nested_section(toml_data: TomlData, *path: str) -> _TomlData:
 
 class Backend(StrEnum):
     """
-    A pure-python-to-native compilation backend, selectable via `backend_priority_order`.
+    A backend for modules discovered by auto mode, selectable via `backend_priority_order`.
+
+    `BYTECODE` compiles nothing: the module stays pure Python. It is the "no native
+    build" outcome, so listing it last means auto mode never fails a build. `smelt bundle`
+    ships such a module as `.pyc` like every other pure-Python module; a wheel build
+    leaves it as source.
     """
 
     NUITKA = "nuitka"
     MYPYC = "mypyc"
     CYTHON = "cython"
+    BYTECODE = "bytecode"
 
 
 type AutoMode = Literal["off", "package", "all"]

@@ -69,7 +69,7 @@ Usage: smelt bundle [OPTIONS]
 
 ## build-extensions
 
-Builds every native extension declared in the Smelt config (`mypyc_modules`, `cython_modules`, `nuitka_modules`, `c_extensions`, `zig_modules`) for the current project, without touching entrypoints. This is what the [build hook](build-hook.md) runs automatically during a Hatchling build; use this command to run the same step manually, e.g. for a project configured via plain `[tool.smelt]`, or to rebuild extensions in place during local development.
+Builds every native extension declared in the Smelt config (`extensions.mypyc`, `.cython`, `.nuitka`, `.c`, `.zig`) for the current project, without touching entrypoints. This is what the [build hook](build-hook.md) runs automatically during a Hatchling build; use this command to run the same step manually, e.g. for a project configured via plain `[tool.smelt]`, or to rebuild extensions in place during local development.
 
 ```
 $ smelt build-extensions --help

@@ -20,8 +20,8 @@ packages = ["src/zigextdemo"]
 
 [tool.smelt]
 
-[[tool.smelt.zig_modules]]
-import_path = "zigextdemo.zigextdemo"
+[[tool.smelt.extensions.zig]]
+import-path = "zigextdemo.zigextdemo"
 name = "zigextdemo"
 folder = "."
 flags = ["--release=fast"]

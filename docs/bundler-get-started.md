@@ -37,7 +37,7 @@ packages = ["src/greet_demo"]
 package-dirs = { "greet_demo" = "src/greet_demo" }
 ```
 
-No native extensions declared here - the entrypoint is plain Python, so the distribution ships it as bytecode. Add `mypyc_modules`/`nuitka_modules`/etc. the same way as for a regular build (see [Build Hook](build-hook.md)) and the bundler carries the compiled result alongside it.
+No native extensions declared here - the entrypoint is plain Python, so the distribution ships it as bytecode. Add `[tool.smelt.extensions]` entries the same way as for a regular build (see [Build Hook](build-hook.md)) and the bundler carries the compiled result alongside it.
 
 ## Building it
 

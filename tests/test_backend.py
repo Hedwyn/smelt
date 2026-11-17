@@ -220,3 +220,23 @@ def test_run_backend_static_link_stages_eligible_modules_only() -> None:
     finally:
         if result.static_build_dir is not None:
             shutil.rmtree(result.static_build_dir, ignore_errors=True)
+
+
+def test_compile_module_with_fallback_bytecode_compiles_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing backend falls back to `bytecode`, which succeeds with no extension."""
+    from smelt import backend as backend_module
+    from smelt.config import Backend
+    from smelt.utils import SmeltError
+
+    def boom(*args: object, **kwargs: object) -> GenericExtension:
+        raise SmeltError("cannot compile")
+
+    monkeypatch.setattr(backend_module, "_generate_with_backend", boom)
+    ext, objects, used = backend_module.compile_module_with_fallback(
+        ImportPath("pkg.mod"),
+        [Backend.NUITKA, Backend.BYTECODE],
+        PathSolver(tmp_path),
+    )
+    assert (ext, objects, used) == (None, None, Backend.BYTECODE)
