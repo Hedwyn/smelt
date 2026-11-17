@@ -1128,6 +1128,14 @@ class TargetPythonHeaders:
     pyconfig_dir: Path
 
 
+def cpython_source_fetched(python_version: str = DEFAULT_CPYTHON_VERSION) -> bool:
+    """
+    Whether CPython `python_version`'s source is on disk. A cached interpreter build
+    survives a `byp` reinstall, the source fetched next to it does not.
+    """
+    return _fetched_cpython_source_dir(python_version) is not None
+
+
 def cpython_include_dir(python_version: str = DEFAULT_CPYTHON_VERSION) -> PathExists:
     """
     CPython `python_version`'s own `Include/` directory (`Python.h` and every

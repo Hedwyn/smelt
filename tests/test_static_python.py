@@ -42,6 +42,19 @@ EXTENSION_FOLDER = TEST_FOLDER / "extensions"
 _CACHED_PREFIX = own_python_cache_dir()
 _CACHE_AVAILABLE = (_CACHED_PREFIX / INTERPRETER_REL_PATH).exists()
 
+def _copy_cached_prefix(dest: Path) -> None:
+    """
+    A scratch copy of the cached interpreter prefix for a test to relink. CPython's own
+    test suite (`lib/pythonX.Y/test`) is left out: nothing here runs it, and it is half
+    the prefix's size.
+    """
+    shutil.copytree(_CACHED_PREFIX, dest, symlinks=True, ignore=_skip_stdlib_tests)
+
+
+def _skip_stdlib_tests(directory: str, names: list[str]) -> set[str]:
+    return {"test"} if Path(directory).parent.name == "lib" else set()
+
+
 needs_own_python = pytest.mark.skipif(
     not _CACHE_AVAILABLE or not is_supported_platform(),
     reason=f"needs Linux and an interpreter already built at {_CACHED_PREFIX}",
@@ -127,7 +140,7 @@ def test_build_static_interpreter_links_a_dependency_free_extension(tmp_path: Pa
     (`(built-in)`, no backing file), and still runs everything else normally.
     """
     prefix = tmp_path / "own"
-    shutil.copytree(_CACHED_PREFIX, prefix, symlinks=True)
+    _copy_cached_prefix(prefix)
 
     objects_dir = tmp_path / "objects"
     objects_dir.mkdir()
@@ -240,7 +253,7 @@ def test_build_static_interpreter_refuses_a_module_pulling_in_an_external_librar
         pytest.skip(f"{_LIBZ_SONAME} not found on this system")
 
     prefix = tmp_path / "own"
-    shutil.copytree(_CACHED_PREFIX, prefix, symlinks=True)
+    _copy_cached_prefix(prefix)
     original_bin = (prefix / INTERPRETER_REL_PATH).read_bytes()
 
     objects_dir = tmp_path / "objects"

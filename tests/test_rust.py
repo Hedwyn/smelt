@@ -89,11 +89,11 @@ def test_zig_target_to_rust_triple_malformed() -> None:
 # --- toolchain fetch + cross-compile (needs network) --------------------------------
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def rust_toolchain(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RustToolchain]:
     """
-    One toolchain install (~770 MB) shared by every test, removed at session end,
-    instead of one per test.
+    One toolchain install (~770 MB) shared by every test of this module, removed as
+    soon as the module is done rather than kept alive for the rest of the session.
     """
     root = tmp_path_factory.mktemp("rust-toolchain")
     try:

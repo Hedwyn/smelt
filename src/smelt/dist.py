@@ -141,6 +141,7 @@ from smelt.own_python import (
     TargetPythonHeaders,
     build_own_python,
     cpython_include_dir,
+    cpython_source_fetched,
     interpreter_magic_number,
     interpreter_version,
     is_musl_zig_target,
@@ -2334,7 +2335,11 @@ def build_dist(
         isolated_python_version = (
             python_version if resolved_python == "own" else resolve_own_python_version(None)
         )
-        if built_interpreter is not None and interpreter_target == resolved_target_platform:
+        if (
+            built_interpreter is not None
+            and interpreter_target == resolved_target_platform
+            and cpython_source_fetched(isolated_python_version)
+        ):
             resolved_isolated_py_headers = TargetPythonHeaders(
                 include_dir=cpython_include_dir(isolated_python_version),
                 pyconfig_dir=assert_path_exists(built_interpreter / "pyconfig.h").parent,

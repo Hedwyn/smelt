@@ -51,7 +51,7 @@ All of the following keys live under `[tool.smelt]`. The `[tool.hatch.build.hook
 
 | Key | Type | Description |
 | --- | --- | --- |
-| `package-dirs` | `dict[str, str]` | Maps a package's top-level import name to the folder it lives in (e.g. `{"my_project" = "src/my_project"}`). Used to resolve `import_path`s declared below to actual files on disk. |
+| `package-dirs` | `dict[str, str]` | Maps a package's top-level import name to the folder it lives in (e.g. `{"my_project" = "src/my_project"}`). Used to resolve the `import-path`s declared below to actual files on disk. |
 | `extensions.mypyc` | list of import paths or tables | Modules to compile with [mypyc](https://mypyc.readthedocs.io/). Each entry is a bare import path, or a table with `import-path` and optional `source` (path override) and `extras`. |
 | `extensions.cython` | list of import paths or tables | Modules to compile with [Cython](https://cython.org/). Same entry shape as `mypyc`; `source` defaults to a `.py`/`.pyx` file matching the import path. |
 | `extensions.nuitka` | list of import paths or tables | Modules to compile with [Nuitka](https://nuitka.net/), as thin per-module extensions sharing one runtime library. See [Nuitka internals](advanced.md#nuitka-internals). Same entry shape as `mypyc`. |

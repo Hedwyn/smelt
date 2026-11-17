@@ -87,6 +87,28 @@ class MaturinBuildResult:
     object_files: list[PathExists] = field(default_factory=list)
 
 
+def _crate_object_files(profile_dir: Path, crate_name: str) -> list[PathExists]:
+    """
+    The `.rcgu.o` object files `-C save-temps` left for `crate_name` under a cargo
+    profile directory (`target/<triple>/<profile>`).
+
+    Cargo writes them next to the crate's other intermediate outputs, whose location
+    depends on its version: `deps/` in the classic layout, `build/<crate>/<hash>/out/`
+    in the newer build-dir layout. A target directory reused across builds can hold
+    several such folders; only the most recently written one belongs to this build.
+    """
+    candidate_dirs = [profile_dir / "deps", *profile_dir.glob(f"build/{crate_name}/*/out")]
+    groups = [
+        objects
+        for directory in candidate_dirs
+        if (objects := sorted(directory.glob(f"{crate_name}.*.rcgu.o")))
+    ]
+    if not groups:
+        return []
+    newest = max(groups, key=lambda objects: max(obj.stat().st_mtime for obj in objects))
+    return [assert_path_exists(obj) for obj in newest]
+
+
 def build_with_maturin(
     toolchain: RustToolchain,
     manifest_path: Path | None,
@@ -214,15 +236,14 @@ def build_with_maturin(
         # Guaranteed above: raised already if emit_objects and manifest_path is None.
         assert manifest_path is not None
         crate_name = _crate_lib_name(manifest_path)
-        profile_dir = "release" if release else "debug"
-        deps_dir = manifest_path.parent / "target" / rust_triple / profile_dir / "deps"
-        object_files = [
-            assert_path_exists(obj) for obj in sorted(deps_dir.glob(f"{crate_name}.*.rcgu.o"))
-        ]
+        profile_dir = (
+            manifest_path.parent / "target" / rust_triple / ("release" if release else "debug")
+        )
+        object_files = _crate_object_files(profile_dir, crate_name)
         if not object_files:
             raise MaturinBuildError(
-                f"emit_objects=True but no `.rcgu.o` files were found under {deps_dir} "
-                "-- maturin/cargo may have changed its `-C save-temps` output layout."
+                f"emit_objects=True but no `{crate_name}.*.rcgu.o` files were found under "
+                f"{profile_dir} -- cargo may have changed its `-C save-temps` output layout."
             )
 
     return MaturinBuildResult(wheel_path=wheel_path, object_files=object_files)
