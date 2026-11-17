@@ -147,8 +147,8 @@ def test_parse_reports_a_declaration_in_the_legacy_mapping_form() -> None:
     with pytest.raises(SmeltConfigError) as error:
         parse_config_from_pyproject(tomllib.loads(LEGACY_CONFIG))
     message = str(error.value)
-    assert "c_extensions" in message
-    assert "import_path" in message and "sources" in message
+    assert "extensions.c" in message
+    assert "import-path" in message and "sources" in message
     assert "minimal.hello" in message
 
 

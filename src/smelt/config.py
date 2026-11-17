@@ -8,68 +8,34 @@ Config definitions for Smelt.
 from __future__ import annotations
 
 import os
-from dataclasses import MISSING, asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Literal, Self, TypedDict
+from collections.abc import Callable, Iterable
+from typing import Literal, Self, TypedDict
 
+from smelt.schema import (
+    BundleSettings,
+    NuitkaBinarySettings,
+    ProjectConfig,
+    TomlValue,
+    build_datacls_from_toml,
+    merge_settings,
+    parse_project_config,
+)
 from smelt.utils import (
     ImportPath,
     PackageRootPath,
     PathExists,
     PathSolver,
     SmeltConfigError,
-    SmeltError,
-    assert_is_valid_import_path,
     assert_path_exists,
 )
 
-if TYPE_CHECKING:
-    from _typeshed import DataclassInstance
+__all__ = ["build_datacls_from_toml"]
 
 
-def assert_type_is(obj: object, typ: type) -> None:
-    if not isinstance(obj, typ):
-        raise SmeltConfigError(f"Expected type {typ}, got {type(obj)}")
-
-
-def convert_path(
-    path_decl: str | list[str], type_hint: str, project_root: Path | None
-) -> ImportPath | PathExists | Path | list[PathExists]:
-    if type_hint == "ImportPath":
-        assert_type_is(path_decl, str)
-        return assert_is_valid_import_path(path_decl)
-
-    match type_hint:
-        case "PathExists" | "PathExists | None":
-            assert_type_is(path_decl, str)
-            path = project_root / path_decl if project_root is not None else Path(path_decl)
-
-            assert_path_exists(path)
-            return path
-        case "list[PathExists]":
-            assert_type_is(path_decl, list)
-            return [
-                assert_path_exists(project_root / p if project_root else Path(p)) for p in path_decl
-            ]
-
-        case "list[str]":
-            assert_type_is(path_decl, list)
-            return path_decl
-
-        case "str":
-            assert_type_is(path_decl, str)
-            return path_decl
-
-        case _:
-            assert_type_is(path_decl, str)
-            raise NotImplementedError(f"Unsupported type hint: {type_hint}")
-
-
-type ConfigContext = Iterable[str]
-
-
-def _format_context(context: ConfigContext) -> str:
+def _format_context(context: Iterable[str]) -> str:
     """
     A small helper that builds a human-friendly hint from
     the path of a parameter in the config.
@@ -82,57 +48,6 @@ def _format_context(context: ConfigContext) -> str:
 
     param_path = ".".join(nodes) + ":" + leaf if nodes else leaf
     return f"In [{param_path}]:"
-
-
-def build_datacls_from_toml[T: DataclassInstance](
-    datacls: type[T],
-    toml_data: _TomlData,
-    context: ConfigContext | None = None,
-    project_root: Path | None = None,
-) -> T:
-    """
-    Builds one `datacls` out of the TOML table `toml_data`, resolving its path fields
-    against `project_root` (see `convert_path`).
-
-    `toml_data` is typed as any TOML value rather than as a table, because it *is* any
-    TOML value: it comes from a file the user wrote. A declaration in some other shape
-    has to be reported as a configuration error, which is what the first check does --
-    the alternative is an `AttributeError` from deep inside this function, naming
-    nothing the reader can act on. The shape that actually reaches it is the
-    `module = "source"` mapping module declarations used before they became arrays of
-    tables: iterating a table yields its keys, so each "declaration" arrives here as a
-    bare string.
-    """
-    context = context if context is not None else []
-    if not isinstance(toml_data, dict):
-        field_names = ", ".join(f.name for f in fields(datacls))
-        raise SmeltConfigError(
-            f"{_format_context(context)}Expected a table declaring {field_names}, "
-            f"found {toml_data!r}. Modules are declared one array-of-tables entry "
-            "each, e.g. `[[tool.smelt.c_extensions]]` followed by `import_path = "
-            '"pkg.mod"` and `sources = ["src/pkg/mod.c"]`, and not as a '
-            '`module = "source"` mapping.'
-        )
-    sentinel = object()
-    kwargs: dict[str, object] = {}
-    for f in fields(datacls):
-        local_ctx = list(context)
-        field_name = f.name
-        value_decl = toml_data.get(field_name, sentinel)
-        if value_decl is sentinel:
-            if f.default is MISSING and f.default_factory is None:
-                raise SmeltConfigError(
-                    f"{_format_context(local_ctx)}Missing mandatory argument: {f.name}"
-                )
-            continue
-        local_ctx.append(f.name)
-        assert isinstance(f.type, str), "Expected annotations from __future__ to be used"
-        try:
-            value = convert_path(value_decl, f.type, project_root)
-        except SmeltError as exc:
-            raise SmeltConfigError(f"{_format_context(local_ctx)}{exc}") from exc
-        kwargs[field_name] = value
-    return datacls(**kwargs)
 
 
 type _TomlData = str | list[_TomlData] | dict[str, _TomlData]
@@ -256,12 +171,10 @@ class ZigExecutable:
 EntrypointOptions = TypedDict(
     "EntrypointOptions",
     {
+        # Distribution-folder options (`smelt build-dist`, see `smelt.dist`).
         "include-modules": list[str],
         "include-package": list[str],
         "include-package-data": list[str],
-        "extra_flags": list[str],
-        "no-zig": bool,
-        # Distribution-folder options (`smelt build-dist`, see `smelt.dist`).
         # `discovery` is one of "static", "trace" or "both".
         "discovery": str,
         "exclude-modules": list[str],
@@ -303,6 +216,7 @@ EntrypointOptions = TypedDict(
         # How that single file's payload is compressed: "xz" (the default, smallest),
         # "gzip" (faster to inflate on the target's first run) or "none".
         "onefile-compression": str,
+        "onefile-compression-preset": int,
         # Whether an extracting single file reuses a previous extraction found at
         # its cache directory instead of always re-extracting. On by default -- see
         # `smelt.onefile.DEFAULT_ONEFILE_CACHE`.
@@ -334,22 +248,95 @@ EntrypointOptions = TypedDict(
 )
 
 
+def bundle_entrypoint_options(settings: BundleSettings) -> EntrypointOptions:
+    """
+    Flattens merged bundler settings into the flat per-entrypoint keys `smelt.dist`
+    reads. Only declared (non-None, non-empty) settings are emitted, so the dist
+    defaults still apply to the rest.
+    """
+    options = EntrypointOptions()
+    content, interpreter, onefile = settings.content, settings.interpreter, settings.onefile
+    if settings.python is not None:
+        options["python"] = settings.python
+    if content.discovery is not None:
+        options["discovery"] = content.discovery
+    if content.include_modules:
+        options["include-modules"] = content.include_modules
+    if content.include_packages:
+        options["include-package"] = content.include_packages
+    if content.exclude_modules:
+        options["exclude-modules"] = content.exclude_modules
+    if content.drop_optional_imports is not None:
+        options["drop-optional-imports"] = content.drop_optional_imports
+    if content.package_data:
+        options["include-package-data"] = package_data_specs(content.package_data)
+    if content.distribution_metadata:
+        options["include-distribution-metadata"] = content.distribution_metadata
+    if interpreter.version is not None:
+        options["own-python-version"] = interpreter.version
+    if interpreter.tailor is not None:
+        options["tailor-interpreter"] = interpreter.tailor
+    if interpreter.drop_stdlib_groups:
+        options["drop-stdlib-groups"] = interpreter.drop_stdlib_groups
+    if interpreter.static is not None:
+        options["own-python-static"] = interpreter.static
+    if interpreter.static_modules:
+        options["own-python-static-modules"] = interpreter.static_modules
+    if interpreter.inittab is not None:
+        options["use-inittab"] = interpreter.inittab
+    if onefile.enabled is not None:
+        options["onefile"] = onefile.enabled
+    if onefile.compression is not None:
+        options["onefile-compression"] = onefile.compression
+    if onefile.compression_preset is not None:
+        options["onefile-compression-preset"] = onefile.compression_preset
+    if onefile.cache is not None:
+        options["onefile-cache"] = onefile.cache
+    if settings.isolated_build.enabled is not None:
+        options["isolated-build"] = settings.isolated_build.enabled
+    if settings.isolated_build.versions is not None:
+        options["isolated-build-versions"] = settings.isolated_build.versions
+    return options
+
+
+def package_data_specs(package_data: dict[str, list[str]]) -> list[str]:
+    """`{pkg = ["*.json", "*.yaml"]}` -> `["pkg:*.json,*.yaml"]`, the form the builders read."""
+    return [f"{package}:{','.join(patterns)}" for package, patterns in package_data.items()]
+
+
+@dataclass
+class NuitkaBinaryOptions:
+    """
+    Resolved `[tool.smelt.nuitka-binary]` options of one entrypoint.
+    """
+
+    extra_flags: list[str] = field(default_factory=list)
+    zig: bool = True
+    include_modules: list[str] = field(default_factory=list)
+    include_packages: list[str] = field(default_factory=list)
+    package_data: dict[str, list[str]] = field(default_factory=dict)
+
+    def package_data_specs(self) -> list[str]:
+        return package_data_specs(self.package_data)
+
+
 @dataclass
 class SmeltConfig:
     """
-    Defines how the smelt backend should run
+    Resolved, internal configuration the build code consumes.
+
+    Built from the user-facing schema (`smelt.schema.ProjectConfig`) plus the
+    `[project]` table by `from_toml_data`; users cannot set its fields directly.
     """
 
     packages_location: dict[str, str] = field(default_factory=dict)
-    mypyc_options: dict[str, Any] = field(default_factory=dict)
     mypyc_modules: list[MypycModule] = field(default_factory=list)
-    cython_options: dict[str, Any] = field(default_factory=dict)
     cython_modules: list[CythonExtension] = field(default_factory=list)
     nuitka_modules: list[NuitkaModule] = field(default_factory=list)
     c_extensions: list[NativeExtension] = field(default_factory=list)
     zig_modules: list[ZigModule] = field(default_factory=list)
     zig_executables: list[ZigExecutable] = field(default_factory=list)
-    platforms: Iterable[str] | None = None
+    platforms: list[str] | None = None
     #: CPU-architecture counterpart to `platforms`, restricting `run_backend` to
     #: build only for the listed Zig-spelled architectures (e.g. `["x86_64",
     #: "aarch64"]`) -- checked against the cross target's own arch when `run_backend`
@@ -360,8 +347,16 @@ class SmeltConfig:
     #: cross-compiling *this* package as a dependency (`smelt.isolated_build.
     #: rebuild_manifested_extensions`) can see the restriction too, instead of
     #: attempting (and failing) a build this package never claimed to support.
-    archs: Iterable[str] | None = None
+    archs: list[str] | None = None
+    #: Declared `supported-targets` of `[tool.smelt]` (Zig-triple patterns).
+    supported_targets: list[str] | None = None
+    #: Bundler options per entrypoint, in the flat form `smelt.dist` reads. Keyed by
+    #: `module.path:func` spec.
     entrypoints: dict[str, EntrypointOptions] = field(default_factory=dict)
+    #: The same options, as declared in the schema and merged per entrypoint.
+    bundle: dict[str, BundleSettings] = field(default_factory=dict)
+    #: `[tool.smelt.nuitka-binary]` options per entrypoint.
+    nuitka_binary: dict[str, NuitkaBinaryOptions] = field(default_factory=dict)
     script_names: dict[str, str] = field(default_factory=dict)
     debug: bool = False
     auto_mode: AutoMode = "off"
@@ -375,36 +370,53 @@ class SmeltConfig:
     @classmethod
     def from_toml_data(
         cls,
-        toml_data: dict[str, Any],
+        toml_data: dict[str, TomlValue],
         project_root: Path | None = None,
         project_scripts: dict[str, str] | None = None,
         project_dependencies: list[str] | None = None,
     ) -> Self:
-        # operate on a copy: callers (e.g. the hatch build hook) keep their own
-        # reference to `toml_data` around for error reporting after this call.
-        toml_data = dict(toml_data)
+        """
+        Validates `toml_data` (the `[tool.smelt]` table) against the schema and
+        derives the internal config from it.
+        """
+        return cls.from_project_config(
+            parse_project_config(toml_data, project_root=project_root),
+            project_root=project_root,
+            project_scripts=project_scripts,
+            project_dependencies=project_dependencies,
+        )
+
+    @classmethod
+    def from_project_config(
+        cls,
+        schema: ProjectConfig,
+        project_root: Path | None = None,
+        project_scripts: dict[str, str] | None = None,
+        project_dependencies: list[str] | None = None,
+    ) -> Self:
+        root = project_root or Path.cwd()
+        ext = schema.extensions
 
         # entrypoints: every `[project.scripts]` target is picked up automatically
-        # (default options), `entrypoints` declarations on top of that only customize
-        # options for one of them, or declare additional entrypoints of their own.
-        entrypoints: dict[str, EntrypointOptions] = {}
+        # (default options), `bundle.entrypoints` / `nuitka-binary.entrypoints`
+        # declarations on top of that only customize options for one of them, or
+        # declare additional entrypoints of their own.
         script_names: dict[str, str] = {}
+        auto_keys: list[str] = []
         for name, target in (project_scripts or {}).items():
-            entrypoints[target] = EntrypointOptions()
+            auto_keys.append(target)
             script_names[name] = target
-        entrypoints_decl_raw: dict[str, EntrypointOptions] = toml_data.pop("entrypoints", {})
+        declared_keys = [*schema.bundle.entrypoints, *schema.nuitka_binary.entrypoints]
         # a declaration keyed by a `[project.scripts]` name (e.g. `entrypoints.afpu`
         # for `afpu = "pkg.cli:afpu"`) customizes that script's auto-added target --
-        # resolve it upfront so it lines up with `entrypoints`/`script_names` below
-        # exactly like a declaration spelled out as "pkg.cli:afpu" would.
-        entrypoints_decl: dict[str, EntrypointOptions] = {
-            script_names.get(key, key): value for key, value in entrypoints_decl_raw.items()
-        }
-        for explicit_key in entrypoints_decl:
+        # resolve it upfront so it lines up with `script_names` exactly like a
+        # declaration spelled out as "pkg.cli:afpu" would.
+        resolved_key = {key: script_names.get(key, key) for key in declared_keys}
+        entrypoint_keys = dict.fromkeys(auto_keys)
+        for explicit_key in resolved_key.values():
             if ":" in explicit_key:
                 # already a full `module.path:func_name` spec, so it matches (at
-                # most) one auto-added entry exactly by key -- `entrypoints.update`
-                # below overwrites that entry's options directly. Hunting for other
+                # most) one auto-added entry exactly by key. Hunting for other
                 # auto-added entries sharing its module path would wrongly sweep up
                 # unrelated sibling scripts from the same module (e.g. two distinct
                 # `[project.scripts]` targets both living in `pkg.cli`).
@@ -413,112 +425,90 @@ class SmeltConfig:
             # declaration keyed `"pkg.cli"` customizing the auto-added
             # `"pkg.cli:func"`) -- drop the auto entry so it isn't built a second
             # time, unconfigured, alongside the explicit one.
-            explicit_module_path = explicit_key
             for auto_key in [
                 key
-                for key in entrypoints
-                if key != explicit_key and key.partition(":")[0] == explicit_module_path
+                for key in entrypoint_keys
+                if key != explicit_key and key.partition(":")[0] == explicit_key
             ]:
-                del entrypoints[auto_key]
+                del entrypoint_keys[auto_key]
                 for name, target in script_names.items():
                     if target == auto_key:
                         script_names[name] = explicit_key
-        entrypoints.update(entrypoints_decl)
-        # native code
-        native_extensions_decl = toml_data.pop("c_extensions", [])
-        native_extensions = [
-            build_datacls_from_toml(
-                NativeExtension, decl, context=["c_extensions"], project_root=project_root
-            )
-            for decl in native_extensions_decl
-        ]
-        # zig modules
-        zig_modules_decl = toml_data.pop("zig_modules", [])
-        zig_modules = [
-            build_datacls_from_toml(
-                ZigModule, decl, context=["zig_modules"], project_root=project_root
-            )
-            for decl in zig_modules_decl
-        ]
-        # zig executables
-        zig_executables_decl = toml_data.pop("zig_executables", [])
-        zig_executables = [
-            build_datacls_from_toml(
-                ZigExecutable, decl, context=["zig_executables"], project_root=project_root
-            )
-            for decl in zig_executables_decl
-        ]
-        # mypyc modules
-        mypyc_modules_decl = toml_data.pop("mypyc_modules", [])
-        mypyc_modules = [
-            build_datacls_from_toml(
-                MypycModule, decl, context=["mypyc_modules"], project_root=project_root
-            )
-            for decl in mypyc_modules_decl
-        ]
+        for explicit_key in resolved_key.values():
+            entrypoint_keys[explicit_key] = None
 
-        # cython
-        cython_modules_decl = toml_data.pop("cython_modules", [])
-        cython_modules = [
-            build_datacls_from_toml(
-                CythonExtension, decl, context=["cython_modules"], project_root=project_root
+        bundle_by_key: dict[str, BundleSettings] = {}
+        nuitka_by_key: dict[str, NuitkaBinarySettings] = {}
+        for declared, resolved in resolved_key.items():
+            if declared in schema.bundle.entrypoints:
+                bundle_by_key[resolved] = schema.bundle.entrypoints[declared]
+            if declared in schema.nuitka_binary.entrypoints:
+                nuitka_by_key[resolved] = schema.nuitka_binary.entrypoints[declared]
+        bundle: dict[str, BundleSettings] = {}
+        entrypoints: dict[str, EntrypointOptions] = {}
+        nuitka_binary: dict[str, NuitkaBinaryOptions] = {}
+        for key in entrypoint_keys:
+            merged = merge_settings(BundleSettings, schema.bundle, bundle_by_key.get(key))
+            bundle[key] = merged
+            entrypoints[key] = bundle_entrypoint_options(merged)
+            nuitka_merged = merge_settings(
+                NuitkaBinarySettings, schema.nuitka_binary, nuitka_by_key.get(key)
             )
-            for decl in cython_modules_decl
-        ]
-        # nuitka
-        nuitka_modules_decl = toml_data.pop("nuitka_modules", [])
-        nuitka_modules = [
-            build_datacls_from_toml(
-                NuitkaModule, decl, context=["nuitka_modules"], project_root=project_root
-            )
-            for decl in nuitka_modules_decl
-        ]
-
-        # auto discovery mode
-        auto_mode: AutoMode = toml_data.pop("auto_mode", "off")
-        if auto_mode not in ("off", "package", "all"):
-            raise SmeltConfigError(
-                f"Invalid auto_mode: {auto_mode!r}. Expected one of 'off', 'package', 'all'."
+            nuitka_binary[key] = NuitkaBinaryOptions(
+                extra_flags=nuitka_merged.extra_flags,
+                zig=True if nuitka_merged.zig is None else nuitka_merged.zig,
+                include_modules=nuitka_merged.include_modules,
+                include_packages=nuitka_merged.include_packages,
+                package_data=nuitka_merged.package_data,
             )
 
-        # backend fallback order, used for modules discovered by auto_mode
-        backend_priority_order_decl = toml_data.pop("backend_priority_order", ["nuitka"])
-        assert_type_is(backend_priority_order_decl, list)
-        try:
-            backend_priority_order = [Backend(name) for name in backend_priority_order_decl]
-        except ValueError as exc:
-            raise SmeltConfigError(f"Invalid backend in backend_priority_order: {exc}") from exc
-
-        # Whatever is left is passed through as a plain option below, so an option that
-        # is not one reaches `cls(**toml_data)` and comes back out as
-        # `TypeError: SmeltConfig.__init__() got an unexpected keyword argument`. That
-        # names the internals rather than the file the reader has to edit, and the
-        # option most likely to land here is the singular `entrypoint` that
-        # `[project.scripts]`/`[tool.smelt.entrypoints]` replaced.
-        unknown = sorted(set(toml_data) - {f.name for f in fields(cls)})
-        if unknown:
-            raise SmeltConfigError(
-                f"Unknown option(s) in [tool.smelt]: {unknown}. Modules are declared "
-                "in their own sections ([[tool.smelt.mypyc_modules]], "
-                "[[tool.smelt.c_extensions]], [[tool.smelt.cython_modules]], "
-                "[[tool.smelt.nuitka_modules]], [[tool.smelt.zig_modules]], [[tool.smelt.zig_executables]]), and "
-                "entrypoints in [project.scripts] or [tool.smelt.entrypoints] -- which "
-                "is what the singular `entrypoint` option was replaced by."
-            )
+        def modules[S, T](entries: list[S], build: Callable[[S], T]) -> list[T]:
+            return [build(entry) for entry in entries]
 
         return cls(
-            mypyc_modules=mypyc_modules,
-            c_extensions=native_extensions,
-            zig_modules=zig_modules,
-            zig_executables=zig_executables,
-            cython_modules=cython_modules,
-            nuitka_modules=nuitka_modules,
-            auto_mode=auto_mode,
-            backend_priority_order=backend_priority_order,
+            packages_location=schema.package_dirs,
+            mypyc_modules=modules(
+                ext.mypyc, lambda e: MypycModule(e.import_path, e.source, e.extras)
+            ),
+            cython_modules=modules(
+                ext.cython, lambda e: CythonExtension(e.import_path, e.source, e.extras)
+            ),
+            nuitka_modules=modules(
+                ext.nuitka, lambda e: NuitkaModule(e.import_path, e.source, e.extras)
+            ),
+            c_extensions=modules(
+                ext.c, lambda e: NativeExtension(e.import_path, e.sources, e.extras)
+            ),
+            zig_modules=modules(
+                ext.zig,
+                lambda e: ZigModule(
+                    name=e.name or e.import_path.rpartition(".")[2],
+                    import_path=e.import_path,
+                    folder=e.folder or assert_path_exists(root),
+                    flags=e.flags,
+                    extras=e.extras,
+                ),
+            ),
+            zig_executables=modules(
+                schema.executables.zig,
+                lambda e: ZigExecutable(
+                    name=e.name,
+                    exe=e.exe,
+                    folder=e.folder or assert_path_exists(root),
+                    flags=e.flags,
+                    extras=e.extras,
+                ),
+            ),
+            platforms=schema.platforms,
+            archs=schema.archs,
+            supported_targets=schema.supported_targets,
             entrypoints=entrypoints,
+            bundle=bundle,
+            nuitka_binary=nuitka_binary,
             script_names=script_names,
+            auto_mode=ext.auto.mode,
+            backend_priority_order=[Backend(name) for name in ext.auto.backends],
             dependencies=project_dependencies or [],
-            **toml_data,
         )
 
     def get_path_solver(self, project_root: Path | None = None) -> PathSolver:

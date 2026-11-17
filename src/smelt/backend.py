@@ -36,6 +36,7 @@ from smelt.config import (
     Backend,
     CythonExtension,
     MypycModule,
+    NuitkaBinaryOptions,
     NuitkaModule,
     SmeltConfig,
 )
@@ -1315,7 +1316,7 @@ def run_backend(
             module_file = locate_module(
                 module_path, strategy=strategy, package_root=path_solver.project_root
             )
-            entrypoint_options = config.entrypoints[entrypoint_spec]
+            nuitka_options = config.nuitka_binary.get(entrypoint_spec, NuitkaBinaryOptions())
             # Dependencies (already-installed packages, not this run's own modules)
             # that expose a smelt manifest (see `smelt.manifest`) and were compiled
             # with mypyc: their shared runtime is `dlopen`'d, invisible to Nuitka's
@@ -1359,14 +1360,14 @@ def run_backend(
                     stdout=stdout,
                     include_modules=shared_runtime_extensions
                     | transitive_mypyc_runtimes
-                    | set(entrypoint_options.get("include-modules", [])),
-                    include_packages=entrypoint_options.get("include-package", []),
-                    include_package_data=entrypoint_options.get("include-package-data", []),
+                    | set(nuitka_options.include_modules),
+                    include_packages=nuitka_options.include_packages,
+                    include_package_data=nuitka_options.package_data_specs(),
                     include_data_files=embed_data_files,
-                    extra_flags=entrypoint_options.get("extra_flags", []),
+                    extra_flags=nuitka_options.extra_flags,
                     extra_search_paths=extra_search_paths,
                     output_name=func_name if sep else None,
-                    no_zig=entrypoint_options.get("no-zig", False),
+                    no_zig=not nuitka_options.zig,
                     no_cache=no_cache,
                 )
 

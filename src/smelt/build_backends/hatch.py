@@ -20,6 +20,7 @@ from packaging.utils import canonicalize_name
 
 from smelt.backend import run_backend, write_auto_mode_report
 from smelt.config import SmeltConfig
+from smelt.schema import ProjectConfig, toml_key
 from smelt.utils import ImportPath, ModpathType
 
 if TYPE_CHECKING:
@@ -78,7 +79,7 @@ class HatchlingBuildHook(BuildHookInterface):
                 "Smelt config is invalid:"
                 f"Current config: {self.config}"
                 "Valid parameters are:\n"
-                f"{[f.name for f in fields(SmeltConfig)]}"
+                f"{[toml_key(f.name) for f in fields(ProjectConfig)]}"
             ) from exc
         config.load_env()
         return config
