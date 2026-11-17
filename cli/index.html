@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://hedwyn.github.io/smelt/cli/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>CLI - Smelt</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "CLI";
+        var mkdocs_page_input_path = "cli.md";
+        var mkdocs_page_url = "/smelt/cli/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> Smelt
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../get-started/">Get Started</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../manifesto/">Manifesto</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../build-hook/">Build Hook</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">CLI</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#nuitka-binary">nuitka-binary</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#bundle">bundle</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#build">build</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#clean">clean</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#config">config</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#compile">compile</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#renamed-commands">Renamed commands</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Bundler</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../bundler-get-started/">Get Started</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../bundler-overview/">Overview</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../bundler-reference/">Reference</a>
+                  </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../advanced/">Advanced Use Cases</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../glossary/">Glossary</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">Smelt</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">CLI</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Hedwyn/smelt/edit/master/docs/cli.md">Edit on Hedwyn/smelt</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="cli">CLI<a class="headerlink" href="#cli" title="Permanent link">&para;</a></h1>
+<p>Installing Smelt with the <code>cli</code> extra (<code>pip install "smelt[cli]"</code>) provides the <code>smelt</code> command-line tool. It exposes everything the <a href="../build-hook/">build hook</a> does, but callable directly - useful outside of a Hatchling build (e.g. producing a standalone binary, or driving a <code>[tool.smelt]</code>-configured build from a script or CI job).</p>
+<pre class="codehilite"><code>$ smelt --help
+Usage: smelt [OPTIONS] COMMAND [ARGS]...
+
+  Entrypoint for Smelt frontend
+
+Options:
+  -p, --project EXISTING_PATH     Project to act on: a folder holding a
+                                  pyproject.toml. Default: the current folder.
+  -l, --log-level [critical|fatal|error|warn|warning|info|debug|notset]
+                                  Logging level to apply. Logs are emitted to
+                                  stdout.
+  --report TEXT                   Write a report to the given path.
+  --help                          Show this message and exit.
+
+Commands:
+  build          Builds the extensions declared in the project's Smelt...
+  bundle         Assembles a bundle for an entrypoint: smelt-built...
+  clean          Deletes built dynlibs (and their mypyc runtime, where...
+  compile        One-off compile of a single installed module with the...
+  config         Shows the resolved config: the project-wide settings,...
+  nuitka-binary  Builds a Nuitka whole-program executable per entrypoint,...
+</code></pre>
+
+<p><code>-p/--project</code>, <code>-l/--log-level</code> and <code>--report</code> are options of the <code>smelt</code> group, so they go <strong>before</strong> the command: <code>smelt -p path/to/project bundle</code>.</p>
+<p>Every command reads its configuration from a <code>pyproject.toml</code>, from <code>[tool.smelt]</code> (see <a href="../build-hook/#configuration-location">Build Hook</a>).</p>
+<h2 id="nuitka-binary">nuitka-binary<a class="headerlink" href="#nuitka-binary" title="Permanent link">&para;</a></h2>
+<p>The headline feature of Smelt's CLI: compiles a <code>[project.scripts]</code> entrypoint (and everything it imports) into a single, fully standalone executable via Nuitka, with no interpreter or system dependency required on the target machine.</p>
+<pre class="codehilite"><code>$ smelt nuitka-binary --help
+Usage: smelt nuitka-binary [OPTIONS]
+
+  Builds a Nuitka whole-program executable per entrypoint, configured by
+  [tool.smelt.nuitka-binary].
+
+Options:
+  -e, --entrypoint TEXT  Restrict the build to this entrypoint: either its
+                         script name as declared in [project.scripts] (e.g.
+                         'afpu'), or its 'module.path'/'module.path:func_name'
+                         key as declared in
+                         [tool.smelt.nuitka-binary.entrypoints]. Builds all
+                         configured entrypoints if omitted.
+  --package-data TEXT    Collect a package's data files into the binary, on
+                         top of [tool.smelt.nuitka-binary] package-data.
+                         Syntax: PACKAGE[:PATTERN,...] (e.g.
+                         'mypkg:*.json,*.yaml'). Repeatable.
+  --no-cache             Disable Nuitka's build cache, forcing a full rebuild.
+  --help                 Show this message and exit.
+</code></pre>
+
+<p>Without <code>-e/--entrypoint</code>, every entrypoint declared in <code>[project.scripts]</code> (plus any declared under <code>[tool.smelt.nuitka-binary.entrypoints]</code> or <code>[tool.smelt.bundle.entrypoints]</code>) is built.</p>
+<p>Options live in <code>[tool.smelt.nuitka-binary]</code>, which is independent from <code>[tool.smelt.bundle]</code>; <code>[tool.smelt.nuitka-binary.entrypoints.&lt;ep&gt;]</code> overrides them per entrypoint (scalars replace, lists append):</p>
+<pre class="codehilite"><code class="language-toml">[tool.smelt.nuitka-binary]
+extra-flags = [&quot;--lto=yes&quot;]            # passed to Nuitka as is
+zig = true                             # compile with Smelt's Zig toolchain (default)
+include-modules = [&quot;pkg.plugins.a&quot;]    # modules Nuitka's import-follower can't see
+include-packages = [&quot;pkg.plugins&quot;]
+package-data = { pkg = [&quot;*.json&quot;] }    # data files collected from a package
+
+[tool.smelt.nuitka-binary.entrypoints.greet]
+extra-flags = [&quot;--onefile&quot;]
+</code></pre>
+
+<p><code>--package-data PACKAGE[:PATTERN,...]</code> adds to <code>package-data</code> for the run. The former <code>--embed-file</code> is deprecated in favor of it.</p>
+<p>This compiles the whole program to native code via Nuitka. For an application that assembles bytecode and compiled extensions into a distribution folder instead - optionally with its own bundled interpreter - see <code>bundle</code> below, and the <a href="../bundler-get-started/">Bundler</a> section.</p>
+<h2 id="bundle">bundle<a class="headerlink" href="#bundle" title="Permanent link">&para;</a></h2>
+<p>Smelt's other route to a standalone application: assembles a distribution folder for one entrypoint out of Smelt-built extensions plus bytecode for everything else it imports, and optionally an interpreter to run on. Settings come from <code>[tool.smelt.bundle]</code>; every one of them also has a flag. See <a href="../bundler-get-started/">Bundler: Get Started</a> for a walkthrough and <a href="../bundler-reference/">Bundler: Reference</a> for the full list.</p>
+<pre class="codehilite"><code>$ smelt bundle --help
+Usage: smelt bundle [OPTIONS]
+
+  Assembles a bundle for an entrypoint: smelt-built extensions plus every
+  other module it imports, shipped as bytecode.
+
+  With `--python byo` (the default) the result runs on any machine with a
+  matching CPython installed. With `--python own` the interpreter is built and
+  shipped in the folder too, which then runs on a machine with no Python at
+  all.
+</code></pre>
+
+<h2 id="build">build<a class="headerlink" href="#build" title="Permanent link">&para;</a></h2>
+<p>Builds every native extension declared in the Smelt config (<code>extensions.mypyc</code>, <code>.cython</code>, <code>.nuitka</code>, <code>.c</code>, <code>.zig</code>) for the project, without touching entrypoints. This is what the <a href="../build-hook/">build hook</a> runs automatically during a Hatchling build; use this command to run the same step manually, e.g. for a project configured via plain <code>[tool.smelt]</code>, or to rebuild extensions in place during local development.</p>
+<pre class="codehilite"><code>$ smelt build
+</code></pre>
+
+<h2 id="clean">clean<a class="headerlink" href="#clean" title="Permanent link">&para;</a></h2>
+<p>Deletes the native artifacts Smelt built (and their mypyc runtime, where applicable) for a project, unshadowing each module's <code>.py</code> source back to being the one Python imports. Useful to reset a development checkout back to pure Python.</p>
+<pre class="codehilite"><code>$ smelt clean [--shadowed-only]
+</code></pre>
+
+<p><code>--shadowed-only</code> only cleans modules with a pure-Python fallback to unshadow, excluding handwritten C/Zig extensions.</p>
+<h2 id="config">config<a class="headerlink" href="#config" title="Permanent link">&para;</a></h2>
+<p>Prints the resolved config: the project-wide settings, then the bundler settings of every entrypoint, each followed by the level it came from (<code>default</code>, a pyproject table, or <code>cli</code>). Use it to debug precedence between <code>[tool.smelt.bundle]</code> and its per-entrypoint overrides.</p>
+<h2 id="compile">compile<a class="headerlink" href="#compile" title="Permanent link">&para;</a></h2>
+<p><code>smelt compile MODULE_IMPORT_PATH</code> compiles a single installed module with a chosen backend (<code>-b/--backend mypyc|nuitka|cython</code>), optionally cross-compiling it for one or more platforms (<code>-t/--target</code>, Zig triples or <code>host</code>, comma-separated, see <a href="../advanced/">Advanced Use Cases</a>). Mainly for trying a backend on one module.</p>
+<h2 id="renamed-commands">Renamed commands<a class="headerlink" href="#renamed-commands" title="Permanent link">&para;</a></h2>
+<p>The 0.7 command names still work as hidden aliases that print a deprecation line, and are removed in 0.9: <code>show-config</code> (<code>config</code>), <code>build-extensions</code> (<code>build</code>), <code>build-standalone-binary</code> (<code>nuitka-binary</code>), <code>compile-module</code> (<code>compile</code>), <code>clean-artifacts</code> (<code>clean</code>). Their project/logging/report options keep their old spelling when used through the alias. <code>smelt nuitkaify ENTRYPOINT</code> moved to <code>python -m smelt.nuitkaify ENTRYPOINT</code>.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../build-hook/" class="btn btn-neutral float-left" title="Build Hook"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../bundler-get-started/" class="btn btn-neutral float-right" title="Get Started">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Hedwyn/smelt" class="fa fa-code-fork" style="color: #fcfcfc"> Hedwyn/smelt</a>
+        </span>
+    
+    
+      <span><a href="../build-hook/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../bundler-get-started/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

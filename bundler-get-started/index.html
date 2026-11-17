@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://hedwyn.github.io/smelt/bundler-get-started/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Get Started - Smelt</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Get Started";
+        var mkdocs_page_input_path = "bundler-get-started.md";
+        var mkdocs_page_url = "/smelt/bundler-get-started/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> Smelt
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../get-started/">Get Started</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../manifesto/">Manifesto</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../build-hook/">Build Hook</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../cli/">CLI</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Bundler</span></p>
+              <ul class="current">
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Get Started</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#a-minimal-example">A minimal example</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#building-it">Building it</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#shipping-the-interpreter-too">Shipping the interpreter too</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#where-to-go-next">Where to go next</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../bundler-overview/">Overview</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../bundler-reference/">Reference</a>
+                  </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../advanced/">Advanced Use Cases</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../glossary/">Glossary</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">Smelt</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Bundler</li>
+      <li class="breadcrumb-item active">Get Started</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Hedwyn/smelt/edit/master/docs/bundler-get-started.md">Edit on Hedwyn/smelt</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="bundler-get-started">Bundler: Get Started<a class="headerlink" href="#bundler-get-started" title="Permanent link">&para;</a></h1>
+<p>A <em>bundler</em> takes a Python application and turns it into something that runs on a target machine without a separate install step - PyInstaller, Nuitka's standalone mode, and PyOxidizer are existing examples of tools that do this in the Python ecosystem.</p>
+<p>Smelt is both a build backend (compiling native extensions - see <a href="../get-started/">Get Started</a>) and a bundler: <code>smelt bundle</code> assembles a standalone distribution out of a <code>[project.scripts]</code> entrypoint, reusing whichever of Smelt's own compile backends (mypyc, Cython, Nuitka, handwritten C/Zig) the rest of the project already declares.</p>
+<h2 id="a-minimal-example">A minimal example<a class="headerlink" href="#a-minimal-example" title="Permanent link">&para;</a></h2>
+<p><code>src/greet_demo/cli.py</code>:</p>
+<pre class="codehilite"><code class="language-python">def main() -&gt; None:
+    print(&quot;Hello from a standalone binary!&quot;)
+</code></pre>
+
+<p><code>pyproject.toml</code>:</p>
+<pre class="codehilite"><code class="language-toml">[build-system]
+requires = [&quot;hatchling&quot;, &quot;smelt&quot;]
+build-backend = &quot;hatchling.build&quot;
+
+[project]
+name = &quot;greet-demo&quot;
+version = &quot;0.1.0&quot;
+requires-python = &quot;&gt;=3.12&quot;
+
+[project.scripts]
+greet = &quot;greet_demo.cli:main&quot;
+
+[tool.hatch.build.targets.wheel]
+packages = [&quot;src/greet_demo&quot;]
+
+[tool.hatch.build.hooks.smelt]
+
+[tool.smelt]
+package-dirs = { &quot;greet_demo&quot; = &quot;src/greet_demo&quot; }
+</code></pre>
+
+<p>No native extensions declared here - the entrypoint is plain Python, so the distribution ships it as bytecode. Add <code>[tool.smelt.extensions]</code> entries the same way as for a regular build (see <a href="../build-hook/">Build Hook</a>) and the bundler carries the compiled result alongside it.</p>
+<h2 id="building-it">Building it<a class="headerlink" href="#building-it" title="Permanent link">&para;</a></h2>
+<p>Install Smelt's CLI extra and run <code>smelt bundle</code>:</p>
+<pre class="codehilite"><code>$ pip install &quot;smelt[cli]&quot;
+$ smelt bundle
+</code></pre>
+
+<p>This produces <code>dist/greet.dist/</code> - named after the <code>greet</code> entrypoint, not the package:</p>
+<pre class="codehilite"><code>dist/greet.dist/
+  smelt-dist.json   manifest: what went in, and which interpreter it needs
+  HOW_TO_RUN.txt     instructions generated for this specific build
+  app/               the application itself - the only folder on sys.path
+</code></pre>
+
+<p>Nothing was asked to be shipped beyond the application, so this is a <code>byo</code> ("bring your own [interpreter]") build: it needs a matching CPython already installed on the machine that runs it.</p>
+<pre class="codehilite"><code>$ python3.12 dist/greet.dist/app
+Hello from a standalone binary!
+</code></pre>
+
+<h2 id="shipping-the-interpreter-too">Shipping the interpreter too<a class="headerlink" href="#shipping-the-interpreter-too" title="Permanent link">&para;</a></h2>
+<p>Add <code>--python own</code> to also build and bundle a CPython interpreter inside the folder, so it runs on a machine with no Python installed at all. This needs the <code>byp</code> extra:</p>
+<pre class="codehilite"><code>$ pip install &quot;smelt[cli,byp]&quot;
+$ smelt bundle --python own
+$ ./dist/greet.dist/greet
+Hello from a standalone binary!
+</code></pre>
+
+<p>The first such build compiles that interpreter, which takes a few minutes; later builds reuse it. Add <code>--onefile</code> on top of either mode to additionally pack the folder into a single file - an executable zip application for <code>byo</code>, a compiled self-extracting launcher for <code>own</code>.</p>
+<h2 id="where-to-go-next">Where to go next<a class="headerlink" href="#where-to-go-next" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong><a href="../bundler-overview/">Overview</a></strong> - what the bundler actually does under the hood, and how it compares to PyInstaller, Nuitka's standalone mode, and PyOxidizer.</li>
+<li><strong><a href="../bundler-reference/">Reference</a></strong> - the full <code>smelt bundle</code> option list.</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../cli/" class="btn btn-neutral float-left" title="CLI"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../bundler-overview/" class="btn btn-neutral float-right" title="Overview">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Hedwyn/smelt" class="fa fa-code-fork" style="color: #fcfcfc"> Hedwyn/smelt</a>
+        </span>
+    
+    
+      <span><a href="../cli/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../bundler-overview/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

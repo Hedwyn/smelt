@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://hedwyn.github.io/smelt/bundler-reference/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Reference - Smelt</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Reference";
+        var mkdocs_page_input_path = "bundler-reference.md";
+        var mkdocs_page_url = "/smelt/bundler-reference/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> Smelt
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../get-started/">Get Started</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../manifesto/">Manifesto</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../build-hook/">Build Hook</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../cli/">CLI</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Bundler</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../bundler-get-started/">Get Started</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../bundler-overview/">Overview</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Reference</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#configuration">Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#command-line-only">Command-line only</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#general">General</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#content">Content</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#interpreter-python-own-only">Interpreter (python = "own" only)</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#onefile">Onefile</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#isolated-build-experimental">Isolated build (experimental)</a>
+    </li>
+    </ul>
+                  </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../advanced/">Advanced Use Cases</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../glossary/">Glossary</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">Smelt</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Bundler</li>
+      <li class="breadcrumb-item active">Reference</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Hedwyn/smelt/edit/master/docs/bundler-reference.md">Edit on Hedwyn/smelt</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="bundler-reference">Bundler: Reference<a class="headerlink" href="#bundler-reference" title="Permanent link">&para;</a></h1>
+<p><code>smelt bundle</code> assembles a distribution folder for one entrypoint: Smelt-built extensions plus every other module it imports, shipped as bytecode - and, optionally, an interpreter to run on. See <a href="../bundler-get-started/">Get Started</a> for a minimal walkthrough and <a href="../bundler-overview/">Overview</a> for what each mode actually does; terms like closure, discovery, payload, keep-set and tailoring are defined in the <a href="../glossary/">Glossary</a>.</p>
+<h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
+<p>Settings live in <code>[tool.smelt.bundle]</code>, split into the groups below, and apply to every entrypoint. A single entrypoint overrides them under <code>[tool.smelt.bundle.entrypoints.&lt;name&gt;]</code> with the same keys and groups, <code>&lt;name&gt;</code> being its <code>[project.scripts]</code> name or a <code>module.path:func</code> spec (which also declares an entrypoint that is not a script):</p>
+<pre class="codehilite"><code class="language-toml">[tool.smelt.bundle]
+python = &quot;own&quot;
+
+[tool.smelt.bundle.content]
+include-packages = [&quot;pkg.plugins&quot;]
+package-data = { pkg = [&quot;*.json&quot;] }
+
+[tool.smelt.bundle.onefile]
+enabled = true
+compression = &quot;gzip&quot;
+
+[tool.smelt.bundle.entrypoints.greet]
+python = &quot;byo&quot;
+</code></pre>
+
+<p>Precedence, highest first: command-line flag, <code>bundle.entrypoints.&lt;name&gt;</code>, <code>[tool.smelt.bundle]</code>, built-in default. A scalar replaces the lower level's value; a list appends to it. Unknown keys and wrong types are configuration errors.</p>
+<p>Every key has a flag named after it: <code>[tool.smelt.bundle.&lt;group&gt;] &lt;key&gt;</code> becomes <code>--&lt;group&gt;-&lt;key&gt;</code>, the prefix being dropped for <code>content</code> and <code>interpreter</code>. Booleans are <code>--x/--no-x</code>, list keys a repeatable singular flag. Run <code>smelt bundle --help</code> for the full text.</p>
+<h2 id="command-line-only">Command-line only<a class="headerlink" href="#command-line-only" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-p, --project</code></td>
+<td>Project folder, holding a <code>pyproject.toml</code>. Defaults to <code>.</code>.</td>
+</tr>
+<tr>
+<td><code>-e, --entrypoint</code></td>
+<td>Entrypoint to bundle. Can be omitted when the project declares a single one.</td>
+</tr>
+<tr>
+<td><code>-o, --output-dir</code></td>
+<td>Folder the bundle is assembled in. Defaults to <code>./dist</code>.</td>
+</tr>
+<tr>
+<td><code>-t, --target</code></td>
+<td>Zig target triple(s), comma-separated or repeated, and/or <code>host</code>. One bundle is built per target; the output is <code>&lt;output-dir&gt;/&lt;script&gt;.dist</code> for a single target and <code>&lt;output-dir&gt;/&lt;target&gt;/&lt;script&gt;.dist</code> when several are built. Defaults to the concrete triples of the most specific <code>supported-targets</code> declared, else <code>host</code>.</td>
+</tr>
+<tr>
+<td><code>--no-build</code></td>
+<td>Skip the extension build and reuse the artifacts already on disk.</td>
+</tr>
+<tr>
+<td><code>-l, --log-level</code></td>
+<td>Logging level; logs go to stdout.</td>
+</tr>
+<tr>
+<td><code>--report</code></td>
+<td>Write a build report to this path.</td>
+</tr>
+</tbody>
+</table>
+<p><code>supported-targets</code> (accepted at <code>[tool.smelt]</code>, <code>[tool.smelt.bundle]</code> and entrypoint level) is a list of Zig-triple patterns (<code>x86_64-linux-*</code>, <code>*-linux-musl</code>) or <code>host</code>. It has no flag of its own. A target is allowed only if it matches every level that declares the key, so a lower level can only narrow the one above. A requested target outside it is an error, before anything is built. Without <code>-t</code>, the concrete triples (no wildcard) of the most specific declaring level are built; if it only has patterns, or nothing is declared, <code>host</code> is built.</p>
+<h2 id="general">General<a class="headerlink" href="#general" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Flag</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>python</code></td>
+<td><code>--python</code></td>
+<td>Interpreter the bundle runs on. 'byo' (bring your own) ships the application only and needs a matching CPython on the target. 'own' also builds an interpreter and ships it in the folder, so it runs where no Python is installed; the first such build takes several minutes and is then cached per target. Default: byo.</td>
+</tr>
+<tr>
+<td><code>optimize</code></td>
+<td><code>--optimize</code></td>
+<td>Bytecode optimization level (0, 1 or 2). Defaults to the level this interpreter runs with. Level 2 strips docstrings, which breaks help(), pydoc, doctests and libraries building their help text from docstrings.</td>
+</tr>
+<tr>
+<td><code>guard-version</code></td>
+<td><code>--guard-version</code> / <code>--no-guard-version</code></td>
+<td>Check the interpreter version in the generated entrypoint. Without it, a mismatched interpreter fails with <code>can't find '__main__' module</code> instead of a readable message. Default: on.</td>
+</tr>
+<tr>
+<td><code>isolate</code></td>
+<td><code>--isolate</code> / <code>--no-isolate</code></td>
+<td>Add an isolation guard to the generated entrypoint. Without it, running the bundle without -I -S leaves the host's site-packages on sys.path, where it can silently supply a missing module. Default: on.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="content">Content<a class="headerlink" href="#content" title="Permanent link">&para;</a></h2>
+<p><code>[tool.smelt.bundle.content]</code></p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Flag</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>discovery</code></td>
+<td><code>--discovery</code></td>
+<td>How to find the modules to ship. 'static' reads import statements, 'trace' imports the entrypoint in a subprocess and reports what it loaded (this runs its module-level code), 'both' unions them. Default: both.</td>
+</tr>
+<tr>
+<td><code>include-modules</code></td>
+<td><code>--include-module</code></td>
+<td>Force a module into the bundle, on top of what discovery finds. For modules imported dynamically. Repeatable.</td>
+</tr>
+<tr>
+<td><code>include-packages</code></td>
+<td><code>--include-package</code></td>
+<td>Force a whole package (every module it contains, recursively) into the bundle. For a package that loads its own internals dynamically. Repeatable.</td>
+</tr>
+<tr>
+<td><code>exclude-modules</code></td>
+<td><code>--exclude-module</code></td>
+<td>Drop a module, and everything under it, from the bundle. For trees discovery reached but that are not needed at runtime. Repeatable.</td>
+</tr>
+<tr>
+<td><code>drop-optional-imports</code></td>
+<td><code>--drop-optional-imports</code> / <code>--keep-optional-imports</code></td>
+<td>Leave out the modules only reachable through an import whose importer handles the failure itself (<code>try: import x</code> / <code>except ImportError</code>). None of them can raise an ImportError by being absent, but what the fallback costs varies: dropping <code>_hashlib</code> saves 5 MB with no visible change, dropping <code>ssl</code> leaves urllib unable to speak HTTPS. Default: keep; the build output lists them either way.</td>
+</tr>
+<tr>
+<td><code>package-data</code></td>
+<td><code>--package-data</code></td>
+<td>Collect a package's data files into the bundle. Syntax: PACKAGE[:PATTERN,...] (e.g. 'mypkg' or 'mypkg:<em>.json,</em>.yaml'). Repeatable.</td>
+</tr>
+<tr>
+<td><code>distribution-metadata</code></td>
+<td><code>--distribution-metadata</code></td>
+<td>Collect a distribution's *.dist-info metadata beyond those owning a shipped module. Needed when importlib.metadata is queried for a package whose modules are not themselves shipped. Repeatable.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="interpreter-python-own-only">Interpreter (<code>python = "own"</code> only)<a class="headerlink" href="#interpreter-python-own-only" title="Permanent link">&para;</a></h2>
+<p><code>[tool.smelt.bundle.interpreter]</code></p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Flag</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>version</code></td>
+<td><code>--python-version</code></td>
+<td>CPython release to build the 'own' interpreter from (e.g. '3.12.3'). Only the minor version of the Python running smelt can be shipped, since the bytecode is compiled by it: run smelt under the minor version you want to ship. Default: the supported release matching the running minor version.</td>
+</tr>
+<tr>
+<td><code>tailor</code></td>
+<td><code>--tailor</code> / <code>--no-tailor</code></td>
+<td>Ship only the standard library modules, extension modules and libraries the application was found to need, instead of all of them. Keeps an 'own' bundle a reasonable size, but a module reached only through a name absent from the source is invisible to discovery and becomes a runtime ImportError: put it back with --include-module. Each distinct set of disabled libraries needs its own interpreter build (minutes), cached separately. Default: tailored.</td>
+</tr>
+<tr>
+<td><code>drop-stdlib-groups</code></td>
+<td><code>--drop-stdlib-group</code></td>
+<td>Ship the 'own' interpreter without an optional group of the minimal standard library (currently: international_hostnames, 1.1 MB, which costs support for non-ASCII hostnames). Refused for groups nothing can run without. Repeatable.</td>
+</tr>
+<tr>
+<td><code>static</code></td>
+<td><code>--static</code> / <code>--no-static</code></td>
+<td>Build one monolithic, static-PIE 'own' interpreter (no libpythonX.Y.so) instead of the dynamic shape. A static interpreter has no working dlopen(), so every native module has to be compiled into it: --static-module for standard library modules, --inittab for smelt's own extensions. Any .so left in the bundle fails the build. Verified only for x86_64-linux-musl. Default: off.</td>
+</tr>
+<tr>
+<td><code>static-modules</code></td>
+<td><code>--static-module</code></td>
+<td>With --static, compile a standard library module (e.g. '_socket', 'zlib') into the interpreter as a builtin. Repeatable.</td>
+</tr>
+<tr>
+<td><code>inittab</code></td>
+<td><code>--inittab</code> / <code>--no-inittab</code></td>
+<td>With the 'own' interpreter, link smelt's own compiled extensions into it instead of shipping .so files, which skips dlopen() and RPATH for them. This replaces the interpreter's own entrypoint, and a bad build has no .so fallback. Experimental. Default: off.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="onefile">Onefile<a class="headerlink" href="#onefile" title="Permanent link">&para;</a></h2>
+<p><code>[tool.smelt.bundle.onefile]</code></p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Flag</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td><code>--onefile</code> / <code>--no-onefile</code></td>
+<td>Also pack the finished folder into a single file. With 'byo' that is an executable zip application (a /bin/sh preamble locating a CPython, followed by a zip). With 'own' it is a compiled launcher carrying the whole folder, interpreter included, as a compressed payload it unpacks into a cache directory on first run. Default: off.</td>
+</tr>
+<tr>
+<td><code>compression</code></td>
+<td><code>--onefile-compression</code></td>
+<td>Payload compression. 'xz' (default) is smallest and slowest to inflate on the first run, 'gzip' trades size for speed, 'none' stores it as is. A 'byo' payload is imported straight out of its zip, so it is deflated for 'xz' and 'gzip' alike.</td>
+</tr>
+<tr>
+<td><code>compression-preset</code></td>
+<td><code>--onefile-compression-preset</code></td>
+<td>Compression preset: 0-9 for xz, 1-9 for gzip. Default: 6. Higher presets shrink the file but cost build time and first-run inflation time.</td>
+</tr>
+<tr>
+<td><code>cache</code></td>
+<td><code>--onefile-cache</code> / <code>--no-onefile-cache</code></td>
+<td>Reuse a previous extraction found in the cache directory instead of always re-extracting. Set SMELT_ONEFILE_VERBOSE=1 on the built artifact to see the decision at runtime. Default: on.</td>
+</tr>
+<tr>
+<td><code>keep-folder</code></td>
+<td><code>--onefile-keep-folder</code> / <code>--onefile-only</code></td>
+<td>Keep the distribution folder once it is packed (default). --onefile-only deletes it and leaves only the single file, for a job that publishes one artifact. Requires --onefile.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="isolated-build-experimental">Isolated build (experimental)<a class="headerlink" href="#isolated-build-experimental" title="Permanent link">&para;</a></h2>
+<p><code>[tool.smelt.bundle.isolated-build]</code></p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Flag</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td><code>--isolated-build</code> / <code>--no-isolated-build</code></td>
+<td>Experimental. Reinstall every third-party native dependency for the target instead of copying the build installed here. Needs the 'isolated-build' extra and a network fetch per native dependency. Default: off.</td>
+</tr>
+<tr>
+<td><code>versions</code></td>
+<td><code>--isolated-build-versions</code></td>
+<td>Which version of each dependency --isolated-build fetches: 'local' (the one installed here, default) or 'pyproject' (as declared in [project.dependencies]).</td>
+</tr>
+</tbody>
+</table>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../bundler-overview/" class="btn btn-neutral float-left" title="Overview"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../advanced/" class="btn btn-neutral float-right" title="Advanced Use Cases">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Hedwyn/smelt" class="fa fa-code-fork" style="color: #fcfcfc"> Hedwyn/smelt</a>
+        </span>
+    
+    
+      <span><a href="../bundler-overview/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../advanced/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
