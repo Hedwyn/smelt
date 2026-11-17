@@ -1,10 +1,7 @@
 // Derived from:  https://github.com/adamserafini/zaml/blob/main/zamlmodule.zig
 
-const py = @cImport({
-    @cDefine("Py_LIMITED_API", "3");
-    @cDefine("PY_SSIZE_T_CLEAN", {});
-    @cInclude("Python.h");
-});
+// `Python.h`, translated to Zig by smelt at build time.
+const py = @import("python");
 const std = @import("std");
 
 const PyObject = py.PyObject;
@@ -39,6 +36,7 @@ var ZamlMethods = [_]PyMethodDef{
 };
 
 var hellomodule = PyModuleDef{
+    .m_name = "zighello",
     .m_doc = null,
     .m_size = -1,
     .m_methods = &ZamlMethods,

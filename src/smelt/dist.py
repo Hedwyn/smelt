@@ -1721,7 +1721,7 @@ and never through an environment variable.
 The interpreter
 ---------------
 
-CPython {interpreter.version_string}, built by smelt (through meta-python) rather than taken from
+CPython {interpreter.version_string}, built by smelt (through build-your-python) rather than taken from
 this machine's Python install: `bin/python`, `lib/libpython*.so` and the standard
 library under `lib/python{interpreter.version_string}/`, {size} MB in total.
 
@@ -1984,7 +1984,7 @@ def build_dist(
     `libpythonX.Y.so`. It has no working `dlopen()` at all, so everything native has to
     be compiled into it: `own_python_static_modules` names CPython stdlib modules (e.g.
     `_socket`, `zlib`) to build as builtins, and `static_modules`/`use_inittab` does
-    the same for smelt's own extension modules -- the two compose, since meta-python's
+    the same for smelt's own extension modules -- the two compose, since build-your-python's
     `off`-mode build also produces a linkable `libpythonX.Y.a` for
     `smelt.static_python.build_static_interpreter` to relink against. Anything native
     that is left over as a `.so` (a wheel-shipped extension, a stdlib accelerator not
@@ -2533,7 +2533,7 @@ def build_dist(
         )
         if static_modules:
             # Operates on the *staged* prefix (inside `dist_root`), never on
-            # `built_interpreter` (meta-python's shared build cache): which modules
+            # `built_interpreter` (build-your-python's shared build cache): which modules
             # are statically linked in is a property of this one distribution, and
             # baking it into the cache would corrupt it for every other project
             # reusing the same cached interpreter (see `static_python`'s docstring).
@@ -2542,7 +2542,7 @@ def build_dist(
                 static_modules,
                 zig_target=interpreter_target,
                 # The built prefix holds the `pyconfig.h` describing the *target*
-                # (meta-python generates one per target, see
+                # (build-your-python generates one per target, see
                 # `own_python._resolve_pyconfig_header`); `Python.h` still comes from
                 # the running interpreter. Only for a cross target: a native build has
                 # a matching pair already and there is no reason to prefer a second

@@ -6,9 +6,9 @@ standalone binary" goal.
 
 `vendoring/libffi/build.zig` is a thin wrapper around the ready-made
 `allyourcodebase/libffi` Zig package -- the same dependency
-`meta-python/build.zig` already depends on for its own `_ctypes` build (see that
+`build-your-python/build.zig` already depends on for its own `_ctypes` build (see that
 project's `build.zig.zon`) -- that just re-exposes its `ffi` artifact for a
-standalone `zig build`. meta-python never exposes that artifact outside its own
+standalone `zig build`. build-your-python never exposes that artifact outside its own
 build graph (it is folded straight into `libpython`/`_ctypes`), so there is no
 path/env var to reuse from there; this is its own copy of the same dependency
 edge.

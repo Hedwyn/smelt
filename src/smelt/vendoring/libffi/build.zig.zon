@@ -5,7 +5,7 @@
     // for why the exact value doesn't matter beyond being non-reserved).
     .fingerprint = 0x10d0c6d53446a5ff,
     .dependencies = .{
-        // Same URL/hash meta-python's own `build.zig.zon` already pins and
+        // Same URL/hash build-your-python's own `build.zig.zon` already pins and
         // successfully fetches for its `_ctypes` build (see that project's
         // `.libffi` entry) -- reused as-is rather than re-derived.
         .libffi = .{

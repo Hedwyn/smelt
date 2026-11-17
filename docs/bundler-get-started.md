@@ -66,9 +66,10 @@ Hello from a standalone binary!
 
 ## Shipping the interpreter too
 
-Add `--python own` to also build and bundle a CPython interpreter inside the folder, so it runs on a machine with no Python installed at all:
+Add `--python own` to also build and bundle a CPython interpreter inside the folder, so it runs on a machine with no Python installed at all. This needs the `byp` extra:
 
 ```
+$ pip install "smelt[cli,byp]"
 $ smelt bundle --python own
 $ ./dist/greet.dist/greet
 Hello from a standalone binary!

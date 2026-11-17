@@ -7,7 +7,7 @@ The mechanism is `PyImport_AppendInittab`: CPython's public, documented API for 
 embedding program to register an extension module's `PyInit_<name>` function *before*
 `Py_Initialize` runs, so that importing it needs no file at all -- no `.so` on disk, no
 RPATH for it to resolve, no dynamic loader call at import time. Mode `own` already
-embeds CPython behind a thin `main()` (meta-python's `Programs/python.c`, calling
+embeds CPython behind a thin `main()` (build-your-python's `Programs/python.c`, calling
 `Py_BytesMain`); this module replaces that `main()` with one carrying the extra
 `PyImport_AppendInittab` calls and the modules' own object code linked straight in.
 
@@ -15,7 +15,7 @@ A mode `own` prefix built with `python-linkage=dynamic` ships a real, ordinarily
 linkable `libpythonX.Y.so` (see `own_python.build_own_python`) to link the replacement
 `main()` against -- through the same `ZigCompiler` every other smelt-built extension
 goes through, not a second toolchain. A prefix built `linkage="static"` (static-PIE,
-no `.so` at all) ships a linkable `libpythonX.Y.a` instead, which meta-python's
+no `.so` at all) ships a linkable `libpythonX.Y.a` instead, which build-your-python's
 `off`-mode build produces for exactly this purpose; `_find_libpython` picks whichever
 of the two is present.
 
@@ -57,8 +57,8 @@ _logger = logging.getLogger(__name__)
 _VALID_MODULE_NAME: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 #: The RPATH mode `own`'s replacement `bin/python` needs to find `libpythonX.Y.so`
-#: next to it -- identical to the one meta-python's own shim carries (see
-#: `own_python.py`'s docstring and meta-python's `build.zig`,
+#: next to it -- identical to the one build-your-python's own shim carries (see
+#: `own_python.py`'s docstring and build-your-python's `build.zig`,
 #: `shim_mod.addRPathSpecial("$ORIGIN/../lib")`), so a static-linked prefix stays just
 #: as relocatable as an ordinary one.
 _INTERPRETER_RPATH: Final = "$ORIGIN/../lib"
@@ -116,7 +116,7 @@ def _find_libpython(prefix: PathExists) -> tuple[PathExists, bool]:
     codebase treats as the canonical one, see e.g. `own_python.py`'s own
     `libpython*.so*` globs) -- preferred when present. A `linkage="static"` prefix
     (`own_python_static`, static-PIE, no `.so` at all) ships `libpythonX.Y.a` instead:
-    meta-python's `off`-mode build produces this archive alongside the monolithic exe
+    build-your-python's `off`-mode build produces this archive alongside the monolithic exe
     for exactly this purpose.
     """
     lib_dir = Path(prefix) / "lib"
@@ -180,9 +180,9 @@ def build_static_interpreter(
     module it ships (see `own_python`'s module docstring).
 
     `prefix` is expected to be a distribution's own staged interpreter directory (what
-    `own_python.stage_interpreter` writes into `dist_root`), not meta-python's shared
+    `own_python.stage_interpreter` writes into `dist_root`), not build-your-python's shared
     build cache: unlike a library toggle, which extension modules are statically
-    linked in is a property of one application, and baking it into the cache meta-python
+    linked in is a property of one application, and baking it into the cache build-your-python
     builds are reused from would corrupt that cache for every other project.
 
     `zig_target` is the target the prefix was built for, and must be passed whenever it
@@ -190,7 +190,7 @@ def build_static_interpreter(
     same target as the interpreter it replaces. For a musl target it additionally
     decides libc linkage -- `zig cc` links musl *statically* by default, which would
     quietly cost the interpreter its `dlopen()` (see `own_python.is_musl_zig_target`
-    and meta-python's `build/musl.zig`), so the link is forced dynamic to match.
+    and build-your-python's `build/musl.zig`), so the link is forced dynamic to match.
 
     `include_dirs` is prepended to the shim's own include path. A cross-built prefix
     needs its own `pyconfig.h` there -- the header describes the *target*, while
@@ -240,7 +240,7 @@ def build_static_interpreter(
             # interpreter it replaces was built with.
             extra_preargs = [*extra_preargs, "-dynamic"]
         if is_static_archive:
-            # Mirrors meta-python's own `off`-mode executable (`build.zig`, built with
+            # Mirrors build-your-python's own `off`-mode executable (`build.zig`, built with
             # `libc-linkage=static` + `exe.pie = true`): the replacement is just as
             # monolithic as the one it replaces, so it needs the same shape.
             # `-static-pie` rather than plain `-static` to match it exactly, and

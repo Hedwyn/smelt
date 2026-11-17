@@ -49,81 +49,9 @@ cli = ["click"]
 # symbol naming), breaking that match. Raise the cap once the patch is updated for it.
 nuitka = ["nuitka<4.2", "patchelf>=0.17.2,<0.18; sys_platform == 'linux'"]
 cython = ["Cython"]
-# metapython: builds smelt's own CPython through Zig (`smelt bundle --python own`,
-# see smelt.own_python). Pinned to a commit rather than a version, like the pins above,
-# because it is not on PyPI and its build.zig options are what smelt codes against:
-# 5ebc889 was the first commit carrying the `pyconfig-header` and `strip` options
-# own_python.py passes, b3fa35c the first that installs a `_sysconfigdata_*` module --
-# without it `sysconfig.get_paths()`, `pydoc`, `help()` and `site.getsitepackages()`
-# fail in every interpreter smelt builds, tailored or not -- e78aeca is the first
-# that can actually be built: b3fa35c's `build.zig` imports a `build/sysconfigdata.zig`
-# that had not been committed, so every cold-cache interpreter build from it died on
-# `error: adding build_root build/sysconfigdata.zig to cache failed: FileNotFound`.
-# Nothing noticed for three days because a build that hits smelt's own prefix cache
-# never evaluates `build.zig` at all. 27183a9 is the first that exposes a standalone
-# `configure` build step (`BuildStep.CONFIGURE`) -- `own_python.py`'s
-# `_resolve_pyconfig_header` imports it directly, so anything older than this fails
-# with `AttributeError: type object 'BuildStep' has no attribute 'CONFIGURE'`.
-# 0812d8e is the first that makes `./configure` itself cross-aware (real
-# `--host=`/`--build=` for a CPU-arch cross target, not just for musl) and applies
-# the resulting `CROSS_FIXUPS`/`ArchProfile` pyconfig.h patches automatically.
-# Anything older produces a pyconfig.h that
-# is silently wrong (not an error) for any target whose CPU differs from the host's.
-# 1b625dc replaces the single hard-coded `cpython` submodule with a
-# `-Dcpython-version=<name>` build option, fetching one of several curated CPython
-# releases (see build.zig.zon) as a lazy Zig dependency instead -- this is what lets
-# `own_python.py`'s `python_version` parameter pick a CPython other than 3.12.
-# 8046ab2 fixes 1b625dc itself, which shipped broken: the `vendoring/` dir (OpenSSL,
-# sqlite3, lzma sources) was missing from `force-include` so no packaged install ever
-# had it, `vendoring/openssl` was never committed at all despite 1b625dc's own message
-# claiming it was, both the CPython and OpenSSL fetch hashes in build.zig.zon were
-# stale for the Zig version `metapython.fetch` actually downloads (fails with
-# "hash mismatch"), and the OpenSSL build hard-coded an archive wrapper directory this
-# Zig strips. Anything between 1b625dc and 8046ab2 fails outright, for every target.
-# 04775e3 is the first that can build CPython 3.13+ at all: `Tools/build/deepfreeze.py`
-# (used by `Utils.addDeepfreeze`) needs three CPython-version-conditional patches --
-# an `isinstance` check narrowed by a since-3.13 mypy cleanup (gh-133403) that dropped
-# the `umarshal.Code` branch this project's own frozen-header input actually needs, a
-# `ROOT = os.path.dirname(...)` path assumption that only holds at the file's original
-# on-disk depth, and calls to `_PyStaticCode_Init`/`_PyStaticCode_Fini`, removed from
-# CPython itself in gh-108716 years before 3.13 shipped. Anything older produces
-# `TypeError: Cannot generate code for Code object`, a `FileNotFoundError` for
-# `pycore_global_strings.h`, or `error: call to undeclared function` for any
-# `python_version` other than 3.12.
-# 868951e adds `python_version="3.14.2"` support: `Tools/build/umarshal.py` and
-# `deepfreeze.py` gain a `slice`-constant decode/codegen path for CPython 3.14's new
-# `TYPE_SLICE` marshal type, `deepfreeze.py`'s generated `.co_framesize` initializer
-# gets the `pycore_interpframe.h` include 3.14 moved `FRAME_SPECIALS_SIZE` into, `_blake2`
-# links CPython 3.14's new HACL Blake2 SIMD source files (previously silently missing,
-# `ImportError: undefined symbol: _Py_LibHacl_Hacl_Hash_Blake2s_free`), and a Makefile
-# per-object-flags parsing bug is fixed that dropped `-DHACL_CAN_COMPILE_VEC128`/`_VEC256`
-# for those same SIMD objects (`error: unknown type name 'Lib_IntVector_Intrinsics_vec128'`).
-# Anything older cannot build `python_version="3.14.2"` at all.
-# 7b9d097 adds `python_version="3.15.0rc2"` support (no 3.15.0 final tarball exists on
-# python.org yet -- only pre-releases through rc2; re-pin once final ships).
-# `Tools/build/deepfreeze.py` gained a new `import consts_getter` for a helper CPython
-# 3.15 split out of it, needing the same-directory-sibling treatment `umarshal.py` already
-# got, and `consts_getter.py`'s own `ROOT = Path(__file__).resolve().parents[2]`
-# needed the real absolute path baked in, the same wrong-directory-depth problem
-# `deepfreeze.py` itself already had fixed. Anything older cannot build
-# `python_version="3.15.0rc2"` at all.
-# 6d2756d fixes two bugs 7b9d097's own `python_version="3.15.0rc2"` support hit on a
-# CPU-arch cross build (e.g. `own-python-target="arm-linux-gnueabihf"`): the curated
-# `3.14.2` entry (fetched as a build-time bootstrap interpreter, regardless of which
-# `-Dcpython-version` is actually being built) pointed at python.org, whose CDN served
-# that one tarball as different bytes on different requests -- re-pointed at CPython's
-# own GitHub tag archive, stable across repeated fetches. And `Utils.writeBuildPythonStub`
-# handed `./configure --with-build-python=` a `cpython_dir`-prefixed path while also
-# running `./configure` itself with `cwd` already set to `cpython_dir` -- doubling the
-# path for a `-Dcpython-version=` dependency, whose `cpython_dir` this pinned Zig's
-# project-local `zig-pkg/` cache does not hand back absolute. `configure` reported
-# `invalid or missing build python binary` for any CPU-arch cross build regardless of
-# `python_version`, since `writeBuildPythonStub` is unconditional whenever cross_arch is
-# true. Anything older hits one or both of these for `own-python-target`
-# `arm-linux-gnueabihf` (or any other CPU-arch cross target).
-metapython = [
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@6d2756d",
-]
+# byp: builds smelt's own CPython through Zig (`smelt bundle --python own`, see
+# smelt.own_python). Pinned exactly: smelt codes against its build.zig options.
+byp = ["build-your-python==0.1.0"]
 # unearth: PDM's wheel-finder library, the fetch engine behind `isolated-build`
 # (smelt.isolated_build) -- resolves and downloads a wheel for a target platform
 # without needing to actually run there. packaging: listed explicitly (not just relied
@@ -149,7 +77,7 @@ build = [
   "mypy[mypyc]<1.19; python_version >= '3.15'",
   "hatchling",
   "editables",
-  "metapython @ git+ssh://git@github.com/Hedwyn/meta-python.git@6d2756d",
+  "build-your-python==0.1.0",
 ]
 
 [tool.pytest.ini_options]

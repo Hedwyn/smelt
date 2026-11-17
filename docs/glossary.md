@@ -96,7 +96,7 @@ Which interpreter a distribution runs on, selected by `--python`:
 * **`byo`** ("bring your own python", the default): the application only. Running it
   needs a CPython of the same minor version already installed on the target.
 * **`own`**: the same folder plus an interpreter Smelt built itself (through
-  `meta-python`), so nothing needs to be installed on the target.
+  `build-your-python`), so nothing needs to be installed on the target.
 
 ## Tailoring
 

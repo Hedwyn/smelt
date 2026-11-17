@@ -1,5 +1,5 @@
 //! Thin wrapper exposing `allyourcodebase/libffi`'s `ffi` artifact for a
-//! standalone `zig build --prefix <dir>` -- meta-python (`meta-python/build.zig`)
+//! standalone `zig build --prefix <dir>` -- build-your-python (`build-your-python/build.zig`)
 //! already depends on the exact same package (see its own `build.zig.zon`) to
 //! link libffi into CPython's `_ctypes`, but only as an internal build-graph
 //! artifact it never installs anywhere outside its own `zig-out`: there is no
@@ -8,7 +8,7 @@
 //!
 //! NOTE: this has not been exercised against the real `allyourcodebase/libffi`
 //! package yet (no network access to fetch it while this was written) --
-//! `libffi_dep.artifact("ffi")` mirrors exactly what `meta-python/build.zig`
+//! `libffi_dep.artifact("ffi")` mirrors exactly what `build-your-python/build.zig`
 //! already does successfully, so the dependency fetch and artifact name should
 //! be correct, but whether `b.installArtifact` alone also carries `ffi.h`/
 //! `ffitarget.h` into `<prefix>/include` is unverified: some Zig packages expose

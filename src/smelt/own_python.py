@@ -5,11 +5,11 @@ This is what turns a "bring your own python" distribution (`smelt.dist`, mode `b
 into a self-contained one (mode `own`): the folder gains the interpreter's own `bin/`
 and `lib/` trees, so running it needs no Python installed on the target at all.
 
-The interpreter itself comes from the sibling `meta-python` project, which compiles
+The interpreter itself comes from the sibling `build-your-python` project, which compiles
 CPython through `build.zig` rather than `make`. Nothing here recompiles the
 application: bytecode magic is per *minor* version and the C ABI is stable within
 one, so a distribution built by the host's 3.12.x runs unchanged under a
-meta-python-built 3.12.y -- extension modules, shared runtimes and all. That is the
+build-your-python-built 3.12.y -- extension modules, shared runtimes and all. That is the
 whole reason mode `own` is additive rather than a second build pipeline.
 
 *Tailoring* (= choosing the interpreter's contents from what the application needs,
@@ -83,12 +83,12 @@ from smelt.utils import (
 )
 
 if TYPE_CHECKING:
-    # `metapython` is an optional extra (see `_ensure_metapython_installed`), so it is
+    # `byp` (build-your-python) is an optional dependency (see `_ensure_byp_installed`), so it is
     # imported lazily everywhere it is *used*. `Library` is only ever needed as an
     # annotation, and `from __future__ import annotations` keeps those unevaluated --
     # so this import costs nothing at runtime and still types `LIBRARY_MODULES`'
-    # keys against the option names meta-python's `build.zig` actually accepts.
-    from metapython.compile import Library
+    # keys against the option names build-your-python's `build.zig` actually accepts.
+    from byp.compile import Library
 
 _logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ type OwnPythonLinkage = Literal["dynamic", "static"]
 DEFAULT_OWN_PYTHON_LINKAGE: Final[OwnPythonLinkage] = "dynamic"
 
 #: CPython version `build_own_python` builds when the caller names none -- matches
-#: meta-python's own `-Dcpython-version` default, so leaving `python_version` unset
+#: build-your-python's own `-Dcpython-version` default, so leaving `python_version` unset
 #: keeps building exactly the interpreter it always has. See `_cpython_source_dir`
 #: for how a non-default value is turned into an actual source tree on disk.
 DEFAULT_CPYTHON_VERSION: Final[str] = "3.12.13"
@@ -137,7 +137,7 @@ INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python")
 REAL_INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python-real")
 
 #: The musl loader (loader and libc in one file) a `*-linux-musl` prefix ships in its
-#: `lib/`, built by meta-python (`build/musl.zig`). The architecture is part of the
+#: `lib/`, built by build-your-python (`build/musl.zig`). The architecture is part of the
 #: name -- `ld-musl-x86_64.so.1` -- and the name itself is whatever Zig wrote into the
 #: interpreter's `PT_INTERP`, so it is matched rather than composed here.
 MUSL_LOADER_GLOB: Final[str] = "ld-musl-*.so.1"
@@ -145,14 +145,14 @@ MUSL_LOADER_GLOB: Final[str] = "ld-musl-*.so.1"
 #: The stub installed as `bin/python` for a musl target (see `_stage_musl_runtime`).
 INTERPRETER_SHIM_SOURCE: Final[Path] = Path(__file__).parent / "launcher" / "interpreter_shim.zig"
 
-#: The Windows counterpart of `INTERPRETER_REL_PATH`. meta-python's `buildWindows`
+#: The Windows counterpart of `INTERPRETER_REL_PATH`. build-your-python's `buildWindows`
 #: installs the executable and the DLL implementing the interpreter side by side under
 #: `bin/` -- Windows' DLL search order covers a binary's own directory, which is the
 #: Windows equivalent of the POSIX side's `$ORIGIN`-relative RPATH, so no rewriting is
 #: needed, just the right placement (see `_bundle_windows_interpreter_dependencies`).
 WINDOWS_INTERPRETER_REL_PATH: Final[Path] = Path("bin", "python.exe")
 
-#: The standard library tree meta-python's `buildWindows` installs: flat and
+#: The standard library tree build-your-python's `buildWindows` installs: flat and
 #: capitalized, unlike POSIX's nested `lib/pythonX.Y`. There is also no `lib-dynload`
 #: counterpart yet -- the Windows build does not produce extension modules at all yet
 #: (see `stage_interpreter`), only the frozen/builtin core.
@@ -220,7 +220,7 @@ def _parse_builtin_modules(config_c_text: str) -> frozenset[str]:
     separate `.so` -- `sys`/`builtins` included (their slot is `NULL`; the import
     system special-cases both regardless).
 
-    Target-invariant: this file is part of meta-python's vendored CPython source and,
+    Target-invariant: this file is part of build-your-python's vendored CPython source and,
     absent `-Dstatic-modules=`, is compiled in unpatched regardless of target -- see
     `build_own_python`'s own `static_modules` docstring. `static_modules` themselves
     are unioned in separately by `_static_provided_modules`, since a caller's request
@@ -296,11 +296,11 @@ def is_windows_zig_target(zig_target: str | None) -> bool:
 
 
 #: `platform.machine()` spellings that differ from the Zig architecture name in a
-#: target triple's own leading component. Mirrors meta-python's own (private)
-#: `metapython.pyconfig._UNAME_TO_ZIG_ARCH` -- kept as a small local copy rather than
+#: target triple's own leading component. Mirrors build-your-python's own (private)
+#: `byp.pyconfig._UNAME_TO_ZIG_ARCH` -- kept as a small local copy rather than
 #: reaching across the package boundary for a name that isn't part of its public API.
 #: Public (unlike that one): `smelt.targets` also needs it, to name this machine's
-#: Zig triple (see `host_zig_arch`), not just meta-python's cross-vs-native
+#: Zig triple (see `host_zig_arch`), not just build-your-python's cross-vs-native
 #: distinction below.
 UNAME_TO_ZIG_ARCH: Final[dict[str, str]] = {
     "amd64": "x86_64",
@@ -328,16 +328,16 @@ def is_cpu_cross_target(zig_target: str | None) -> bool:
     this process -- as opposed to a same-arch target (native, or a same-arch,
     different-libc target like `x86_64-linux-musl`).
 
-    This is the distinction meta-python's own `./configure` step (`BuildStep.CONFIGURE`,
+    This is the distinction build-your-python's own `./configure` step (`BuildStep.CONFIGURE`,
     called from `_resolve_pyconfig_header`) cares about: a same-arch target's own test
     binaries can still execute on this machine, so `./configure` runs its checks for
-    real; a different-arch target's cannot, so meta-python enters real `--host`/`--build`
+    real; a different-arch target's cannot, so build-your-python enters real `--host`/`--build`
     cross mode instead and applies its own `CROSS_FIXUPS`/`ArchProfile` pyconfig.h
     patches on top. Both
     `_resolve_pyconfig_header` and `_build_interpreter` use this to know when a
-    `LIBRARY_MODULES` entry needs steering away from meta-python's static default
+    `LIBRARY_MODULES` entry needs steering away from build-your-python's static default
     for a CPU-arch cross build, via `_cross_unsupported_static_libraries` below --
-    empty today (both `openssl` and `sqlite` used to hard-panic there, meta-python
+    empty today (both `openssl` and `sqlite` used to hard-panic there, build-your-python
     fixed both), but kept as its own check for whichever library hits this wall
     next.
     """
@@ -347,14 +347,14 @@ def is_cpu_cross_target(zig_target: str | None) -> bool:
     return arch != host_zig_arch()
 
 
-#: `LIBRARY_MODULES` entries meta-python cannot yet link statically for a CPU-arch
+#: `LIBRARY_MODULES` entries build-your-python cannot yet link statically for a CPU-arch
 #: cross target. Empty now: both `openssl` and `sqlite` used to hard-panic there,
-#: but meta-python fixed both --
+#: but build-your-python fixed both --
 #: `openssl` by vendoring it from scratch (arch-agnostic, no more x86_64-only
 #: asm), `sqlite` by resolving a build-root-relative dependency path that was
 #: silently pointing `./configure`'s own `-I` at a nonexistent directory (see
 #: `is_cpu_cross_target`'s own doc). Steering either away to `dynamic` instead
-#: was silently worse than doing nothing: meta-python's `dynamic` path runs a
+#: was silently worse than doing nothing: build-your-python's `dynamic` path runs a
 #: real `./configure` probe against *this host's* library, which can never
 #: answer for a foreign target, so the extension was quietly built for nobody
 #: rather than for the host -- dropped from the target's own module set with no
@@ -369,7 +369,7 @@ def _cross_unsupported_static_libraries(
     target: str | None, disabled: Iterable[str]
 ) -> tuple[str, ...]:
     """
-    Which of `_CROSS_UNSAFE_STATIC_LIBRARIES` need steering away from meta-python's
+    Which of `_CROSS_UNSAFE_STATIC_LIBRARIES` need steering away from build-your-python's
     static default for `target` -- empty for a same-arch target (native, or musl),
     and empty for a library already in `disabled` (turning a library off makes its
     linkage moot, and leaves `disabled_libraries`' own validation as the one place
@@ -385,18 +385,18 @@ def _validate_windows_zig_target(zig_target: str) -> None:
     """
     Rejects a Windows target that is not mingw (`-gnu`) ABI.
 
-    meta-python's Windows build only ever works through mingw: CPython's own Windows
+    build-your-python's Windows build only ever works through mingw: CPython's own Windows
     build assumes MSVC's linker/CRT specifics, which Zig cannot bring along as a
     standalone toolchain the way it does `clang`+`lld` for every other target -- so
-    meta-python builds against mingw-w64 instead (see meta-python's `build.zig`,
+    build-your-python builds against mingw-w64 instead (see build-your-python's `build.zig`,
     `buildWindows`). A bare `x86_64-windows` target defaults to the MSVC ABI in Zig and
-    fails outright; only the explicit `-gnu` suffix is meta-python's supported shape.
+    fails outright; only the explicit `-gnu` suffix is build-your-python's supported shape.
     """
     if not is_windows_zig_target(zig_target) or zig_target.endswith("-gnu"):
         return
     base = zig_target.removesuffix("-msvc")
     raise OwnPythonError(
-        f"Unsupported Windows target {zig_target!r}: meta-python only builds Windows "
+        f"Unsupported Windows target {zig_target!r}: build-your-python only builds Windows "
         "through the mingw (gnu) ABI -- it cannot bring along a standalone MSVC "
         f"toolchain the way it does for every other target. Use {base}-gnu instead."
     )
@@ -489,11 +489,11 @@ _CPYTHON_ZON_ENTRY_RE: Final = re.compile(
 
 def _cpython_zon_hashes() -> dict[str, str]:
     """
-    `{version: hash}` for every CPython release meta-python's `build.zig.zon` curates,
+    `{version: hash}` for every CPython release build-your-python's `build.zig.zon` curates,
     read from the copy it vendors into its own installed package (`VENDORED_PROJECT_DIR`,
     the same file `-Dcpython-version=` resolves against at build time).
     """
-    from metapython.compile import VENDORED_PROJECT_DIR
+    from byp.compile import VENDORED_PROJECT_DIR
 
     zon_path = VENDORED_PROJECT_DIR / "build.zig.zon"
     return dict(_CPYTHON_ZON_ENTRY_RE.findall(zon_path.read_text()))
@@ -527,7 +527,7 @@ def resolve_own_python_version(explicit: str | None) -> str:
     if explicit is not None:
         if explicit not in hashes:
             raise OwnPythonError(
-                f"Unknown CPython version {explicit!r}: not one of meta-python's "
+                f"Unknown CPython version {explicit!r}: not one of build-your-python's "
                 f"curated `-Dcpython-version` choices, {sorted(hashes)}."
             )
         return explicit
@@ -537,7 +537,7 @@ def resolve_own_python_version(explicit: str | None) -> str:
     if not candidates:
         raise OwnPythonError(
             f"No curated CPython release for {running} (this interpreter's own "
-            f"minor version): meta-python's `-Dcpython-version` only curates "
+            f"minor version): build-your-python's `-Dcpython-version` only curates "
             f"{sorted(hashes)}. Run smelt itself under one of those minor versions, "
             "or pass an explicit own-python-version/--python-version."
         )
@@ -546,21 +546,21 @@ def resolve_own_python_version(explicit: str | None) -> str:
 
 def _fetched_cpython_source_dir(python_version: str) -> Path | None:
     """
-    Where meta-python's `-Dcpython-version=python_version` build option actually puts
+    Where build-your-python's `-Dcpython-version=python_version` build option actually puts
     the CPython source tree it fetches, on disk -- or `None` if nothing has been
     fetched for it yet.
 
     Not something `zig build` reports back: `-Dcpython-version` resolves to a lazy
-    `build.zig.zon` dependency (see meta-python's `build/cpython_source.zig`), and this
+    `build.zig.zon` dependency (see build-your-python's `build/cpython_source.zig`), and this
     pinned Zig fetches those into a project-local `zig-pkg/<hash>/` next to `build.zig`
     (`VENDORED_PROJECT_DIR`) rather than the global package cache -- confirmed
-    empirically, and relied on by meta-python's own doc comments already, so this is a
+    empirically, and relied on by build-your-python's own doc comments already, so this is a
     real if undocumented implementation detail of the exact Zig version smelt pins,
     not a guess. `<hash>` is looked up from `build.zig.zon` itself (`_cpython_zon_hashes`)
-    rather than hard-coded, so it tracks whatever meta-python's own pin actually curates.
+    rather than hard-coded, so it tracks whatever build-your-python's own pin actually curates.
 
     A release tarball wraps its contents in one `Python-X.Y.Z/` directory that this
-    pinned Zig's fetcher sometimes strips and sometimes does not (meta-python's own
+    pinned Zig's fetcher sometimes strips and sometimes does not (build-your-python's own
     finding, see `cpython_source.zig`'s `descendToRoot`) -- detected the same
     version-agnostic way here: no `configure` at the fetched root, but exactly one
     entry and it is a directory, descend into it.
@@ -570,12 +570,12 @@ def _fetched_cpython_source_dir(python_version: str) -> Path | None:
     directory shape the descent logic above cannot make sense of -- `None` is reserved
     for "not fetched yet", the expected outcome the first time a given version is used.
     """
-    from metapython.compile import VENDORED_PROJECT_DIR
+    from byp.compile import VENDORED_PROJECT_DIR
 
     hashes = _cpython_zon_hashes()
     if python_version not in hashes:
         raise OwnPythonError(
-            f"Unknown CPython version {python_version!r}: not one of meta-python's "
+            f"Unknown CPython version {python_version!r}: not one of build-your-python's "
             f"curated `-Dcpython-version` choices, {sorted(hashes)}."
         )
     fetched = VENDORED_PROJECT_DIR / "zig-pkg" / hashes[python_version]
@@ -601,10 +601,10 @@ def _cpython_source_dir(python_version: str) -> Path:
     """
     resolved = _fetched_cpython_source_dir(python_version)
     if resolved is None:
-        from metapython.compile import VENDORED_PROJECT_DIR
+        from byp.compile import VENDORED_PROJECT_DIR
 
         raise OwnPythonError(
-            f"meta-python has not fetched CPython {python_version} into "
+            f"build-your-python has not fetched CPython {python_version} into "
             f"{VENDORED_PROJECT_DIR / 'zig-pkg'} -- expected this after a zig_build() "
             f"call with -Dcpython-version={python_version}."
         )
@@ -650,7 +650,7 @@ DEFAULT_STDLIB_PRUNE: Final[tuple[str, ...]] = (
     "__pycache__",
 )
 
-#: Which extension modules each toggleable meta-python library exists for, i.e. what
+#: Which extension modules each toggleable build-your-python library exists for, i.e. what
 #: `-D<library>-linkage=off` takes away. Measured with `ldd` over a built
 #: `lib-dynload` rather than read off documentation, so it describes *this* build.
 #:
@@ -663,7 +663,7 @@ DEFAULT_STDLIB_PRUNE: Final[tuple[str, ...]] = (
 #: `openssl=off` build loses is `ssl`, `_hashlib`, and `hashlib.new()` for the
 #: OpenSSL-only algorithms.
 #:
-#: Three libraries meta-python knows about are absent here, each for its own reason:
+#: Three libraries build-your-python knows about are absent here, each for its own reason:
 #:
 #: * `readline` and `ncurses` are already off in this build, so there is nothing to
 #:   turn off -- and listing them would append `-Dreadline-linkage=off` to every
@@ -990,19 +990,19 @@ class OwnPythonError(SmeltError):
     """
 
 
-def _ensure_metapython_installed() -> None:
+def _ensure_byp_installed() -> None:
     """
-    Raises `ImportError` with an actionable message if `metapython` is not installed.
+    Raises `ImportError` with an actionable message if `byp` (build-your-python) is not installed.
     """
     try:
-        import metapython
+        import byp
 
-        _ = metapython
+        _ = byp
     except ImportError as exc:
         raise ImportError(
-            "metapython is not installed, so smelt cannot build its own interpreter. "
-            "Install this package with the metapython extra: "
-            "`uv pip install 'smelt[metapython]'`."
+            "build-your-python is not installed, so smelt cannot build its own interpreter. "
+            "Install this package with the byp extra: "
+            "`uv pip install 'smelt[byp]'`."
         ) from exc
 
 
@@ -1015,10 +1015,10 @@ def _resolve_pyconfig_header(
     python_version: str = DEFAULT_CPYTHON_VERSION,
 ) -> PathExists:
     """
-    A known-good pyconfig.h for `target`, via meta-python's `configure` build step
-    (see `metapython.compile.BuildStep.CONFIGURE`): real `./configure`, through the
+    A known-good pyconfig.h for `target`, via build-your-python's `configure` build step
+    (see `byp.compile.BuildStep.CONFIGURE`): real `./configure`, through the
     exact same harness the actual interpreter build uses (`CC=zig cc -target target`,
-    matching CPython version, matching `optimize` mode), plus meta-python's own
+    matching CPython version, matching `optimize` mode), plus build-your-python's own
     automatic musl/cross-arch macro patches -- no compiling, so it costs seconds
     (`./configure` itself), not the minutes a real build would. This is what makes it
     worth running on every `build_own_python` call that reaches here (a cache miss),
@@ -1026,10 +1026,10 @@ def _resolve_pyconfig_header(
     whatever target is actually being built this time, at a cost small enough not to
     matter.
 
-    Mutates meta-python's shared checkout the same way a real build does (deletes
+    Mutates build-your-python's shared checkout the same way a real build does (deletes
     `cpython/Makefile`/`pyconfig.h`, clears `.zig-cache`), so both the header *and*
     the `Makefile` `./configure` wrote alongside it are copied out to `dest` (the
-    caller's own build cache directory, not meta-python's shared one) before the
+    caller's own build cache directory, not build-your-python's shared one) before the
     real build's *own* cleanup would remove them again -- the `Makefile` is what
     lets `target_sysconfigdata_for` derive a target's build-time variables the way
     CPython's own `sysconfig._generate_posix_vars` does, without which `pyconfig.h`
@@ -1040,9 +1040,9 @@ def _resolve_pyconfig_header(
     within one process: a second acquisition here would deadlock waiting on itself).
 
     `disabled` is `build_own_python`'s own `disabled_libraries`, forwarded so that
-    this step's `BuildOptions` can steer `openssl`/`sqlite` away from meta-python's
+    this step's `BuildOptions` can steer `openssl`/`sqlite` away from build-your-python's
     static default for a CPU-arch cross `target` (see
-    `_cross_unsupported_static_libraries`) -- meta-python panics on that combination
+    `_cross_unsupported_static_libraries`) -- build-your-python panics on that combination
     even for this configure-only step, before any of the real build's own library
     options would otherwise apply.
 
@@ -1050,7 +1050,7 @@ def _resolve_pyconfig_header(
     this step configures the same CPython source the real build goes on to compile --
     see `_cpython_source_dir` for where that source actually ends up on disk.
     """
-    from metapython.compile import (
+    from byp.compile import (
         VENDORED_PROJECT_DIR,
         BuildOptions,
         BuildStep,
@@ -1085,7 +1085,7 @@ def _resolve_pyconfig_header(
     produced_makefile = cpython_dir / "Makefile"
     if not produced.is_file() or not produced_makefile.is_file():
         raise OwnPythonError(
-            f"./configure (via meta-python's 'configure' step) did not produce "
+            f"./configure (via build-your-python's 'configure' step) did not produce "
             f"pyconfig.h/Makefile in {cpython_dir} for target {target or 'native'!r}."
         )
     dest.mkdir(parents=True, exist_ok=True)
@@ -1172,10 +1172,10 @@ def pyconfig_header_for_target(
     run instead of `makefile_for_target` finding it permanently missing.
 
     Also requires the fetched CPython source itself (`_fetched_cpython_source_dir`)
-    to still be there. That source lives under the installed `metapython` package's
+    to still be there. That source lives under the installed `byp` package's
     own `_vendor` directory, in site-packages -- unlike this function's cache, which
     lives under `own_python_cache_dir` and survives independently of any given
-    install. A `smelt`/`metapython` reinstall (e.g. a local path dependency rebuilt
+    install. A `smelt`/`byp` reinstall (e.g. a local path dependency rebuilt
     during development) wipes and recreates `_vendor`, taking the fetched source
     with it, while leaving this cache untouched -- so a cache hit alone would hand
     back a `pyconfig.h` whose companion source `cpython_include_dir` needs next is
@@ -1345,7 +1345,7 @@ def interpreter_build_lock() -> Iterator[None]:
     Serialises interpreter builds across processes, for the duration of the block.
 
     One lock for *all* builds, not one per target or option set, because what needs
-    protecting is not the destination: it is meta-python's own checkout, which lives in
+    protecting is not the destination: it is build-your-python's own checkout, which lives in
     site-packages and is shared by every build this installation runs. `build_own_python`
     deletes `cpython/Makefile`, `cpython/pyconfig.h` and `.zig-cache` from it before
     each run -- it has to, or `zig build` reuses a step graph configured for a different
@@ -1405,7 +1405,7 @@ def build_own_python(
     python_version: str = DEFAULT_CPYTHON_VERSION,
 ) -> PathExists:
     """
-    Builds smelt's own CPython through the sibling `meta-python` project (Zig-driven:
+    Builds smelt's own CPython through the sibling `build-your-python` project (Zig-driven:
     a `-Dcpython-version`-selected CPython release compiled straight through
     `build.zig`, no `make`) into `dest_dir` -- a per-user, per-target cache directory
     reused across builds if
@@ -1413,12 +1413,12 @@ def build_own_python(
 
     A build takes minutes, so the cache is the normal path: it hits on
     `<dest>/bin/python` already existing. Pass `no_cache` to force a rebuild, e.g.
-    after meta-python's pinned CPython version changes.
+    after build-your-python's pinned CPython version changes.
 
     Builds are serialised across processes (`interpreter_build_lock`), and the cache is
     consulted twice: once before taking the lock, and once after, since what a build
     queues behind is often a build of the very thing it wanted. The lock is not an
-    optimisation -- meta-python's checkout is shared by every build on the machine and
+    optimisation -- build-your-python's checkout is shared by every build on the machine and
     is reset at the start of each one, so overlapping builds corrupt each other rather
     than merely duplicating work.
 
@@ -1446,16 +1446,16 @@ def build_own_python(
     A `linkage="static"` interpreter has no `libpythonX.Y.so` for
     `smelt.static_python.build_static_interpreter` (`dist.py`'s own `static_modules`/
     `use_inittab`, for smelt's *own* compiled extensions) to relink against -- it links
-    against the `libpythonX.Y.a` meta-python's `off`-mode build produces alongside the
+    against the `libpythonX.Y.a` build-your-python's `off`-mode build produces alongside the
     monolithic executable instead, so the two mechanisms do compose.
 
     For a musl target, `linkage="dynamic"` additionally means the built prefix carries
-    musl's own loader in `lib/` (meta-python builds it: Zig links musl but ships no
+    musl's own loader in `lib/` (build-your-python builds it: Zig links musl but ships no
     musl runtime). It is what makes such an interpreter runnable at all on a machine
     with no musl installed -- see `_stage_musl_runtime` for how a distribution starts
     it through that file, and `interpreter_argv` for how smelt's own probes do.
 
-    `disabled_libraries` names meta-python libraries to compile *without*
+    `disabled_libraries` names build-your-python libraries to compile *without*
     (`-D<library>-linkage=off`), one of the two levers a tailored interpreter pulls
     (see `resolve_requirements`). It has to be a build-time option rather than a
     staging one because pruning `_ssl.so` out of a staged tree does not stop
@@ -1473,7 +1473,7 @@ def build_own_python(
     closure the way `disabled_libraries` can be (see `plan_disabled_libraries`) -- a
     natural follow-up, not implemented here.
 
-    Every other entry of `libraries` is left at meta-python's own defaults
+    Every other entry of `libraries` is left at build-your-python's own defaults
     (`zlib`/`openssl`/`libffi` static, the rest dynamic or off). If a static library
     build fails, the known-good fallback set is `zlib` static, `openssl`/`libffi`
     dynamic and `readline`/`ncurses` off: the `allyourcodebase` `openssl`/`libffi`
@@ -1505,7 +1505,7 @@ def build_own_python(
       mode B delivers today, and it keeps working with the host's third-party
       extension modules, which is what makes it usable at all.
     * **musl** (`"x86_64-linux-musl"` and friends): the genuinely host-independent
-      shape. meta-python never passes `--host=` to `./configure`, so it runs natively
+      shape. build-your-python never passes `--host=` to `./configure`, so it runs natively
       and feature-detects against the build machine's own libc -- wrong by
       construction for a musl target on a glibc machine (see `pyconfig_header` below
       for how that is worked around) -- and, not fixable here: every third-party
@@ -1515,11 +1515,11 @@ def build_own_python(
     `pyconfig_header` is an escape hatch for library callers, not something the CLI or
     an entrypoint declaration exposes: pass an explicit `pyconfig.h` to use verbatim
     (copied in *after* `./configure` runs, overriding its own output -- same mechanism
-    `metapython.compile.BuildOptions.pyconfig_header` has always had). Left `None` (the
-    default), `_resolve_pyconfig_header` derives one instead: it runs meta-python's
+    `byp.compile.BuildOptions.pyconfig_header` has always had). Left `None` (the
+    default), `_resolve_pyconfig_header` derives one instead: it runs build-your-python's
     `configure` build step (`BuildStep.CONFIGURE`) -- real `./configure`, through the
     exact same harness this build itself uses (`CC=zig cc -target target`, matching
-    CPython version, matching `debug`), plus meta-python's automatic musl-macro patch
+    CPython version, matching `debug`), plus build-your-python's automatic musl-macro patch
     -- and copies the resulting `cpython/pyconfig.h` out before this build's own
     checkout cleanup would remove it. Costs seconds (`./configure` alone, no compiling)
     rather than the minutes a real build would, and is always target-correct: unlike
@@ -1530,9 +1530,9 @@ def build_own_python(
     this is generated by the same project, for the exact CPython version and target
     actually being built, every time.
 
-    `python_version` names the CPython release to build, as one of meta-python's own
+    `python_version` names the CPython release to build, as one of build-your-python's own
     curated `-Dcpython-version` choices (see its `build.zig.zon`; `OwnPythonError` for
-    anything else). Defaults to `DEFAULT_CPYTHON_VERSION`, matching meta-python's own
+    anything else). Defaults to `DEFAULT_CPYTHON_VERSION`, matching build-your-python's own
     default -- so leaving it unset builds exactly the interpreter this always has.
     Unlike every option above, this changes which CPython source tree is compiled, not
     how: expect the stdlib layout, ABI tag and module set (`LIBRARY_MODULES`,
@@ -1546,7 +1546,7 @@ def build_own_python(
             'compiling modules as builtins only has an effect under linkage="static" '
             '(python-linkage=off) -- pass linkage="static", or drop static_modules.'
         )
-    _ensure_metapython_installed()
+    _ensure_byp_installed()
     if target is not None:
         _validate_windows_zig_target(target)
     disabled = set(disabled_libraries)
@@ -1579,7 +1579,7 @@ def build_own_python(
         The executable's presence is the question, plus one more for a musl target
         linked against libc dynamically: such an interpreter is unrunnable without the
         musl loader beside it (see `_stage_musl_runtime`), and a tree built before
-        meta-python started producing that loader has none. Rebuilding is the only way
+        build-your-python started producing that loader has none. Rebuilding is the only way
         to get one, so a prefix missing it is not a cache hit.
         """
         if not bin_path.exists():
@@ -1627,7 +1627,7 @@ def build_own_python(
         # A (re)build starts from an empty prefix. `zig build install` merges into
         # whatever is already there, and two builds of the same configuration are not
         # necessarily compatible: change the extension suffix (a musl target now spells
-        # it `-musl`, see meta-python's `runConfigure`) and the tree ends up holding
+        # it `-musl`, see build-your-python's `runConfigure`) and the tree ends up holding
         # both namings of every extension module and of `_sysconfigdata`, with the old
         # one shipped as dead weight.
         shutil.rmtree(dest, ignore_errors=True)
@@ -1660,15 +1660,15 @@ def _build_interpreter(
     python_version: str = DEFAULT_CPYTHON_VERSION,
 ) -> PathExists:
     """
-    Runs the actual meta-python build into `dest`, assuming the caller holds
+    Runs the actual build-your-python build into `dest`, assuming the caller holds
     `interpreter_build_lock` and has already settled the cache question.
 
     Split from `build_own_python` for exactly that reason: everything here mutates
-    state shared with every other build on this machine -- meta-python's checkout, its
+    state shared with every other build on this machine -- build-your-python's checkout, its
     `.zig-cache`, the fetched CPython source's own `Makefile` -- and none of the option
     resolution above does.
     """
-    from metapython.compile import (
+    from byp.compile import (
         VENDORED_PROJECT_DIR,
         BuildOptions,
         LibCLinkage,
@@ -1678,13 +1678,13 @@ def _build_interpreter(
     )
 
     # Iterated over `LIBRARY_MODULES` rather than over `disabled` itself, so the keys
-    # carry meta-python's own `Library` type instead of a bare `str`.
+    # carry build-your-python's own `Library` type instead of a bare `str`.
     libraries = {library: Linkage.OFF for library in LIBRARY_MODULES if library in disabled}
     for library in _cross_unsupported_static_libraries(target, disabled):
         libraries[library] = Linkage.DYNAMIC
         _logger.info(
             "%s is a CPU-arch cross target: defaulting %s to dynamic linkage "
-            "(meta-python's static default isn't supported there yet).",
+            "(build-your-python's static default isn't supported there yet).",
             target,
             library,
         )
@@ -1693,7 +1693,7 @@ def _build_interpreter(
         target=target,
         libraries=libraries,
         # Explicit, and load-bearing: `zig build`'s own default optimize mode is
-        # `Debug`, which meta-python maps to `--with-pydebug` -- see this function's
+        # `Debug`, which build-your-python maps to `--with-pydebug` -- see this function's
         # docstring for why that cannot be the default here.
         optimize=OptimizeMode.DEBUG if debug else OptimizeMode.RELEASE_FAST,
         # Not implied by `optimize`, see this function's docstring.
@@ -1702,7 +1702,7 @@ def _build_interpreter(
         python_linkage=Linkage.OFF if linkage == "static" else Linkage.DYNAMIC,
         static_modules=static,
         # Always resolved by now (`_resolve_pyconfig_header`, or the caller's own
-        # explicit override) -- see `build_own_python`'s docstring. Meta-python's own
+        # explicit override) -- see `build_own_python`'s docstring. build-your-python's own
         # `build.zig` still auto-patches the musl-specific macros it knows about on top
         # of whatever ends up on disk regardless (idempotent against an
         # already-correct value), so this is additive, not the only thing standing
@@ -1711,7 +1711,7 @@ def _build_interpreter(
     )
 
     cpython_dir = _fetched_cpython_source_dir(python_version)
-    # meta-python's `runConfigure` only ever runs `./configure` when the resolved
+    # build-your-python's `runConfigure` only ever runs `./configure` when the resolved
     # source tree's `Makefile` is *absent* -- and that tree is shared across every
     # target and option combination, so a leftover Makefile makes it skip straight to
     # compiling with whatever `pyconfig.h` an earlier run left behind. Force a real
@@ -2732,7 +2732,7 @@ def find_musl_loader(prefix: Path) -> Path | None:
     """
     The musl loader a prefix ships in its `lib/`, or None when there is none.
 
-    Only a `libc-linkage=dynamic` musl build has one (meta-python installs it there,
+    Only a `libc-linkage=dynamic` musl build has one (build-your-python installs it there,
     see `MUSL_LOADER_GLOB`), so its presence is also the answer to "does this prefix
     need a stub interpreter?" -- which is why staging asks the prefix rather than
     re-deriving it from the target triple.
@@ -2854,7 +2854,7 @@ def _interpreter_elf_files(prefix: Path) -> list[Path]:
     `libpythonX.Y.so`, and the stdlib's own extension modules under `lib-dynload`.
 
     Walked on the copies rather than on what they were copied from, unlike
-    `dist.build_dist`'s own native artifacts: a meta-python-built module resolves its
+    `dist.build_dist`'s own native artifacts: a build-your-python-built module resolves its
     dependencies by soname through the loader's search path, not through an RPATH
     relative to where it was installed, so the copy reports exactly what the original
     would.
@@ -2908,7 +2908,7 @@ def _bundle_interpreter_dependencies(prefix: Path, *, foreign_libc: bool = False
     interpreter's `libz.so.1` is not this glibc host's `libz.so.1`, and copying the
     latter in would produce a folder that fails on the target instead of one that is
     honestly missing a library. What such an interpreter needs is already inside its
-    own prefix -- meta-python links its dependencies in statically -- plus the musl
+    own prefix -- build-your-python links its dependencies in statically -- plus the musl
     loader, which is staged by name (see `_stage_musl_runtime`).
 
     Not `native_deps.bundle_native_dependencies`, which places dependencies flat at
@@ -2960,7 +2960,7 @@ def _windows_interpreter_files(prefix: Path) -> list[Path]:
     """
     Every file `_bundle_windows_interpreter_dependencies` walks for a Windows-staged
     interpreter, prefix-relative: `python.exe` and the DLL implementing it. There is no
-    Windows equivalent of `lib-dynload` yet -- meta-python's Windows build does not
+    Windows equivalent of `lib-dynload` yet -- build-your-python's Windows build does not
     produce extension modules (see `stage_interpreter`).
     """
     found: list[Path] = []
@@ -2976,7 +2976,7 @@ def _bundle_windows_interpreter_dependencies(prefix: Path) -> BundledNatives:
     Copies whatever DLLs `bin/python.exe`/its own DLL need, next to them.
 
     `binary_format="pe"` is forced explicitly rather than left to infer from the
-    running host: meta-python's Windows build is routinely cross-compiled from a
+    running host: build-your-python's Windows build is routinely cross-compiled from a
     Linux host, and `native_deps`'s PE walk is a static parse that works regardless
     (see `native_deps.BinaryFormat`). Unlike the ELF path there is no RPATH to
     rewrite -- Windows already searches a binary's own directory first, so placing a
@@ -3011,7 +3011,7 @@ def _stage_windows_interpreter(built_prefix: Path, dist_root: Path) -> StagedInt
     `StagedInterpreter.tailored`.
 
     Also no `prune`/sourceless-compile pass over the stdlib (see this function's
-    caller): the Windows `Lib/` tree is shipped exactly as meta-python installed it,
+    caller): the Windows `Lib/` tree is shipped exactly as build-your-python installed it,
     since neither of those has been exercised against its flat, non-`lib/pythonX.Y`
     shape yet.
     """

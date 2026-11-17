@@ -17,11 +17,12 @@ import sys
 import sysconfig
 import tempfile
 import warnings
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Final
 
+from distutils.compilers.C.errors import CompileError
 from distutils.compilers.C.unix import Compiler
 from setuptools import Extension
 
@@ -185,6 +186,79 @@ class ZigCompiler(Compiler):
         "archiver": ["ar", "-cr"],
         "ranlib": None,
     }
+
+    #: Name under which a `.zig` source imports the Python C-API: `@import("python")`.
+    PYTHON_MODULE_NAME: ClassVar[str] = "python"
+
+    def _compile(
+        self,
+        obj: str,
+        src: str,
+        ext: str,
+        cc_args: list[str],
+        extra_postargs: list[str],
+        pp_opts: list[str],
+    ) -> None:
+        if ext != ".zig":
+            # distutils leaves `_compile` unannotated: pin its signature here.
+            compile_c: Callable[[str, str, str, list[str], list[str], list[str]], None] = (
+                super()._compile
+            )
+            compile_c(obj, src, ext, cc_args, extra_postargs, pp_opts)
+            return
+        self._compile_zig(obj, src, cc_args, pp_opts)
+
+    def _compile_zig(self, obj: str, src: str, cc_args: list[str], pp_opts: list[str]) -> None:
+        """
+        Compiles a single `.zig` source into the object file `obj`.
+
+        Zig (since 0.17) has no `@cImport`: C headers must be translated to Zig ahead of
+        time and handed to the compilation as a module. `Python.h` is translated here
+        with the extension's own preprocessor options (`-I`/`-D`/`-U`, i.e. its
+        include dirs and `define_macros`), and the result is exposed to `src` as
+        `@import("python")`. Macros that a C extension would `#define` before
+        including `Python.h` (e.g. `Py_LIMITED_API`) therefore go in the extension's
+        `define_macros`, not in the Zig source.
+        """
+        target_args: list[str] = []
+        for arg in cc_args:
+            if arg.startswith("--target="):
+                target_args = ["-target", arg.removeprefix("--target=")]
+        obj_path = Path(obj)
+        obj_path.parent.mkdir(parents=True, exist_ok=True)
+        header = obj_path.with_name(f"{obj_path.stem}_python.h")
+        header.write_text("#include <Python.h>\n")
+        bindings = obj_path.with_name(f"{obj_path.stem}_python.zig")
+        translate_cmd = [
+            *self.zig_base_path,
+            "translate-c",
+            *target_args,
+            "-lc",
+            *pp_opts,
+            str(header),
+        ]
+        build_cmd = [
+            *self.zig_base_path,
+            "build-obj",
+            *target_args,
+            "-lc",
+            "-fPIC",
+            "-O",
+            "ReleaseSafe",
+            "--dep",
+            self.PYTHON_MODULE_NAME,
+            f"-Mroot={src}",
+            f"-M{self.PYTHON_MODULE_NAME}={bindings}",
+            f"-femit-bin={obj}",
+        ]
+        try:
+            with bindings.open("w") as out:
+                _logger.info("Running zig translate-c: \n%s", " ".join(translate_cmd))
+                subprocess.run(translate_cmd, stdout=out, check=True)
+            _logger.info("Running zig build-obj: \n%s", " ".join(build_cmd))
+            subprocess.run(build_cmd, check=True)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            raise CompileError(exc) from exc
 
 
 def zig_build_lib(

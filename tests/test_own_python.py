@@ -103,16 +103,16 @@ needs_own_python = pytest.mark.skipif(
 )
 
 try:
-    import metapython as _metapython
+    import byp as _byp
 
-    _ = _metapython
-    _METAPYTHON_AVAILABLE = True
+    _ = _byp
+    _BYP_AVAILABLE = True
 except ImportError:
-    _METAPYTHON_AVAILABLE = False
+    _BYP_AVAILABLE = False
 
-needs_metapython = pytest.mark.skipif(
-    not _METAPYTHON_AVAILABLE or not is_supported_platform(),
-    reason="needs Linux and the metapython extra installed",
+needs_byp = pytest.mark.skipif(
+    not _BYP_AVAILABLE or not is_supported_platform(),
+    reason="needs Linux and the byp extra installed",
 )
 
 
@@ -591,7 +591,7 @@ def test_the_build_lock_excludes_a_second_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    What the lock exists for. meta-python's checkout is shared by every build on the
+    What the lock exists for. build-your-python's checkout is shared by every build on the
     machine and each build resets it, so two overlapping builds do not duplicate work,
     they corrupt each other.
     """
@@ -827,10 +827,10 @@ def test_own_python_cache_dir_separates_linkage_and_static_modules() -> None:
     assert builtin == own_python_cache_dir(linkage="static", static_modules=["zlib", "_socket"])
 
 
-@needs_metapython
+@needs_byp
 def test_resolve_pyconfig_header_runs_a_real_configure_step(tmp_path: Path) -> None:
     """
-    Real, not mocked: `_resolve_pyconfig_header` shells out to meta-python's
+    Real, not mocked: `_resolve_pyconfig_header` shells out to build-your-python's
     `configure` build step (a real `./configure`, no compiling) and must produce a
     genuinely musl-correct file, not just avoid raising.
     """

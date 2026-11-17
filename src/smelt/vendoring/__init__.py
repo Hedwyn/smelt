@@ -5,7 +5,7 @@ e.g. cffi, which has no wheel for many embedded Linux targets but only needs a
 C compiler and libffi to build. Checked *before* any wheel lookup: a package
 registered here never goes through `unearth`/the package index at all.
 
-Mirrors `meta-python/vendoring/{lzma,sqlite3}`'s existing meaning of
+Mirrors `build-your-python/vendoring/{lzma,sqlite3}`'s existing meaning of
 "vendoring" in this project (a curated build recipe checked into the repo for a
 specific third-party library) -- one level up: a *Python package* build instead
 of a CPython-internal one.

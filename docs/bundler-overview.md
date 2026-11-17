@@ -8,7 +8,7 @@ Building a distribution starts by computing the entrypoint's **closure** - every
 
 ## `byo` versus `own`
 
-The interpreter question is a separate axis from the payload. In `byo` mode ("bring your own [interpreter]", the default) the folder holds only the application - it runs on any machine with a matching CPython minor version already installed. In `own` mode, Smelt also builds a CPython interpreter (through `meta-python`) and ships it inside the folder, which then runs where nothing is installed at all.
+The interpreter question is a separate axis from the payload. In `byo` mode ("bring your own [interpreter]", the default) the folder holds only the application - it runs on any machine with a matching CPython minor version already installed. In `own` mode, Smelt also builds a CPython interpreter (through `build-your-python`) and ships it inside the folder, which then runs where nothing is installed at all.
 
 An `own` interpreter is not simply copied wholesale: by default it is **tailored** down to the standard-library modules and native libraries the closure actually reaches, plus a small always-kept baseline (see Glossary - Minimal Viable Stdlib) that discovery cannot see on its own. Which parts of OpenSSL, SQLite, `libffi`, `bz2`, `lzma` or Tk get compiled in follows the same closure - an application that never touches `ssl` gets an interpreter built without OpenSSL at all, rather than one that has it but never loads it.
 
