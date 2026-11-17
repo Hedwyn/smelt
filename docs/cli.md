@@ -12,7 +12,7 @@ Options:
   --help  Show this message and exit.
 
 Commands:
-  build-dist               Assembles a distribution folder for an...
+  bundle                   Assembles a bundle for an entrypoint: smelt-built...
   build-extensions         Runs the smelt backend on the passed project...
   build-standalone-binary
   clean-artifacts          Deletes built dynlibs (and their mypyc...
@@ -48,24 +48,23 @@ Options:
 
 Without `-e/--entrypoint`, every entrypoint declared in `[project.scripts]` (plus any extra entrypoint declared under `entrypoints` in the Smelt config) is built. Per-entrypoint options such as extra Nuitka flags or forced module/package inclusion are set via the `entrypoints` table described in [Build Hook](build-hook.md#configuration-reference).
 
-This compiles the whole program to native code via Nuitka. For an application that assembles bytecode and compiled extensions into a distribution folder instead - optionally with its own bundled interpreter - see `build-dist` below, and the [Bundler](bundler-get-started.md) section.
+This compiles the whole program to native code via Nuitka. For an application that assembles bytecode and compiled extensions into a distribution folder instead - optionally with its own bundled interpreter - see `bundle` below, and the [Bundler](bundler-get-started.md) section.
 
-## build-dist
+## bundle
 
-Smelt's other route to a standalone application: assembles a distribution folder for one entrypoint out of Smelt-built extensions plus bytecode for everything else it imports, and optionally an interpreter to run on. See [Bundler: Get Started](bundler-get-started.md) for a walkthrough and [Bundler: Reference](bundler-reference.md) for the full option list.
+Smelt's other route to a standalone application: assembles a distribution folder for one entrypoint out of Smelt-built extensions plus bytecode for everything else it imports, and optionally an interpreter to run on. Settings come from `[tool.smelt.bundle]`; every one of them also has a flag. See [Bundler: Get Started](bundler-get-started.md) for a walkthrough and [Bundler: Reference](bundler-reference.md) for the full list.
 
 ```
-$ smelt build-dist --help
-Usage: smelt build-dist [OPTIONS]
+$ smelt bundle --help
+Usage: smelt bundle [OPTIONS]
 
-  Assembles a distribution folder for an entrypoint: smelt-built extensions
-  plus every other module it imports, shipped as bytecode.
+  Assembles a bundle for an entrypoint: smelt-built extensions plus every
+  other module it imports, shipped as bytecode.
 
   With `--python byo` (the default) the result runs on any machine with a
-  matching CPython already installed. With `--python own` the interpreter is
-  built and shipped inside the folder too, which then runs on a machine with
-  no Python at all. Instructions are printed at the end of the run and written
-  into the folder.
+  matching CPython installed. With `--python own` the interpreter is built and
+  shipped in the folder too, which then runs on a machine with no Python at
+  all.
 ```
 
 ## build-extensions

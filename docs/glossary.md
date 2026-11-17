@@ -1,6 +1,6 @@
 # Glossary
 
-The vocabulary used by Smelt's application bundler (`smelt build-dist`) and by the
+The vocabulary used by Smelt's application bundler (`smelt bundle`) and by the
 code that implements it. Defined here once; the modules involved point back at this
 page rather than re-explaining the terms.
 
@@ -44,7 +44,7 @@ This matters more than the definition, and it is why `include-modules` and
 * **it can miss modules.** An import performed on a computed name
   (`importlib.import_module("plugins." + name)`), from a plugin registry, or lazily on
   a code path not taken during tracing, is invisible. Name those with
-  `include-modules` / `include-package`, exactly as Nuitka requires for the same
+  `include-modules` / `include-packages`, exactly as Nuitka requires for the same
   reason.
 * **it can include modules that are never used.** The static walk follows imports
   written inside functions, which is correct for application code (a lazy import is a
@@ -72,7 +72,7 @@ The act of computing a closure, and the `discovery` option that selects how (see
 
 ## Distribution folder, payload
 
-The folder `smelt build-dist` produces. Its layout:
+The folder `smelt bundle` produces. Its layout:
 
 ```
 myapp.dist/
@@ -108,7 +108,7 @@ rather than shipping all of it. Two levers, both driven by the same closure:
 * third-party libraries no kept extension module needs (OpenSSL, SQLite, libffi, bz2,
   lzma, Tk) are turned off at build time, so the interpreter is compiled without them.
 
-Controlled by `--tailor-interpreter` / `--no-tailor-interpreter`.
+Controlled by `--tailor` / `--no-tailor`.
 
 ## Keep-set, bootstrap set, Minimal Viable Stdlib
 
@@ -168,7 +168,7 @@ anything resolving an internationalised hostname — raises
 quoting a source line with wide characters also loses its caret alignment.
 
 ```
-smelt build-dist --python own --drop-stdlib-group international_hostnames
+smelt bundle --python own --drop-stdlib-group international_hostnames
 ```
 
 or per entrypoint:
@@ -181,4 +181,4 @@ drop-stdlib-groups = ["international_hostnames"]
 
 Naming a group that is not droppable, or one that does not exist, is an error that
 names the droppable ones. To *add* to the keep-set instead, use `include-modules` /
-`--include-module`; to skip tailoring altogether, `--no-tailor-interpreter`.
+`--include-module`; to skip tailoring altogether, `--no-tailor`.

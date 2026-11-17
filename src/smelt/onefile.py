@@ -77,10 +77,11 @@ class OnefileError(SmeltError):
 
 
 #: How the payload is compressed. `"xz"` is the smallest and the slowest to inflate,
-#: `"gzip"` roughly halves the inflation time for a larger file.
-type OnefileCompression = Literal["xz", "gzip"]
+#: `"gzip"` roughly halves the inflation time for a larger file, `"none"` stores the
+#: payload as is.
+type OnefileCompression = Literal["xz", "gzip", "none"]
 
-ONEFILE_COMPRESSIONS: Final[tuple[OnefileCompression, ...]] = ("xz", "gzip")
+ONEFILE_COMPRESSIONS: Final[tuple[OnefileCompression, ...]] = ("xz", "gzip", "none")
 
 DEFAULT_ONEFILE_COMPRESSION: Final[OnefileCompression] = "xz"
 
@@ -322,6 +323,9 @@ def _compress(
                         fileobj=raw, mode="wb", mtime=0, compresslevel=preset
                     ) as gzip_sink:
                         shutil.copyfileobj(handle, gzip_sink)
+            case "none":
+                with dest.open("wb") as raw:
+                    shutil.copyfileobj(handle, raw)
 
 
 def _normalized(entry: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -659,7 +663,7 @@ if __name__ == "__main__":
 '''
 
 #: Tar mode the extracting `__main__` opens the payload with, per compression.
-_TAR_MODES: Final[dict[OnefileCompression, str]] = {"xz": "r:xz", "gzip": "r:gz"}
+_TAR_MODES: Final[dict[OnefileCompression, str]] = {"xz": "r:xz", "gzip": "r:gz", "none": "r:"}
 
 
 def extracting_main(

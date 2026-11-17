@@ -539,7 +539,7 @@ def resolve_own_python_version(explicit: str | None) -> str:
             f"No curated CPython release for {running} (this interpreter's own "
             f"minor version): meta-python's `-Dcpython-version` only curates "
             f"{sorted(hashes)}. Run smelt itself under one of those minor versions, "
-            "or pass an explicit own-python-version/--own-python-version."
+            "or pass an explicit own-python-version/--python-version."
         )
     return candidates[-1]
 
@@ -1893,7 +1893,7 @@ def interpreter_magic_number(prefix: PathExists) -> bytes:
     by `_build_interpreter` alongside `VERSION_MARKER_NAME` (same builds, same
     reason, same time) -- one missing while the other is present means only that
     this prefix was built before smelt started recording it, not that this prefix
-    is probeable; rebuild it (`build_own_python`'s own `no_cache=True` -- `build-dist`
+    is probeable; rebuild it (`build_own_python`'s own `no_cache=True` -- `smelt bundle`
     exposes no CLI flag for it yet, so a caller through the CLI has to delete
     `prefix` itself and let the next build recreate it) rather than guessing.
     """
@@ -3119,7 +3119,7 @@ def stage_interpreter(
                 "Cannot tailor a Windows-target interpreter: resolving requirements "
                 "needs to probe the built interpreter by running it, and a "
                 "cross-compiled python.exe cannot run on the host that built it. "
-                "Build without --tailor-interpreter for this target."
+                "Build without --tailor for this target."
             )
         return _stage_windows_interpreter(Path(built_prefix), dist_root)
 
@@ -3213,7 +3213,7 @@ def stage_interpreter(
                 "is a module a mode 'own' distribution cannot carry (tkinter is, its "
                 "Tcl/Tk libraries being named by absolute path), drop it from the "
                 "closure with `--exclude-module`, or build with "
-                "`--no-tailor-interpreter` to ship the whole standard library."
+                "`--no-tailor` to ship the whole standard library."
             )
 
     native_deps = (

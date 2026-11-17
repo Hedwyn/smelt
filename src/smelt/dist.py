@@ -116,6 +116,7 @@ from smelt.schema import (
     InterpreterGroup,
     IsolatedBuildGroup,
     OnefileGroup,
+    merge_settings,
 )
 from smelt.nuitkaify import Stdout, import_path_search_root
 from smelt.onefile import (
@@ -231,7 +232,7 @@ DEFAULT_DISCOVERY: Final[DiscoveryMode] = "both"
 #: discovery mode is the union of both methods (a stdlib module imported anywhere in
 #: any reachable source is kept, whether that import ever runs or not), `ALWAYS_KEEP`
 #: covers the modules that are structurally invisible to a closure, and
-#: `--include-module` forces back anything found missing. `--no-tailor-interpreter`
+#: `--include-module` forces back anything found missing. `--no-tailor`
 #: restores the untailored interpreter wholesale.
 DEFAULT_TAILOR_INTERPRETER: Final[bool] = True
 
@@ -726,7 +727,42 @@ def resolve_bundle(
     )
 
 
-def _package_data_from_cli(specs: Iterable[str]) -> dict[str, list[str]]:
+def validate_bundle(bundle: ResolvedBundle) -> None:
+    """
+    Rejects setting combinations that cannot work, before anything is built:
+    `interpreter.*` settings declared for a `byo` bundle (they would be silently
+    ignored), a compression preset outside its algorithm's range, and an
+    interpreter version other than the running interpreter's minor.
+    """
+    if bundle.python == "byo":
+        for key, sources in bundle.sources.items():
+            declared_by = [source for source in sources if source != SOURCE_DEFAULT]
+            if key.startswith("interpreter.") and declared_by:
+                raise DistError(
+                    f'{key!r} (set by {declared_by[-1]}) only applies to `python = "own"` '
+                    '(CLI: --python own); this bundle runs on `python = "byo"`.'
+                )
+    preset_range = {"xz": (0, 9), "gzip": (1, 9)}.get(bundle.onefile_compression)
+    if preset_range is not None:
+        low, high = preset_range
+        if not low <= bundle.onefile_compression_preset <= high:
+            raise DistError(
+                f"onefile.compression-preset {bundle.onefile_compression_preset} is out of "
+                f"range for {bundle.onefile_compression}: expected {low}-{high}."
+            )
+    if bundle.own_python_version is not None:
+        major_minor = tuple(int(part) for part in bundle.own_python_version.split(".")[:2])
+        running = (sys.version_info.major, sys.version_info.minor)
+        if major_minor != running:
+            raise DistError(
+                f"interpreter.version {bundle.own_python_version!r} is not the running "
+                f"Python's minor version ({running[0]}.{running[1]}): only that minor "
+                "can be shipped, since the bytecode is compiled by it. Run smelt under "
+                "the Python minor version you want to ship."
+            )
+
+
+def package_data_from_cli(specs: Iterable[str]) -> dict[str, list[str]]:
     """`["pkg", "pkg:*.json,*.yaml"]` (the `PACKAGE[:PATTERN,...]` flag form) -> a table."""
     table: dict[str, list[str]] = {}
     for spec in specs:
@@ -1435,8 +1471,8 @@ def _assert_static_interpreter_needs_no_dlopen(report: DistReport) -> None:
         f"interpreter is statically linked, so none of them can be imported: "
         f"{shown}{more}. A static interpreter has no working `dlopen()` at all. "
         "Either compile them into the interpreter -- `use_inittab=True` "
-        "(CLI: `--use-inittab`) for smelt's own extension modules, "
-        "`own_python_static_modules` (CLI: `--own-python-static-module`) for standard "
+        "(CLI: `--inittab`) for smelt's own extension modules, "
+        "`own_python_static_modules` (CLI: `--static-module`) for standard "
         "library accelerators -- or drop `own_python_static` (CLI: "
         "`--no-own-python-static`), which ships the interpreter linked against libc "
         "dynamically, with its loader, and keeps `dlopen()` working."
@@ -1466,7 +1502,7 @@ def _discovery_note(report: DistReport) -> str:
     return {
         "static": "* Modules were found by reading import statements. One imported "
         "dynamically (through\n  `importlib`, a plugin registry, ...) is invisible that "
-        "way and may be missing;\n  name it with `include-modules`/`include-package`, or "
+        "way and may be missing;\n  name it with `include-modules`/`include-packages`, or "
         "build with `--discovery both`.\n",
         "trace": "* Modules were found by importing the entrypoint and recording what "
         "it loaded. A\n  module imported lazily *later* (inside a function, on a code "
@@ -1476,7 +1512,7 @@ def _discovery_note(report: DistReport) -> str:
         "importing the\n  entrypoint to record what it loaded. What can still be missing "
         "is a module\n  imported lazily, on a code path not taken at import time, under "
         "a name that\n  does not appear in the source -- name those with "
-        "`include-modules`/`include-package`.\n",
+        "`include-modules`/`include-packages`.\n",
     }[report.discovery]
 
 
@@ -1570,7 +1606,7 @@ def _interpreter_contents_note(interpreter: StagedInterpreter) -> str:
         return (
             "This is a *vanilla* build: which parts of the interpreter this particular\n"
             "application needs is not worked out, so it is bigger than it has to be. Build\n"
-            "with `--tailor-interpreter` to ship only what the application was found to need."
+            "with `--tailor` to ship only what the application was found to need."
         )
     disabled = ", ".join(interpreter.disabled_libraries) or "none"
     trees = len(interpreter.pruned_modules)
@@ -1590,7 +1626,7 @@ under `interpreter.pruned_modules` and `interpreter.pruned_extensions`.
 If the application turns out to import a standard library module on a code path that
 was not taken while it was being analysed, that import fails here where it would have
 worked in an untailored build. `--include-module <name>` puts it back, and
-`--no-tailor-interpreter` ships the whole standard library again."""
+`--no-tailor` ships the whole standard library again."""
 
 
 def _libc_note(interpreter: StagedInterpreter) -> str:
@@ -1692,7 +1728,7 @@ Current limitations
 -------------------
 
 * Package data files are only collected when asked for, through
-  `include-package-data` -- a package folder can hold anything at all, so nothing is
+  `package-data` -- a package folder can hold anything at all, so nothing is
   guessed. {len(report.data_files)} file(s) were collected here.
 {_discovery_note(report)}{_optional_imports_note(report)}{_onefile_note(report)}"""
 
@@ -1787,7 +1823,7 @@ Current limitations
 -------------------
 
 * Package data files are only collected when asked for, through
-  `include-package-data` -- a package folder can hold anything at all, so nothing is
+  `package-data` -- a package folder can hold anything at all, so nothing is
   guessed. {data_files} file(s) were collected here.
 {discovery_note}{optional_note}{native_deps_note}{onefile_note}"""
 
@@ -1826,6 +1862,7 @@ def build_dist(
     isolated_build_versions: Literal["local", "pyproject"] | None = None,
     own_python_static: bool | None = None,
     own_python_static_modules: Iterable[str] = (),
+    overrides: BundleSettings | None = None,
 ) -> DistReport:
     """
     Assembles the distribution folder for one of `config`'s entrypoints under
@@ -1846,7 +1883,7 @@ def build_dist(
     picking a different one for each. A caller that only has a raw, possibly
     multi-valued or `"host"`-containing list (e.g. an entrypoint's own
     `target` declaration) should resolve it with `resolve_target_platforms`
-    first, and build once per resolved entry -- `smelt build-dist` does exactly that.
+    first, and build once per resolved entry -- `smelt bundle` does exactly that.
 
     `python` selects which interpreter the distribution runs on (see `DistPython`),
     defaulting the same way. `"own"` builds one through `smelt.own_python` -- for
@@ -1945,6 +1982,9 @@ def build_dist(
     starts the interpreter through it (see `own_python._stage_musl_runtime`), which
     keeps `dlopen()` -- and with it any third-party native module -- working.
 
+    `overrides` is a command-line level of settings (see `smelt.bundle_flags`), layered
+    over what the keyword arguments above declare.
+
     An existing distribution folder of the same name is replaced.
     """
     path_solver = path_solver or config.get_path_solver()
@@ -1954,40 +1994,45 @@ def build_dist(
     # entrypoint's declared levels over the defaults.
     bundle = resolve_bundle(
         config.entrypoints[entrypoint_spec],
-        BundleSettings(
-            python=python,
-            optimize=optimize,
-            guard_version=guard_version,
-            isolate=isolate,
-            content=ContentGroup(
-                discovery=discovery,
-                include_modules=list(include_modules),
-                include_packages=list(include_packages),
-                exclude_modules=list(exclude_modules),
-                drop_optional_imports=drop_optional_imports,
-                package_data=_package_data_from_cli(include_package_data),
-                distribution_metadata=list(include_distribution_metadata),
+        merge_settings(
+            BundleSettings,
+            BundleSettings(
+                python=python,
+                optimize=optimize,
+                guard_version=guard_version,
+                isolate=isolate,
+                content=ContentGroup(
+                    discovery=discovery,
+                    include_modules=list(include_modules),
+                    include_packages=list(include_packages),
+                    exclude_modules=list(exclude_modules),
+                    drop_optional_imports=drop_optional_imports,
+                    package_data=package_data_from_cli(include_package_data),
+                    distribution_metadata=list(include_distribution_metadata),
+                ),
+                interpreter=InterpreterGroup(
+                    version=own_python_version,
+                    tailor=tailor_interpreter,
+                    drop_stdlib_groups=list(drop_stdlib_groups),
+                    static=own_python_static,
+                    static_modules=list(own_python_static_modules),
+                    inittab=use_inittab,
+                ),
+                onefile=OnefileGroup(
+                    enabled=onefile,
+                    compression=onefile_compression,
+                    compression_preset=onefile_compression_preset,
+                    cache=onefile_cache,
+                    keep_folder=False if onefile_only else None,
+                ),
+                isolated_build=IsolatedBuildGroup(
+                    enabled=isolated_build, versions=isolated_build_versions
+                ),
             ),
-            interpreter=InterpreterGroup(
-                version=own_python_version,
-                tailor=tailor_interpreter,
-                drop_stdlib_groups=list(drop_stdlib_groups),
-                static=own_python_static,
-                static_modules=list(own_python_static_modules),
-                inittab=use_inittab,
-            ),
-            onefile=OnefileGroup(
-                enabled=onefile,
-                compression=onefile_compression,
-                compression_preset=onefile_compression_preset,
-                cache=onefile_cache,
-                keep_folder=False if onefile_only else None,
-            ),
-            isolated_build=IsolatedBuildGroup(
-                enabled=isolated_build, versions=isolated_build_versions
-            ),
+            overrides,
         ),
     )
+    validate_bundle(bundle)
     # Needed ahead of `run_backend` on purpose: whether it is worth having it stage
     # object files at all (`static_link` below) depends on both.
     resolved_python = bundle.python
@@ -2008,7 +2053,7 @@ def build_dist(
         raise DistError(
             "This entrypoint declares multiple targets "
             f"{declared_target_platforms!r}; build_dist builds one platform per call -- "
-            "pass target_platform explicitly, or use `smelt build-dist`/`smelt "
+            "pass target_platform explicitly, or use `smelt bundle`/`smelt "
             "compile-module`, which loop over all of them."
         )
     assert_supported_platforms(bundle.supported_targets, declared_target_platforms)
@@ -2062,7 +2107,7 @@ def build_dist(
         raise DistError(
             f"static_modules names {sorted(static_modules)}, but use_inittab is off "
             f"(the default, see DEFAULT_USE_INITTAB): pass use_inittab=True (CLI: "
-            "--use-inittab) to actually link them into the interpreter."
+            "--inittab) to actually link them into the interpreter."
         )
     if static_modules and resolved_python != "own":
         raise DistError(
@@ -2131,9 +2176,7 @@ def build_dist(
     if resolved_python == "own":
         target = resolved_target_platform
         interpreter_target = target
-        python_version = resolve_own_python_version(
-            bundle.own_python_version
-        )
+        python_version = resolve_own_python_version(bundle.own_python_version)
         # Fails now rather than after the build below: `assert_no_version_skew` would
         # catch the same mismatch, but only once a several-minutes cross-compiled
         # interpreter already exists to check it against. `resolve_own_python_version`

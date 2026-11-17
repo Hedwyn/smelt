@@ -40,6 +40,7 @@ from smelt.config import (
     toml_get_nested_section,
 )
 from smelt.context import enable_global_context, get_context
+from smelt.bundle_flags import add_bundle_options, settings_from_params
 from smelt.dist import (
     assert_supported_platforms,
     build_dist,
@@ -47,6 +48,7 @@ from smelt.dist import (
     resolve_entrypoint_spec,
     resolve_target_platforms,
     run_instructions,
+    validate_bundle,
 )
 from smelt.own_python import target_python_headers_for
 from smelt.utils import (
@@ -197,29 +199,6 @@ def _host_label() -> str:
     return f"{platform.system().lower()}-{platform.machine().lower()}"
 
 
-def _advisory_target_platforms() -> list[str]:
-    """
-    Best-effort platform list for `-t/--target`'s `--help` text: the default
-    entrypoint's own `supported-platforms`, read from `./pyproject.toml` if there is
-    one to read here -- advisory only, never gates the option itself (that happens
-    once the real `--package-path`/`--entrypoint` are known, in `smelt.dist`). Any
-    failure (no pyproject.toml, no single default entrypoint, nothing declared, a
-    malformed file, ...) falls back silently to `compiler.SupportedPlatforms`'s own
-    triples, plus "host" -- never lets a parse error affect `--help` or argument
-    parsing.
-    """
-    fallback = ["host", *(member.get_triple_name() for member in SupportedPlatforms)]
-    try:
-        with Path("pyproject.toml").open("rb") as f:
-            toml_data = tomllib.load(f)
-        config = parse_config_from_pyproject(toml_data)
-        entrypoint_spec = resolve_entrypoint_spec(config, None)
-        levels = resolve_bundle(config.entrypoints[entrypoint_spec]).supported_targets
-        return list(levels[-1].patterns) if levels else fallback
-    except Exception:
-        return fallback
-
-
 def error_exit(msg: str, code: int = 1) -> NoReturn:
     """
     A helper exiting the program with the given `msg` on error.
@@ -330,365 +309,118 @@ def build_standalone_binary(
         Path(report).write_text(global_context.render())
 
 
-@smelt.command("build-dist")
+@smelt.command("bundle")
 @click.option(
     "-p",
-    "--package-path",
+    "--project",
     default=".",
     type=CliExistingPath(),
-    help="Path to the package to build a distribution for, expects to find a pyproject.toml",
+    help="Project to bundle: a folder holding a pyproject.toml. Default: the current folder.",
 )
 @click.option(
     "-e",
     "--entrypoint",
     type=str,
     default=None,
-    help="Entrypoint to build the distribution for: either its script name as declared "
-    "in [project.scripts] (e.g. 'afpu'), or its 'module.path'/'module.path:func_name' "
-    "key as declared in [tool.smelt.entrypoints]. Can be omitted when the project "
-    "declares a single entrypoint.",
+    help="Entrypoint to bundle: its script name from [project.scripts] (e.g. 'afpu'), "
+    "or a 'module.path' / 'module.path:func' key declared in "
+    "[tool.smelt.bundle.entrypoints]. Can be omitted when the project has a single "
+    "entrypoint.",
 )
 @click.option(
     "-o",
     "--output-dir",
     type=click.Path(file_okay=False, path_type=Path),
     default=Path("dist"),
-    help="Folder the distribution is assembled in. Defaults to ./dist",
-)
-@click.option(
-    "--optimize",
-    type=click.IntRange(0, 2),
-    default=None,
-    help="Bytecode optimization level (0, 1 or 2). Defaults to the level this "
-    "interpreter runs with. Note that 2 strips docstrings, which breaks help(), pydoc, "
-    "doctests, and any library building its own help text from docstrings.",
+    help="Folder the bundle is assembled in. Default: ./dist",
 )
 @click.option(
     "--no-build",
     is_flag=True,
     default=False,
-    help="Skip the extension build and reuse whatever artifacts are already on disk.",
-)
-@click.option(
-    "--discovery",
-    type=click.Choice(["static", "trace", "both"]),
-    default=None,
-    help="How to find the modules to ship. 'static' reads import statements, 'trace' "
-    "imports the entrypoint in a subprocess and reports what it actually loaded "
-    "(which executes its module-level code), 'both' unions them. Defaults to the "
-    "entrypoint's own declaration, then to 'both'.",
-)
-@click.option(
-    "--python",
-    "dist_python",
-    type=click.Choice(["byo", "own"]),
-    default=None,
-    help="Which interpreter the distribution runs on. 'byo' (bring your own) ships "
-    "the application only, and needs a matching CPython installed on the target. "
-    "'own' additionally builds an interpreter and ships it inside the folder, so the "
-    "folder runs where no Python is installed at all -- the first such build takes "
-    "several minutes and is then cached per target. Defaults to the entrypoint's own "
-    "declaration, then to 'byo'.",
+    help="Skip the extension build and reuse the artifacts already on disk.",
 )
 @click.option(
     "-t",
     "--target",
-    "target_platforms",
+    "targets",
     type=CliCommaSeparated(),
-    default="",
-    help="Platform(s) to build the distribution for: a comma-separated list of Zig "
-    "target triples (e.g. 'x86_64-linux-musl') and/or 'host' for a native build. "
-    "One distribution is built per platform, nested under <output-dir>/<platform>/ "
-    "whenever this flag is passed explicitly. Defaults to 'host', the only shape "
-    "verified so far. Platforms known here (best-effort, from this package's own "
-    f"supported-platforms when declared): {', '.join(_advisory_target_platforms())}.",
-)
-@click.option(
-    "--own-python-version",
-    type=str,
-    default=None,
-    help="CPython release to build the --python own interpreter from (one of "
-    "meta-python's curated '-Dcpython-version' choices, e.g. '3.15.0rc2'). Defaults "
-    "to the curated release matching this interpreter's own minor version -- 'own' "
-    "can never ship a different one anyway, since the bytecode compiled here is "
-    "checked against it (see smelt.dist.assert_no_version_skew). Run smelt itself "
-    "under the minor version you want to ship (e.g. `uv run --python 3.15 smelt "
-    "...`) rather than trying to pick it here.",
-)
-@click.option(
-    "--tailor-interpreter/--no-tailor-interpreter",
-    "tailor_interpreter",
-    default=None,
-    help="Whether the --python own interpreter ships only the standard library "
-    "modules, extension modules and libraries this application was found to need "
-    "(tailored, the default) or all of them. Tailoring is what keeps a mode 'own' "
-    "folder a reasonable size, and what can turn a discovery gap into a runtime "
-    "ImportError -- a stdlib module reached only on an untaken code path, under a name "
-    "absent from the source, is invisible to discovery and would have been carried "
-    "anyway by an untailored build. Put such a module back with --include-module. "
-    "Note each distinct set of disabled libraries needs its own interpreter build "
-    "(minutes), cached separately. Defaults to the entrypoint's own declaration, then "
-    "to tailored.",
-)
-@click.option(
-    "--drop-stdlib-group",
-    "drop_stdlib_groups",
     multiple=True,
-    help="Ship a mode-'own' interpreter without one of the optional groups of the "
-    "Minimal Viable Stdlib (currently: international_hostnames, 1.1 MB, which costs "
-    "support for non-ASCII hostnames). Repeatable. Refused for the groups nothing can "
-    "run without.",
+    help="Platform(s) to bundle for: a comma-separated list of Zig target triples "
+    "(e.g. 'x86_64-linux-musl') and/or 'host' for a native build. Repeatable. One "
+    "bundle is built per target, nested under <output-dir>/<target>/ when there is "
+    "more than one. Default: host.",
 )
+@add_bundle_options
 @click.option(
-    "--onefile/--no-onefile",
-    "onefile",
-    default=None,
-    help="Additionally pack the finished folder into a single file. With --python byo "
-    "that is an executable zip application: a /bin/sh preamble locating a CPython, "
-    "followed by a zip it can run directly -- no compiler involved. With --python own "
-    "it is a compiled launcher (Zig) carrying the whole folder, interpreter included, "
-    "as an appended compressed payload, which it unpacks into a cache directory the "
-    "first time it runs. Defaults to the entrypoint's own declaration, then to off: "
-    "the folder is the shape that can be inspected.",
+    "-l",
+    "--log-level",
+    type=click.Choice(list(logging._nameToLevel), case_sensitive=False),
+    help="Logging level to apply. Logs are emitted to stdout",
+    default="warning",
 )
-@click.option(
-    "--onefile-only",
-    is_flag=True,
-    default=False,
-    help="Delete the distribution folder once it has been packed, leaving only the "
-    "single file. Requires --onefile. For a job that publishes one artifact; without "
-    "it both are kept, and the folder is what stays debuggable.",
-)
-@click.option(
-    "--onefile-compression",
-    type=click.Choice(["xz", "gzip"]),
-    default=None,
-    help="How the single file's payload is compressed. 'xz' (the default) is the "
-    "smallest and the slowest to inflate on the target's first run, 'gzip' trades size "
-    "for that. Note a payload imported straight out of its zip -- a pure-Python --python "
-    "byo distribution -- is deflated either way, since that is what zipimport reads.",
-)
-@click.option(
-    "--onefile-compression-preset",
-    type=int,
-    default=None,
-    help="Compression preset (1-9 for gzip, 0-9 for xz). Defaults to 6. Higher values "
-    "reduce file size but increase compression time (paid at build time) and decompression "
-    "time (paid on target's first run).",
-)
-@click.option(
-    "--onefile-cache/--no-onefile-cache",
-    "onefile_cache",
-    default=None,
-    help="Whether a shape that has to extract itself reuses a previous extraction "
-    "found at its cache directory (the default) instead of always re-extracting. Set "
-    "SMELT_ONEFILE_VERBOSE=1 on the built artifact to see this decision at runtime.",
-)
-@click.option(
-    "--use-inittab/--no-use-inittab",
-    "use_inittab",
-    default=None,
-    help="With --python own, statically link smelt's own compiled extensions into the "
-    "interpreter (PyImport_AppendInittab) instead of shipping them as .so files -- "
-    "skips dlopen() and RPATH for those modules entirely. Off by default: this "
-    "replaces the interpreter's own entrypoint, and a bad build has no .so fallback "
-    "to fall back to. Still experimental.",
-)
-@click.option(
-    "--own-python-static/--no-own-python-static",
-    "own_python_static",
-    default=None,
-    help="With --python own, build one monolithic, static-PIE interpreter (no "
-    "libpythonX.Y.so) instead of the ordinary dynamic-libc/dynamic-libpython shape. "
-    "A statically linked interpreter has no working dlopen(), so every native module "
-    "has to be compiled into it: --own-python-static-module for standard library "
-    "accelerators, --use-inittab for smelt's own extension modules. Any .so left in "
-    "the finished folder fails the build, since it could not be imported on the "
-    "target machine. Off by default: the ordinary shape ships musl's own loader with "
-    "the interpreter and keeps dlopen() -- and third-party native modules -- working. "
-    "Verified only for --target x86_64-linux-musl.",
-)
-@click.option(
-    "--own-python-static-module",
-    "own_python_static_modules",
-    multiple=True,
-    help="With --own-python-static, compile a CPython stdlib module (e.g. '_socket', "
-    "'zlib') straight into the interpreter as a builtin, instead of the ordinary "
-    "lib-dynload/*.so dlopen() cannot actually load under this shape. Repeatable.",
-)
-@click.option(
-    "--no-version-guard",
-    is_flag=True,
-    default=False,
-    help="Omit the interpreter-version check from the generated entrypoint. Without "
-    "it, a mismatched interpreter fails with `can't find '__main__' module` instead of "
-    "a readable message, and the entrypoint can be shipped as bytecode.",
-)
-@click.option(
-    "--no-isolate",
-    is_flag=True,
-    default=False,
-    help="Omit the isolation guard from the generated entrypoint. Without it, running "
-    "the distribution without -I -S leaves the host's site-packages on sys.path behind "
-    "it, so a missing module can be silently supplied by the host.",
-)
-@click.option(
-    "--exclude-module",
-    "exclude_modules",
-    multiple=True,
-    help="Drop a module, and everything under it, from the distribution. For trees "
-    "discovery reached but that are not needed at runtime. Repeatable.",
-)
-@click.option(
-    "--drop-optional-imports/--keep-optional-imports",
-    "drop_optional_imports",
-    default=None,
-    help="Whether to leave out the modules only reachable through an import their own "
-    "importer already handles the failure of (`try: import x` / `except ImportError`). "
-    "None of them can raise an ImportError by being absent -- the module that wanted "
-    "them says so itself -- but what the fallback costs varies: dropping hashlib's "
-    "_hashlib saves 5 MB of statically linked OpenSSL and changes nothing observable, "
-    "while dropping ssl leaves urllib unable to speak HTTPS. Kept by default, and "
-    "listed in the build output either way, so the size on offer is visible before "
-    "the flag is used.",
-)
-@click.option(
-    "--include-distribution-metadata",
-    "include_distribution_metadata",
-    multiple=True,
-    help="Collect a distribution's *.dist-info metadata beyond those owning a shipped "
-    "module. Needed when importlib.metadata is queried for a package whose modules are "
-    "not themselves shipped. Repeatable.",
-)
-@click.option(
-    "--include-module",
-    "include_modules",
-    multiple=True,
-    help="Force a module into the distribution, on top of what discovery finds. For "
-    "modules imported dynamically, which static analysis cannot see. Repeatable.",
-)
-@click.option(
-    "--include-package",
-    "include_packages",
-    multiple=True,
-    help="Force a whole package (every module it contains, recursively) into the "
-    "distribution. The answer for a package that loads its own internals dynamically. "
-    "Repeatable.",
-)
-@click.option(
-    "--include-package-data",
-    "include_package_data",
-    multiple=True,
-    help="Collect a package's data files into the distribution. Syntax: "
-    "PACKAGE[:PATTERN,...] (e.g. 'mypkg' or 'mypkg:*.json,*.yaml'). Repeatable, and "
-    "additive over the entrypoint's own include-package-data declaration.",
-)
-@add_logging_option
-@click.option("-r", "--report", type=str, default=None, help="Produces a report at the given path")
+@click.option("--report", type=str, default=None, help="Write a report to the given path.")
 @wrap_smelt_errors()
-def build_dist_folder(
-    package_path: PathExists,
+def bundle(
+    *,
+    project: PathExists,
     entrypoint: str | None,
     output_dir: Path,
-    optimize: Literal[0, 1, 2] | None,
     no_build: bool,
-    discovery: Literal["static", "trace", "both"] | None,
-    dist_python: Literal["byo", "own"] | None,
-    target_platforms: tuple[str, ...],
-    own_python_version: str | None,
-    tailor_interpreter: bool | None,
-    drop_stdlib_groups: tuple[str, ...],
-    onefile: bool | None,
-    onefile_only: bool,
-    onefile_compression: Literal["xz", "gzip", "none"] | None,
-    onefile_compression_preset: int | None,
-    onefile_cache: bool | None,
-    use_inittab: bool | None,
-    own_python_static: bool | None,
-    own_python_static_modules: tuple[str, ...],
-    no_version_guard: bool,
-    no_isolate: bool,
-    exclude_modules: tuple[str, ...],
-    drop_optional_imports: bool | None,
-    include_distribution_metadata: tuple[str, ...],
-    include_modules: tuple[str, ...],
-    include_packages: tuple[str, ...],
-    include_package_data: tuple[str, ...],
-    logging_level: str,
+    targets: tuple[tuple[str, ...], ...],
+    log_level: str,
     report: str | None,
+    **flags: object,
 ) -> None:
     """
-    Assembles a distribution folder for an entrypoint: smelt-built extensions plus
-    every other module it imports, shipped as bytecode.
+    Assembles a bundle for an entrypoint: smelt-built extensions plus every other
+    module it imports, shipped as bytecode.
 
     With `--python byo` (the default) the result runs on any machine with a matching
-    CPython already installed. With `--python own` the interpreter is built and
-    shipped inside the folder too, which then runs on a machine with no Python at all.
-    Instructions are printed at the end of the run and written into the folder.
+    CPython installed. With `--python own` the interpreter is built and shipped in the
+    folder too, which then runs on a machine with no Python at all. Every flag except
+    the ones above has a [tool.smelt.bundle] key of the same name and overrides it.
+    Run instructions are printed at the end and written into the folder.
     """
-    levelno = logging._nameToLevel[logging_level]
-    logging.basicConfig(level=levelno)
+    logging.basicConfig(level=logging._nameToLevel[log_level])
     try:
-        with (package_path / "pyproject.toml").open("rb") as f:
+        with (project / "pyproject.toml").open("rb") as f:
             toml_data = tomllib.load(f)
     except FileNotFoundError:
         error_exit("No pyproject.toml found in passed folder")
-    config = parse_config_from_pyproject(toml_data, project_root=package_path)
+    config = parse_config_from_pyproject(toml_data, project_root=project)
     config.load_env()
-    path_solver = config.get_path_solver(project_root=package_path)
+    path_solver = config.get_path_solver(project_root=project)
 
+    cli_settings = settings_from_params(flags)
     entrypoint_spec = resolve_entrypoint_spec(config, entrypoint)
-    bundle_settings = resolve_bundle(config.entrypoints[entrypoint_spec])
-    resolved_targets = resolve_target_platforms(target_platforms)
-    # Checked once for the whole list, before any build starts -- a later platform
+    resolved = resolve_bundle(config.entrypoints[entrypoint_spec], cli_settings)
+    validate_bundle(resolved)
+    requested_targets = tuple(target for group in targets for target in group)
+    resolved_targets = resolve_target_platforms(requested_targets)
+    # Checked once for the whole list, before any build starts -- a later target
     # failing the allowlist must not leave earlier ones half-built.
-    assert_supported_platforms(bundle_settings.supported_targets, resolved_targets)
-    # Whether a target was explicitly requested rather than left to the bare default --
-    # not the same as `resolved_targets != [None]`: an explicit "host" still resolves
-    # to `None`, but was still asked for by name, and gets the same nested output as
-    # any other explicit platform.
-    explicit_targets = bool(target_platforms)
+    assert_supported_platforms(resolved.supported_targets, resolved_targets)
+    nested = len(resolved_targets) > 1
 
     for target in resolved_targets:
         target_label = target or _host_label()
-        target_output_dir = output_dir / target_label if explicit_targets else output_dir
         dist_report = build_dist(
             config,
             entrypoint=entrypoint,
-            output_dir=target_output_dir,
+            output_dir=output_dir / target_label if nested else output_dir,
             path_solver=path_solver,
-            optimize=optimize,
             stdout="stdout",
             build_extensions=not no_build,
-            discovery=discovery,
-            python=dist_python,
             target_platform=target,
-            own_python_version=own_python_version,
-            tailor_interpreter=tailor_interpreter,
-            drop_stdlib_groups=drop_stdlib_groups,
-            guard_version=False if no_version_guard else None,
-            isolate=False if no_isolate else None,
-            exclude_modules=exclude_modules,
-            drop_optional_imports=drop_optional_imports,
-            include_distribution_metadata=include_distribution_metadata,
-            include_modules=include_modules,
-            include_packages=include_packages,
-            include_package_data=include_package_data,
-            onefile=onefile,
-            onefile_only=onefile_only,
-            onefile_compression=onefile_compression,
-            onefile_compression_preset=onefile_compression_preset,
-            onefile_cache=onefile_cache,
-            use_inittab=use_inittab,
-            own_python_static=own_python_static,
-            own_python_static_modules=own_python_static_modules,
+            overrides=cli_settings,
         )
         click.echo(dist_report.render())
         click.echo("")
         click.echo(run_instructions(dist_report))
         if report is not None:
             report_path = Path(report)
-            if explicit_targets:
+            if nested:
                 report_path = report_path.with_stem(f"{report_path.stem}-{target_label}")
             report_path.write_text(dist_report.render())
 

@@ -2,7 +2,7 @@
 
 A *bundler* takes a Python application and turns it into something that runs on a target machine without a separate install step - PyInstaller, Nuitka's standalone mode, and PyOxidizer are existing examples of tools that do this in the Python ecosystem.
 
-Smelt is both a build backend (compiling native extensions - see [Get Started](get-started.md)) and a bundler: `smelt build-dist` assembles a standalone distribution out of a `[project.scripts]` entrypoint, reusing whichever of Smelt's own compile backends (mypyc, Cython, Nuitka, handwritten C/Zig) the rest of the project already declares.
+Smelt is both a build backend (compiling native extensions - see [Get Started](get-started.md)) and a bundler: `smelt bundle` assembles a standalone distribution out of a `[project.scripts]` entrypoint, reusing whichever of Smelt's own compile backends (mypyc, Cython, Nuitka, handwritten C/Zig) the rest of the project already declares.
 
 ## A minimal example
 
@@ -41,11 +41,11 @@ No native extensions declared here - the entrypoint is plain Python, so the dist
 
 ## Building it
 
-Install Smelt's CLI extra and run `build-dist`:
+Install Smelt's CLI extra and run `smelt bundle`:
 
 ```
 $ pip install "smelt[cli]"
-$ smelt build-dist
+$ smelt bundle
 ```
 
 This produces `dist/greet.dist/` - named after the `greet` entrypoint, not the package:
@@ -69,7 +69,7 @@ Hello from a standalone binary!
 Add `--python own` to also build and bundle a CPython interpreter inside the folder, so it runs on a machine with no Python installed at all:
 
 ```
-$ smelt build-dist --python own
+$ smelt bundle --python own
 $ ./dist/greet.dist/greet
 Hello from a standalone binary!
 ```
@@ -79,4 +79,4 @@ The first such build compiles that interpreter, which takes a few minutes; later
 ## Where to go next
 
 * **[Overview](bundler-overview.md)** - what the bundler actually does under the hood, and how it compares to PyInstaller, Nuitka's standalone mode, and PyOxidizer.
-* **[Reference](bundler-reference.md)** - the full `build-dist` option list.
+* **[Reference](bundler-reference.md)** - the full `smelt bundle` option list.
