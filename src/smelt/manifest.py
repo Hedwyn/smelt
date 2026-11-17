@@ -31,13 +31,15 @@ from smelt.utils import ImportPath, PathExists, PathSolver, get_module_name, pat
 MANIFEST_MODULE_NAME: Final[str] = "_smelt_manifest"
 
 
-def _render_manifest_module(modules: dict[ImportPath, Backend], archs: Iterable[str] | None) -> str:
+def _render_manifest_module(modules: dict[ImportPath, Backend], supported_targets: Iterable[str] | None) -> str:
     entries = ",\n".join(
         f'    "{import_path}": "{backend.value}"'
         for import_path, backend in sorted(modules.items())
     )
     body = f"{entries}\n" if entries else ""
-    archs_literal = "None" if archs is None else repr(tuple(sorted(archs)))
+    targets_literal = (
+        "None" if supported_targets is None else repr(tuple(sorted(supported_targets)))
+    )
     return (
         '"""\n'
         "Smelt build manifest -- generated, do not edit.\n"
@@ -51,7 +53,7 @@ def _render_manifest_module(modules: dict[ImportPath, Backend], archs: Iterable[
         "\n"
         f"MODULES: dict[str, str] = {{\n{body}}}\n"
         "\n"
-        f"ARCHS: tuple[str, ...] | None = {archs_literal}\n"
+        f"SUPPORTED_TARGETS: tuple[str, ...] | None = {targets_literal}\n"
     )
 
 
@@ -59,7 +61,7 @@ def write_manifest_module(
     compiled_backends: dict[ImportPath, Backend],
     path_solver: PathSolver,
     *,
-    archs: Iterable[str] | None = None,
+    supported_targets: Iterable[str] | None = None,
 ) -> list[Path]:
     """
     Writes `_smelt_manifest.py` into every package root (`path_solver.known_roots`)
@@ -67,10 +69,10 @@ def write_manifest_module(
     package's own wheel next to its `__init__.py`. A root with nothing to declare
     gets no file at all. Returns the paths written.
 
-    `archs` is this build's own `SmeltConfig.archs` (the CPU architectures this
-    package's native code claims to support, `None` meaning unrestricted) -- written
-    into every generated manifest alongside `MODULES` unchanged, so
-    `read_manifest_archs` can tell a downstream cross-build not to attempt a target
+    `supported_targets` is this build's own `[tool.smelt] supported-targets` (Zig-triple
+    patterns this package's native code claims to support, `None` meaning
+    unrestricted) -- written into every generated manifest alongside `MODULES`
+    unchanged, so `read_manifest_supported_targets` can tell a downstream cross-build not to attempt a target
     this package never claimed to support, instead of it failing deep inside a
     backend-specific compile step.
     """
@@ -84,7 +86,7 @@ def write_manifest_module(
         if not under_root:
             continue
         dest = root_path / f"{MANIFEST_MODULE_NAME}.py"
-        dest.write_text(_render_manifest_module(under_root, archs))
+        dest.write_text(_render_manifest_module(under_root, supported_targets))
         written.append(dest)
     return written
 
@@ -116,15 +118,18 @@ def read_manifest_module(top_level_package: str) -> dict[ImportPath, Backend] | 
         return None
 
 
-def read_manifest_archs(top_level_package: str) -> tuple[str, ...] | None:
+def read_manifest_supported_targets(top_level_package: str) -> tuple[str, ...] | None:
     """
-    Reads back the `archs` a manifest was written with (see `write_manifest_module`)
-    for the installed top-level package `top_level_package`.
+    Reads back the `supported-targets` a manifest was written with (see
+    `write_manifest_module`) for the installed top-level package `top_level_package`.
+
+    Manifests written before `supported-targets` existed carry `ARCHS` (CPU
+    architecture names) instead; each is read as the pattern `<arch>-*`.
 
     `None` covers three cases a caller does not need to tell apart -- no manifest at
-    all, a manifest predating this field (`ARCHS` absent, via `getattr`'s default),
-    or an explicit `ARCHS = None` (unrestricted) -- all three mean the same thing to
-    a caller deciding whether to attempt a build: nothing says not to.
+    all, a manifest declaring neither field, or an explicit `None` (unrestricted) --
+    all of which mean the same thing to a caller deciding whether to attempt a build:
+    nothing says not to.
     """
     qualified = f"{top_level_package}.{MANIFEST_MODULE_NAME}"
     try:
@@ -135,8 +140,11 @@ def read_manifest_archs(top_level_package: str) -> tuple[str, ...] | None:
         return None
     try:
         module = importlib.import_module(qualified)
+        targets = getattr(module, "SUPPORTED_TARGETS", None)
+        if targets is not None:
+            return tuple(targets)
         archs = getattr(module, "ARCHS", None)
-        return tuple(archs) if archs is not None else None
+        return tuple(f"{arch}-*" for arch in archs) if archs is not None else None
     except Exception:
         return None
 

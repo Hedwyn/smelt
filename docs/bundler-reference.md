@@ -33,12 +33,12 @@ Every key has a flag named after it: `[tool.smelt.bundle.<group>] <key>` becomes
 | `-p, --project` | Project folder, holding a `pyproject.toml`. Defaults to `.`. |
 | `-e, --entrypoint` | Entrypoint to bundle. Can be omitted when the project declares a single one. |
 | `-o, --output-dir` | Folder the bundle is assembled in. Defaults to `./dist`. |
-| `-t, --target` | Zig target triple(s), comma-separated or repeated, and/or `host`. One bundle is built per target; the output is `<output-dir>/<script>.dist` for a single target and `<output-dir>/<target>/<script>.dist` when several are built. Defaults to `host`. |
+| `-t, --target` | Zig target triple(s), comma-separated or repeated, and/or `host`. One bundle is built per target; the output is `<output-dir>/<script>.dist` for a single target and `<output-dir>/<target>/<script>.dist` when several are built. Defaults to the concrete triples of the most specific `supported-targets` declared, else `host`. |
 | `--no-build` | Skip the extension build and reuse the artifacts already on disk. |
 | `-l, --log-level` | Logging level; logs go to stdout. |
 | `--report` | Write a build report to this path. |
 
-`supported-targets` (accepted at `[tool.smelt.bundle]` and entrypoint level) restricts what `-t` may request; it has no flag of its own.
+`supported-targets` (accepted at `[tool.smelt]`, `[tool.smelt.bundle]` and entrypoint level) is a list of Zig-triple patterns (`x86_64-linux-*`, `*-linux-musl`) or `host`. It has no flag of its own. A target is allowed only if it matches every level that declares the key, so a lower level can only narrow the one above. A requested target outside it is an error, before anything is built. Without `-t`, the concrete triples (no wildcard) of the most specific declaring level are built; if it only has patterns, or nothing is declared, `host` is built.
 
 ## General
 

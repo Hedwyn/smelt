@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -61,11 +60,11 @@ from smelt.nuitkaify import (
 )
 from smelt.own_python import (
     TargetPythonHeaders,
-    host_zig_arch,
     resolve_own_python_version,
     target_python_headers_for,
     target_sysconfigdata_for,
 )
+from smelt.targets import host_triple, matches
 from smelt.utils import (
     GenericExtension,
     ImportPath,
@@ -1113,25 +1112,14 @@ def run_backend(
     no cross-compile story today, so it raises
     rather than silently emitting a host-arch binary mislabeled as the target's.
     """
-    local_platform = platform.system().lower()
-    if (platforms := config.platforms) is not None and local_platform not in platforms:
+    build_target = crosscompile.get_triple_name() if crosscompile is not None else host_triple()
+    if (supported := config.supported_targets) is not None and not matches(build_target, supported):
         if stdout is None:
             return BackendResult([])
         printer = _logger.info if stdout == "logger" else print
         printer(
-            f"Running on {local_platform}, build hook is restricted to {platforms}, skipping extension building"
-        )
-        return BackendResult([])
-
-    build_arch = (
-        crosscompile.value.partition("-")[0] if crosscompile is not None else host_zig_arch()
-    )
-    if (archs := config.archs) is not None and build_arch not in archs:
-        if stdout is None:
-            return BackendResult([])
-        printer = _logger.info if stdout == "logger" else print
-        printer(
-            f"Building for {build_arch!r}, build hook is restricted to {archs}, skipping extension building"
+            f"Building for {build_target!r}, not in supported-targets {supported}, "
+            "skipping extension building"
         )
         return BackendResult([])
 
@@ -1371,7 +1359,9 @@ def run_backend(
                     no_cache=no_cache,
                 )
 
-    manifest_modules = write_manifest_module(compiled_backends, path_solver, archs=config.archs)
+    manifest_modules = write_manifest_module(
+        compiled_backends, path_solver, supported_targets=config.supported_targets
+    )
     return BackendResult(
         built_artifacts,
         static_modules,

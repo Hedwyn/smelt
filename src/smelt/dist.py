@@ -59,7 +59,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Final, Iterable, Iterator, Literal, Mapping
+from typing import Final, Iterable, Iterator, Literal, Mapping, Sequence
 
 from smelt.backend import (
     collect_built_artifacts,
@@ -154,6 +154,13 @@ from smelt.own_python import (
 )
 from smelt.process import call_command
 from smelt.static_python import build_static_interpreter
+from smelt.targets import (
+    HOST,
+    as_build_targets,
+    check_target,
+    default_build_set,
+    host_triple,
+)
 from smelt.utils import (
     ImportPath,
     PathExists,
@@ -771,19 +778,24 @@ def package_data_from_cli(specs: Iterable[str]) -> dict[str, list[str]]:
     return table
 
 
-def resolve_target_platforms(target_platforms: Iterable[str] = ()) -> list[str | None]:
+def resolve_target_platforms(
+    target_platforms: Iterable[str] = (),
+    supported_targets: Sequence[TargetLevel] = (),
+) -> list[str | None]:
     """
     Platform(s) to build for -- drives the `python = "own"` interpreter build and
     `isolated-build`'s native-dependency reinstall alike, since there is no build
     where those would sensibly target different platforms: `target_platforms` where
-    the caller passed any, else a single native build. The literal `"host"` resolves
-    to `None`, the sentinel every cross-aware step downstream already treats as
-    "native, no zig -target flag" (see `own_python.DEFAULT_OWN_PYTHON_TARGET`).
+    the caller passed any, else the default build set of `supported_targets` (see
+    `smelt.targets.default_build_set`). The host -- the literal `"host"`, or its own
+    triple -- resolves to `None`, the sentinel every cross-aware step downstream
+    already treats as "native, no zig -target flag" (see
+    `own_python.DEFAULT_OWN_PYTHON_TARGET`).
     """
     declared = list(target_platforms)
     if not declared:
-        return [None]
-    return [None if platform == "host" else platform for platform in declared]
+        return default_build_set(supported_targets)
+    return as_build_targets(declared)
 
 
 def assert_supported_platforms(
@@ -791,20 +803,19 @@ def assert_supported_platforms(
     resolved_target_platforms: Iterable[str | None],
 ) -> None:
     """
-    Fails fast -- before any build starts -- for a resolved target outside the
-    `supported-targets` of any level declaring them. `None` ("host") is always
-    implicitly allowed; with no level declaring any, everything is accepted.
+    Fails fast -- before any build starts -- for a resolved target (`None` meaning the
+    host) that does not match the `supported-targets` patterns of every level
+    declaring them. With no level declaring any, everything is accepted.
     """
     levels = list(supported_targets)
     for target in resolved_target_platforms:
-        if target is None:
-            continue
-        for level in levels:
-            if target not in level.patterns:
-                raise DistError(
-                    f"Target platform {target!r} is not in the supported-targets "
-                    f"{list(level.patterns)!r} declared by {level.source}."
-                )
+        refused_by = check_target(target, levels)
+        if refused_by is not None:
+            raise DistError(
+                f"Target platform {target or host_triple()!r} does not match the "
+                f"supported-targets {list(refused_by.patterns)!r} declared by "
+                f"{refused_by.source}."
+            )
 
 
 def assert_no_version_skew(
@@ -1881,9 +1892,8 @@ def build_dist(
     for: it drives both the `"own"` interpreter build below and `isolated_build`'s
     native-dependency reinstall further down alike, since a build has no use for
     picking a different one for each. A caller that only has a raw, possibly
-    multi-valued or `"host"`-containing list (e.g. an entrypoint's own
-    `target` declaration) should resolve it with `resolve_target_platforms`
-    first, and build once per resolved entry -- `smelt bundle` does exactly that.
+    multi-valued or `"host"`-containing list should resolve it with
+    `resolve_target_platforms` first, and build once per resolved entry -- `smelt bundle` does exactly that.
 
     `python` selects which interpreter the distribution runs on (see `DistPython`),
     defaulting the same way. `"own"` builds one through `smelt.own_python` -- for
@@ -2046,16 +2056,10 @@ def build_dist(
     # that block still reads this via the `target` local it assigns from it. Also
     # what `isolated_build` reinstalls native dependencies for, further down: one
     # target drives both, see `resolve_target_platforms`'s own doc for why.
+    # `None` is the host: the default build set is `smelt bundle`'s to resolve.
     declared_target_platforms = resolve_target_platforms(
-        (target_platform,) if target_platform is not None else ()
+        (target_platform,) if target_platform is not None else (HOST,)
     )
-    if len(declared_target_platforms) != 1:
-        raise DistError(
-            "This entrypoint declares multiple targets "
-            f"{declared_target_platforms!r}; build_dist builds one platform per call -- "
-            "pass target_platform explicitly, or use `smelt bundle`/`smelt "
-            "compile-module`, which loop over all of them."
-        )
     assert_supported_platforms(bundle.supported_targets, declared_target_platforms)
     (resolved_target_platform,) = declared_target_platforms
     # `run_backend`'s own `crosscompile` is the narrower, Zig-target-spelled enum its

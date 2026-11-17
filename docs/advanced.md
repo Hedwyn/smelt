@@ -9,10 +9,10 @@ Smelt provides experimental support for cross-compiling native extensions, lever
 Cross-compilation is driven by the `-t/--target` option of [`smelt compile-module`](cli.md#other-commands):
 
 ```
-smelt compile-module my_project.hello --backend nuitka --target aarch64-linux
+smelt compile-module my_project.hello --backend nuitka --target aarch64-linux-gnu
 ```
 
-A comma-separated list compiles the module once per platform, each nested under its own `<platform>/` folder (e.g. `--target aarch64-linux,arm-linux-gnueabihf`).
+A comma-separated list compiles the module once per platform, each nested under its own `<triple>/` folder (e.g. `--target aarch64-linux-gnu,arm-linux-gnueabihf`).
 
 Under the hood this passes `-target <triple>` to `zig cc`/`zig build-lib`, the same mechanism Zig itself uses for cross-compiling C/C++ code.
 

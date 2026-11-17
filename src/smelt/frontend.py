@@ -51,6 +51,7 @@ from smelt.dist import (
     validate_bundle,
 )
 from smelt.own_python import target_python_headers_for
+from smelt.targets import HOST, as_build_targets
 from smelt.utils import (
     ImportPath,
     PathExists,
@@ -128,24 +129,6 @@ class CliCommaSeparated(ParamType):
         _ = param
         _ = ctx
         return tuple(item.strip() for item in value.split(",") if item.strip())
-
-
-class CliCommaSeparatedChoice(ParamType):
-    """
-    Comma-separated `click.Choice`: parses e.g. `-t a,b,c` into a tuple, validating
-    each item against `choices` the same way `click.Choice` would for a single value.
-    """
-
-    def __init__(self, choices: Iterable[str]) -> None:
-        self.choices = list(choices)
-        self.name = "|".join(self.choices)
-
-    def convert(self, value: str, param: Parameter | None, ctx: Context | None) -> tuple[str, ...]:
-        items = tuple(item.strip() for item in value.split(",") if item.strip())
-        for item in items:
-            if item not in self.choices:
-                self.fail(f"{item!r} is not one of {self.choices!r}", param, ctx)
-        return items
 
 
 class CliEmbedFile(ParamType):
@@ -349,7 +332,8 @@ def build_standalone_binary(
     help="Platform(s) to bundle for: a comma-separated list of Zig target triples "
     "(e.g. 'x86_64-linux-musl') and/or 'host' for a native build. Repeatable. One "
     "bundle is built per target, nested under <output-dir>/<target>/ when there is "
-    "more than one. Default: host.",
+    "more than one. Default: the concrete triples of the most specific "
+    "`supported-targets` declared, else host.",
 )
 @add_bundle_options
 @click.option(
@@ -397,7 +381,7 @@ def bundle(
     resolved = resolve_bundle(config.entrypoints[entrypoint_spec], cli_settings)
     validate_bundle(resolved)
     requested_targets = tuple(target for group in targets for target in group)
-    resolved_targets = resolve_target_platforms(requested_targets)
+    resolved_targets = resolve_target_platforms(requested_targets, resolved.supported_targets)
     # Checked once for the whole list, before any build starts -- a later target
     # failing the allowlist must not leave earlier ones half-built.
     assert_supported_platforms(resolved.supported_targets, resolved_targets)
@@ -461,17 +445,18 @@ def nuitkaify(entrypoint_path: ImportPath, logging_level: str) -> None:
     "-t",
     "--target",
     "target_platforms",
-    type=CliCommaSeparatedChoice(["host", *(platform.value for platform in SupportedPlatforms)]),
-    default="",
-    help="Platform(s) to cross-compile the module for: a comma-separated list. One "
-    "compiled extension is built per platform, nested under a <platform>/ folder "
+    type=CliCommaSeparated(),
+    multiple=True,
+    help="Platform(s) to cross-compile the module for: Zig target triples "
+    "(e.g. 'aarch64-linux-gnu') and/or 'host', comma-separated. Repeatable. One "
+    "compiled extension is built per platform, nested under a <triple>/ folder "
     "whenever this flag is passed explicitly. Defaults to a single native build.",
 )
 @wrap_smelt_errors()
 def compile_module(
     module_import_path: ImportPath,
     backend: Literal["mypyc", "nuitka", "cython"],
-    target_platforms: tuple[str, ...],
+    target_platforms: tuple[tuple[str, ...], ...],
 ) -> None:
     """
     Standalone command to run the nuitka wrapper in this package.
@@ -500,8 +485,12 @@ def compile_module(
     # `generic_ext` (the transpiled/translated source) is target-independent -- built
     # once above regardless of how many platforms are requested; only the actual
     # compile step below runs once per platform.
-    for platform_value in target_platforms or ("host",):
-        target_platform = SupportedPlatforms(platform_value) if platform_value != "host" else None
+    requested = [target for group in target_platforms for target in group]
+    for build_target in as_build_targets(requested) if requested else [None]:
+        target_platform = (
+            SupportedPlatforms.from_triple(build_target) if build_target is not None else None
+        )
+        platform_value = build_target or HOST
         py_headers = (
             target_python_headers_for(target_platform.get_triple_name())
             if target_platform is not None
@@ -509,7 +498,7 @@ def compile_module(
         )
         dest_folder = (
             generic_ext.dest_folder / platform_value
-            if target_platforms
+            if requested
             else generic_ext.dest_folder
         )
         dest_folder.mkdir(parents=True, exist_ok=True)

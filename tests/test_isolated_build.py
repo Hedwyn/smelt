@@ -216,7 +216,7 @@ def test_resolve_target_platforms_defaults_to_host_and_maps_host_to_none() -> No
 def test_assert_supported_platforms_rejects_a_target_outside_the_allowlist() -> None:
     levels = (TargetLevel("[tool.smelt.bundle]", ("aarch64-linux-gnu",)),)
     assert_supported_platforms(levels, ["aarch64-linux-gnu"])
-    assert_supported_platforms(levels, [None])  # host always allowed
+    assert_supported_platforms((), [None])  # nothing declared: host allowed
     with pytest.raises(DistError, match=r"\[tool.smelt.bundle\]"):
         assert_supported_platforms(levels, ["x86_64-linux-musl"])
 

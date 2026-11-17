@@ -216,11 +216,8 @@ class ProjectConfig:
     """The `[tool.smelt]` table."""
 
     package_dirs: dict[str, str] = field(default_factory=dict)
-    #: Zig-triple patterns; wired to the builds by the target unification.
+    #: Zig-triple patterns: native builds for other targets are skipped.
     supported_targets: list[str] | None = None
-    #: Pre-unification restrictions, still honored until `supported_targets` replaces them.
-    platforms: list[str] | None = None
-    archs: list[str] | None = None
     extensions: ExtensionsConfig = field(default_factory=ExtensionsConfig)
     executables: ExecutablesConfig = field(default_factory=ExecutablesConfig)
     bundle: BundleConfig = field(default_factory=BundleConfig)
@@ -453,6 +450,20 @@ def _negate(value: TomlValue) -> TomlValue:
     return (not value) if isinstance(value, bool) else value
 
 
+def _os_names_to_targets(value: TomlValue) -> TomlValue:
+    """`platforms = ["linux"]` -> `["*-linux-*"]`."""
+    if not isinstance(value, list):
+        return value
+    return [f"*-{'macos' if name == 'darwin' else name}-*" for name in value]
+
+
+def _archs_to_targets(value: TomlValue) -> TomlValue:
+    """`archs = ["x86_64"]` -> `["x86_64-*"]`."""
+    if not isinstance(value, list):
+        return value
+    return [f"{arch}-*" for arch in value]
+
+
 _REPORT_NOTE = "per-run settings are no longer read from pyproject.toml; use "
 
 ALIASES: tuple[Alias, ...] = (
@@ -486,6 +497,8 @@ ALIASES: tuple[Alias, ...] = (
         ("nuitka-binary", "entrypoints", "*", "package-data"),
         _package_data_from_specs,
     ),
+    Alias(("platforms",), ("supported-targets",), _os_names_to_targets),
+    Alias(("archs",), ("supported-targets",), _archs_to_targets),
     # Never functional.
     Alias(("mypyc_options",), None, note="it was never read"),
     Alias(("cython_options",), None, note="it was never read"),

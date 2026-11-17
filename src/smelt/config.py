@@ -231,18 +231,6 @@ class SmeltConfig:
     c_extensions: list[NativeExtension] = field(default_factory=list)
     zig_modules: list[ZigModule] = field(default_factory=list)
     zig_executables: list[ZigExecutable] = field(default_factory=list)
-    platforms: list[str] | None = None
-    #: CPU-architecture counterpart to `platforms`, restricting `run_backend` to
-    #: build only for the listed Zig-spelled architectures (e.g. `["x86_64",
-    #: "aarch64"]`) -- checked against the cross target's own arch when `run_backend`
-    #: is given one, or this machine's own arch for a native build (see
-    #: `smelt.own_python.host_zig_arch`). Skipped (not failed) the same way `platforms`
-    #: is, and -- unlike `platforms` -- also written into the built package's own
-    #: manifest (`smelt.manifest.write_manifest_module`), so a downstream project
-    #: cross-compiling *this* package as a dependency (`smelt.isolated_build.
-    #: rebuild_manifested_extensions`) can see the restriction too, instead of
-    #: attempting (and failing) a build this package never claimed to support.
-    archs: list[str] | None = None
     #: Declared `supported-targets` of `[tool.smelt]` (Zig-triple patterns).
     supported_targets: list[str] | None = None
     #: Declared bundler levels per entrypoint, keyed by `module.path:func` spec: the
@@ -407,8 +395,6 @@ class SmeltConfig:
                     extras=e.extras,
                 ),
             ),
-            platforms=schema.platforms,
-            archs=schema.archs,
             supported_targets=schema.supported_targets,
             entrypoints=entrypoints,
             nuitka_binary=nuitka_binary,

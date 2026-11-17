@@ -299,9 +299,9 @@ def is_windows_zig_target(zig_target: str | None) -> bool:
 #: target triple's own leading component. Mirrors meta-python's own (private)
 #: `metapython.pyconfig._UNAME_TO_ZIG_ARCH` -- kept as a small local copy rather than
 #: reaching across the package boundary for a name that isn't part of its public API.
-#: Public (unlike that one): `smelt.backend`/`smelt.isolated_build` also need it, to
-#: compare a build's *own* host arch against `SmeltConfig.archs`/a manifest's `ARCHS`
-#: (see `host_zig_arch`), not just meta-python's cross-vs-native distinction below.
+#: Public (unlike that one): `smelt.targets` also needs it, to name this machine's
+#: Zig triple (see `host_zig_arch`), not just meta-python's cross-vs-native
+#: distinction below.
 UNAME_TO_ZIG_ARCH: Final[dict[str, str]] = {
     "amd64": "x86_64",
     "arm64": "aarch64",
