@@ -844,3 +844,55 @@ def test_supported_targets_are_never_merged() -> None:
         ("[tool.smelt]", ("*-linux-*", "*-macos-*")),
         ("[tool.smelt.bundle]", ("x86_64-linux-*",)),
     ]
+
+
+def _musl_bundle(tmp_path: Path, name: str, config: SmeltConfig) -> DistReport:
+    package = tmp_path / "src" / name
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_text("")
+    (package / "cli.py").write_text("def main() -> int:\n    return 0\n")
+    return build_dist(
+        config,
+        output_dir=tmp_path / "out",
+        path_solver=config.get_path_solver(project_root=tmp_path),
+        discovery="static",
+        target_platform="x86_64-linux-musl",
+    )
+
+
+def test_bundle_without_modules_to_compile_skips_the_backend_for_any_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Extension cross-compilation covers fewer targets than the bundler. A project
+    declaring nothing to compile must not need it: no backend run, no target check.
+    """
+    import smelt.dist
+
+    def no_backend(*args: object, **kwargs: object) -> None:
+        raise AssertionError("run_backend must not run for a project with nothing to compile")
+
+    monkeypatch.setattr(smelt.dist, "run_backend", no_backend)
+    name = "muslpure"
+    config = SmeltConfig(
+        packages_location={name: f"src/{name}"},
+        entrypoints={f"{name}.cli:main": {}},
+    )
+    report = _musl_bundle(tmp_path, name, config)
+    assert any(report.payload_root.rglob("cli*.pyc"))
+
+
+def test_bundle_with_modules_to_compile_rejects_an_unsupported_cross_target(
+    tmp_path: Path,
+) -> None:
+    from smelt.config import MypycModule
+    from smelt.dist import DistError
+
+    name = "muslcompiled"
+    config = SmeltConfig(
+        packages_location={name: f"src/{name}"},
+        mypyc_modules=[MypycModule(assert_is_valid_import_path(f"{name}.cli"))],
+        entrypoints={f"{name}.cli:main": {}},
+    )
+    with pytest.raises(DistError, match="can only cross-compile extensions for"):
+        _musl_bundle(tmp_path, name, config)

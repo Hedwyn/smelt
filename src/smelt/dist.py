@@ -2065,18 +2065,22 @@ def build_dist(
     )
     assert_supported_platforms(bundle.supported_targets, declared_target_platforms)
     (resolved_target_platform,) = declared_target_platforms
-    # `run_backend`'s own `crosscompile` is the narrower, Zig-target-spelled enum its
-    # compile primitives take (see `SupportedPlatforms.from_triple`'s own doc) --
-    # raises for a target outside today's 3 supported members (e.g. musl, Windows,
-    # macOS): `run_backend` cross-compiling extensions does not extend there yet,
-    # unlike interpreter/wheel targeting elsewhere in this function. Only resolved
-    # when `run_backend` actually runs, so such targets stay usable with
-    # `build_extensions=False` (wheel-based isolated builds).
-    backend_crosscompile = (
-        SupportedPlatforms.from_triple(resolved_target_platform)
-        if resolved_target_platform is not None and build_extensions
-        else None
-    )
+    # Extension cross-compilation only covers the `SupportedPlatforms` triples (no musl,
+    # Windows or macOS yet), while the interpreter and wheel fetching cover more. So
+    # `run_backend` only runs when the project actually declares modules to compile:
+    # a project with none bundles for any target the interpreter build supports.
+    compile_modules = build_extensions and config.declares_compiled_modules()
+    backend_crosscompile: SupportedPlatforms | None = None
+    if compile_modules and resolved_target_platform is not None:
+        try:
+            backend_crosscompile = SupportedPlatforms.from_triple(resolved_target_platform)
+        except SmeltError as exc:
+            supported = ", ".join(member.get_triple_name() for member in SupportedPlatforms)
+            raise DistError(
+                f"Cannot bundle for {resolved_target_platform!r}: this project declares "
+                "modules to compile ([tool.smelt.extensions]), and smelt can only "
+                f"cross-compile extensions for {supported}."
+            ) from exc
     # Auto-discovery (`run_backend(static_link=True)`)
     # only kicks in when the caller left `static_modules` for us to fill in ourselves --
     # one who hand-supplies it already did their own eligibility judgment, and gets the
@@ -2084,7 +2088,7 @@ def build_dist(
     auto_static_link = resolved_use_inittab and resolved_python == "own" and not static_modules
     static_build_dir: Path | None = None
 
-    if build_extensions:
+    if compile_modules:
         # `without_entrypoint`: the native artifacts are what is wanted here, not a
         # Nuitka-compiled binary of the entrypoint -- this pipeline is the alternative
         # to that one, not a step of it.

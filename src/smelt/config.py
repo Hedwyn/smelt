@@ -408,6 +408,22 @@ class SmeltConfig:
             dependencies=project_dependencies or [],
         )
 
+    def declares_compiled_modules(self) -> bool:
+        """
+        Whether a build of this project compiles any Python module: declared
+        extensions, or modules auto mode picks up. Zig executables are not counted:
+        they are wheel scripts, not importable modules.
+        """
+        return self.auto_mode != "off" or any(
+            (
+                self.mypyc_modules,
+                self.cython_modules,
+                self.nuitka_modules,
+                self.c_extensions,
+                self.zig_modules,
+            )
+        )
+
     def get_path_solver(self, project_root: Path | None = None) -> PathSolver:
         """
         Builds a PathSolver based on the package configuration.
