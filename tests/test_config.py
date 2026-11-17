@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import tomllib
+
 import pytest
 
 from smelt.config import (
+    select_smelt_table,
     CythonExtension,
     MypycModule,
     NuitkaModule,
@@ -269,32 +272,33 @@ def test_old_config_lowers_to_same_internal_config(tmp_path: Path) -> None:
     assert set(config.entrypoints) == {"pkg.cli:main", "pkg.other:main"}
 
 
-def test_bundle_settings_flow_into_entrypoint_options() -> None:
+def test_entrypoint_levels_are_kept_unmerged() -> None:
     config = SmeltConfig.from_toml_data(
         tomllib.loads(
             """
+supported-targets = ["*-linux-*"]
 [bundle]
 python = "own"
 [bundle.content]
 include-modules = ["a"]
-package-data = { pkg = ["*.json"] }
-[bundle.onefile]
-enabled = true
 [bundle.entrypoints.cli.content]
 include-modules = ["b"]
-[bundle.entrypoints.cli.onefile]
-enabled = false
 """
         ),
         project_scripts={"cli": "pkg.cli:main", "other": "pkg.other:main"},
     )
-    assert config.entrypoints["pkg.cli:main"] == {
-        "python": "own",
-        "include-modules": ["a", "b"],
-        "include-package-data": ["pkg:*.json"],
-        "onefile": False,
-    }
-    assert config.entrypoints["pkg.other:main"]["onefile"] is True
+    cli_levels = config.entrypoints["pkg.cli:main"]
+    assert [level.source for level in cli_levels] == [
+        "[tool.smelt]",
+        "[tool.smelt.bundle]",
+        "[tool.smelt.bundle.entrypoints.cli]",
+    ]
+    assert cli_levels[0].settings is not None
+    assert cli_levels[0].settings.supported_targets == ["*-linux-*"]
+    assert cli_levels[2].settings is not None
+    assert cli_levels[2].settings.content.include_modules == ["b"]
+    # an entrypoint without its own table only has the shared levels
+    assert config.entrypoints["pkg.other:main"][2].settings is None
 
 
 def test_nuitka_options_are_not_shared_with_the_bundler() -> None:
@@ -302,5 +306,37 @@ def test_nuitka_options_are_not_shared_with_the_bundler() -> None:
         tomllib.loads('[nuitka-binary]\ninclude-modules = ["n"]\n[bundle.content]\ninclude-modules = ["b"]'),
         project_scripts={"cli": "pkg.cli:main"},
     )
-    assert config.entrypoints["pkg.cli:main"]["include-modules"] == ["b"]
+    (levels,) = [
+        level for level in config.entrypoints["pkg.cli:main"] if level.source == "[tool.smelt.bundle]"
+    ]
+    assert levels.settings is not None
+    assert levels.settings.content.include_modules == ["b"]
     assert config.nuitka_binary["pkg.cli:main"].include_modules == ["n"]
+
+
+def test_select_smelt_table_prefers_tool_smelt_with_empty_hook() -> None:
+    data = tomllib.loads(
+        '[tool.hatch.build.hooks.smelt]\n\n[tool.smelt]\npackage-dirs = { pkg = "src/pkg" }\n'
+    )
+    assert select_smelt_table(data) == {"package-dirs": {"pkg": "src/pkg"}}
+
+
+def test_select_smelt_table_reads_legacy_hook_table_with_warning() -> None:
+    data = tomllib.loads('[tool.hatch.build.hooks.smelt]\npackages_location = { pkg = "src/pkg" }\n')
+    with pytest.warns(DeprecationWarning, match="hooks.smelt"):
+        table = select_smelt_table(data)
+    assert table == {"packages_location": {"pkg": "src/pkg"}}
+
+
+def test_select_smelt_table_rejects_settings_in_both_tables() -> None:
+    data = tomllib.loads(
+        '[tool.hatch.build.hooks.smelt]\npackages_location = { a = "a" }\n'
+        '[tool.smelt]\npackage-dirs = { a = "a" }\n'
+    )
+    with pytest.raises(SmeltConfigError, match="both"):
+        select_smelt_table(data)
+
+
+def test_select_smelt_table_requires_a_table() -> None:
+    with pytest.raises(SmeltConfigError, match="No smelt config"):
+        select_smelt_table(tomllib.loads('[project]\nname = "x"\n'))

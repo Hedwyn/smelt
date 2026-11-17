@@ -27,9 +27,11 @@ requires-python = ">=3.12"
 packages = ["src/fib_demo"]
 
 [tool.hatch.build.hooks.smelt]
-packages_location = { "fib_demo" = "src/fib_demo" }
 
-[[tool.hatch.build.hooks.smelt.mypyc_modules]]
+[tool.smelt]
+package-dirs = { "fib_demo" = "src/fib_demo" }
+
+[[tool.smelt.mypyc_modules]]
 import_path = "fib_demo.fib"
 ```
 

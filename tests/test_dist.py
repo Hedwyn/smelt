@@ -26,12 +26,15 @@ from smelt.dist import (
     collect_package_data,
     dist_folder_name,
     project_search_paths,
+    resolve_bundle,
     resolve_entrypoint_spec,
     trace_imported_modules,
     write_entrypoint_module,
 )
 from smelt.explorer import ModuleKind
 from smelt.own_python import StagedInterpreter
+from smelt.resolver import Level
+from smelt.schema import BundleSettings, ContentGroup, OnefileGroup
 from smelt.utils import PackageRootPath, PathSolver, assert_is_valid_import_path, assert_path_exists
 
 
@@ -755,3 +758,89 @@ def test_static_interpreter_check_ignores_the_musl_loader(tmp_path: Path) -> Non
     assert report.interpreter is not None
     report.interpreter.musl_loader_rel_path = Path("lib") / "ld-musl-x86_64.so.1"
     _assert_static_interpreter_needs_no_dlopen(report)  # must not raise
+
+
+# --- precedence: cli > entrypoint > [tool.smelt.bundle] > default ----------------------
+
+
+def _levels(
+    bundle: BundleSettings | None = None, entrypoint: BundleSettings | None = None
+) -> list[Level[BundleSettings]]:
+    return [
+        Level("[tool.smelt.bundle]", bundle),
+        Level("[tool.smelt.bundle.entrypoints.cli]", entrypoint),
+    ]
+
+
+def test_scalar_precedence_one_case_per_level() -> None:
+    def onefile(enabled: bool | None) -> BundleSettings:
+        return BundleSettings(onefile=OnefileGroup(enabled=enabled))
+
+    assert resolve_bundle(_levels()).onefile is False  # default
+    assert resolve_bundle(_levels(bundle=onefile(True))).onefile is True
+    assert resolve_bundle(_levels(onefile(True), onefile(False))).onefile is False
+    assert resolve_bundle(_levels(onefile(False), onefile(False)), onefile(True)).onefile is True
+
+
+def test_an_unset_level_does_not_mask_a_lower_one() -> None:
+    declared = _levels(BundleSettings(python="own"), BundleSettings())
+    assert resolve_bundle(declared, BundleSettings()).python == "own"
+
+
+def test_lists_append_from_least_to_most_specific_level() -> None:
+    def modules(*names: str) -> BundleSettings:
+        return BundleSettings(content=ContentGroup(include_modules=list(names)))
+
+    bundle = resolve_bundle(_levels(modules("a"), modules("b")), modules("c"))
+    assert bundle.include_modules == ["a", "b", "c"]
+
+
+def test_package_data_tables_merge_key_by_key() -> None:
+    declared = _levels(
+        BundleSettings(content=ContentGroup(package_data={"pkg": ["*.json"], "other": ["*.txt"]})),
+        BundleSettings(content=ContentGroup(package_data={"pkg": ["*.yaml"]})),
+    )
+    cli = BundleSettings(content=ContentGroup(package_data={"third": []}))
+    assert resolve_bundle(declared, cli).package_data == {
+        "pkg": ["*.json", "*.yaml"],
+        "other": ["*.txt"],
+        "third": [],
+    }
+
+
+def test_sources_record_where_each_value_came_from() -> None:
+    declared = _levels(
+        BundleSettings(
+            python="own",
+            content=ContentGroup(include_modules=["a"]),
+            onefile=OnefileGroup(compression="gzip"),
+        ),
+        BundleSettings(content=ContentGroup(include_modules=["b"])),
+    )
+    cli = BundleSettings(
+        python="byo", content=ContentGroup(include_modules=["c"], discovery="static")
+    )
+    sources = resolve_bundle(declared, cli).sources
+    assert sources["python"] == ("cli",)  # scalar: the winner only
+    assert sources["content.include-modules"] == (
+        "[tool.smelt.bundle]",
+        "[tool.smelt.bundle.entrypoints.cli]",
+        "cli",
+    )
+    assert sources["onefile.compression"] == ("[tool.smelt.bundle]",)
+    assert sources["content.discovery"] == ("cli",)
+    assert sources["guard-version"] == ("default",)
+    assert "interpreter.version" not in sources  # declared nowhere
+
+
+def test_supported_targets_are_never_merged() -> None:
+    declared = [
+        Level("[tool.smelt]", BundleSettings(supported_targets=["*-linux-*", "*-macos-*"])),
+        Level("[tool.smelt.bundle]", BundleSettings(supported_targets=["x86_64-linux-*"])),
+        Level("[tool.smelt.bundle.entrypoints.cli]", BundleSettings()),
+    ]
+    levels = resolve_bundle(declared).supported_targets
+    assert [(level.source, level.patterns) for level in levels] == [
+        ("[tool.smelt]", ("*-linux-*", "*-macos-*")),
+        ("[tool.smelt.bundle]", ("x86_64-linux-*",)),
+    ]

@@ -110,9 +110,7 @@ class ZigExecutableEntry:
 class AutoConfig:
     mode: Literal["off", "package", "all"] = "off"
     #: Backends tried in order, per module.
-    backends: list[Literal["nuitka", "mypyc", "cython"]] = field(
-        default_factory=lambda: ["nuitka"]
-    )
+    backends: list[Literal["nuitka", "mypyc", "cython"]] = field(default_factory=lambda: ["nuitka"])
 
 
 @dataclass
@@ -354,7 +352,7 @@ class _Parser:
                 if isinstance(value, dict) and is_dataclass(item_hint):
                     raise fail(
                         "an array of tables, one entry per module, e.g. "
-                        "`[[tool.smelt.extensions.c]]` with `import-path = \"pkg.mod\"` "
+                        '`[[tool.smelt.extensions.c]]` with `import-path = "pkg.mod"` '
                         'and `sources = ["src/pkg/mod.c"]` (not a `module = "source"` mapping)'
                     )
                 raise fail("an array")
@@ -468,8 +466,12 @@ ALIASES: tuple[Alias, ...] = (
     Alias(("auto_mode",), ("extensions", "auto", "mode")),
     Alias(("backend_priority_order",), ("extensions", "auto", "backends")),
     # Nuitka keys of the shared `entrypoints.<ep>` table.
-    Alias(("entrypoints", "*", "extra_flags"), ("nuitka-binary", "entrypoints", "*", "extra-flags")),
-    Alias(("entrypoints", "*", "extra-flags"), ("nuitka-binary", "entrypoints", "*", "extra-flags")),
+    Alias(
+        ("entrypoints", "*", "extra_flags"), ("nuitka-binary", "entrypoints", "*", "extra-flags")
+    ),
+    Alias(
+        ("entrypoints", "*", "extra-flags"), ("nuitka-binary", "entrypoints", "*", "extra-flags")
+    ),
     Alias(("entrypoints", "*", "no-zig"), ("nuitka-binary", "entrypoints", "*", "zig"), _negate),
     Alias(
         ("entrypoints", "*", "include-modules"),
@@ -594,9 +596,7 @@ def merge_settings[T](result_type: type[T], base: object, override: object | Non
     return result_type(**merged)
 
 
-def apply_aliases(
-    toml_data: Mapping[str, TomlValue], parser: _Parser | None = None
-) -> TomlTable:
+def apply_aliases(toml_data: Mapping[str, TomlValue], parser: _Parser | None = None) -> TomlTable:
     """
     Rewrites keys of earlier releases to the current schema, warning once per
     deprecated key. Returns a new table; `toml_data` is untouched.

@@ -36,13 +36,14 @@ from smelt.config import (
     NuitkaModule,
     SmeltConfig,
     TomlData,
-    auto_detect_is_build_hook,
+    parse_config_from_pyproject,
     toml_get_nested_section,
 )
 from smelt.context import enable_global_context, get_context
 from smelt.dist import (
     assert_supported_platforms,
     build_dist,
+    resolve_bundle,
     resolve_entrypoint_spec,
     resolve_target_platforms,
     run_instructions,
@@ -187,70 +188,6 @@ def wrap_smelt_errors(
     return wrapper()
 
 
-def parse_config_from_pyproject(
-    toml_data: TomlData,
-    is_configured_as_build_hook: bool | None = None,
-    project_root: Path | None = None,
-) -> SmeltConfig:
-    """
-    Extracts Smelt config from TOML data coming out of a pyproject.toml
-    """
-    is_configured_as_build_hook = (
-        is_configured_as_build_hook
-        if is_configured_as_build_hook is not None
-        else auto_detect_is_build_hook(toml_data)
-    )
-    tool_config = toml_data.get("tool", {})
-    config_path = (
-        ("tool", "hatch", "build", "hooks", "smelt")
-        if is_configured_as_build_hook
-        else ("tool", "smelt")
-    )
-    if not isinstance(tool_config, dict):
-        raise SmeltConfigError(
-            f"`tool` section in toml data is not a dictionary, got {tool_config}. "
-            "Does the TOML data come from a valid pyproject ?",
-        )
-    smelt_config = toml_get_nested_section(toml_data, *config_path)
-    if smelt_config is None:
-        raise SmeltConfigError("No smelt config defined in pyproject")
-
-    if not isinstance(smelt_config, dict):
-        raise SmeltConfigError(f"`smelt` section should be a dictionary, got {smelt_config}. ")
-
-    project_scripts_decl = toml_get_nested_section(toml_data, "project", "scripts")
-    if not isinstance(project_scripts_decl, dict):
-        raise SmeltConfigError(
-            f"`project.scripts` section should be a dictionary, got {project_scripts_decl}. ",
-        )
-    project_scripts: dict[str, str] = {}
-    for name, target in project_scripts_decl.items():
-        if not isinstance(target, str):
-            raise SmeltConfigError(f"`project.scripts.{name}` should be a string, got {target}. ")
-        project_scripts[name] = target
-
-    project_section = toml_get_nested_section(toml_data, "project")
-    project_dependencies_decl = project_section.get("dependencies", [])
-    if not isinstance(project_dependencies_decl, list):
-        raise SmeltConfigError(
-            f"`project.dependencies` section should be a list, got {project_dependencies_decl}. "
-        )
-    project_dependencies: list[str] = []
-    for dependency in project_dependencies_decl:
-        if not isinstance(dependency, str):
-            raise SmeltConfigError(
-                f"`project.dependencies` entries should be strings, got {dependency}. "
-            )
-        project_dependencies.append(dependency)
-
-    return SmeltConfig.from_toml_data(
-        smelt_config,
-        project_root=project_root,
-        project_scripts=project_scripts,
-        project_dependencies=project_dependencies,
-    )
-
-
 def _host_label() -> str:
     """
     Cosmetic label for the "host" target platform, used only to name an output
@@ -277,8 +214,8 @@ def _advisory_target_platforms() -> list[str]:
             toml_data = tomllib.load(f)
         config = parse_config_from_pyproject(toml_data)
         entrypoint_spec = resolve_entrypoint_spec(config, None)
-        supported = config.entrypoints[entrypoint_spec].get("supported-platforms")
-        return list(supported) if supported else fallback
+        levels = resolve_bundle(config.entrypoints[entrypoint_spec]).supported_targets
+        return list(levels[-1].patterns) if levels else fallback
     except Exception:
         return fallback
 
@@ -653,7 +590,7 @@ def build_dist_folder(
     package_path: PathExists,
     entrypoint: str | None,
     output_dir: Path,
-    optimize: int | None,
+    optimize: Literal[0, 1, 2] | None,
     no_build: bool,
     discovery: Literal["static", "trace", "both"] | None,
     dist_python: Literal["byo", "own"] | None,
@@ -663,7 +600,7 @@ def build_dist_folder(
     drop_stdlib_groups: tuple[str, ...],
     onefile: bool | None,
     onefile_only: bool,
-    onefile_compression: Literal["xz", "gzip"] | None,
+    onefile_compression: Literal["xz", "gzip", "none"] | None,
     onefile_compression_preset: int | None,
     onefile_cache: bool | None,
     use_inittab: bool | None,
@@ -701,17 +638,16 @@ def build_dist_folder(
     path_solver = config.get_path_solver(project_root=package_path)
 
     entrypoint_spec = resolve_entrypoint_spec(config, entrypoint)
-    entrypoint_options = config.entrypoints[entrypoint_spec]
-    resolved_targets = resolve_target_platforms(entrypoint_options, target_platforms)
+    bundle_settings = resolve_bundle(config.entrypoints[entrypoint_spec])
+    resolved_targets = resolve_target_platforms(target_platforms)
     # Checked once for the whole list, before any build starts -- a later platform
     # failing the allowlist must not leave earlier ones half-built.
-    assert_supported_platforms(entrypoint_options, resolved_targets)
-    # Whether a target was explicitly requested (CLI flag or the entrypoint's own
-    # declaration) rather than left to the bare default -- not the same as
-    # `resolved_targets != [None]`: an explicit "host" still resolves to `None`, but
-    # was still asked for by name, and gets the same nested output as any other
-    # explicit platform.
-    explicit_targets = bool(target_platforms) or bool(entrypoint_options.get("target"))
+    assert_supported_platforms(bundle_settings.supported_targets, resolved_targets)
+    # Whether a target was explicitly requested rather than left to the bare default --
+    # not the same as `resolved_targets != [None]`: an explicit "host" still resolves
+    # to `None`, but was still asked for by name, and gets the same nested output as
+    # any other explicit platform.
+    explicit_targets = bool(target_platforms)
 
     for target in resolved_targets:
         target_label = target or _host_label()
@@ -721,7 +657,7 @@ def build_dist_folder(
             entrypoint=entrypoint,
             output_dir=target_output_dir,
             path_solver=path_solver,
-            optimize=-1 if optimize is None else optimize,
+            optimize=optimize,
             stdout="stdout",
             build_extensions=not no_build,
             discovery=discovery,
@@ -730,8 +666,8 @@ def build_dist_folder(
             own_python_version=own_python_version,
             tailor_interpreter=tailor_interpreter,
             drop_stdlib_groups=drop_stdlib_groups,
-            guard_version=not no_version_guard,
-            isolate=not no_isolate,
+            guard_version=False if no_version_guard else None,
+            isolate=False if no_isolate else None,
             exclude_modules=exclude_modules,
             drop_optional_imports=drop_optional_imports,
             include_distribution_metadata=include_distribution_metadata,

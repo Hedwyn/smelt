@@ -32,7 +32,9 @@ from pathlib import Path
 import pytest
 
 from smelt.bytecode import PycTargetTag, compile_tree
-from smelt.config import EntrypointOptions, SmeltConfig
+from smelt.config import SmeltConfig
+from smelt.resolver import Level
+from smelt.schema import BundleSettings, InterpreterGroup
 from smelt.dist import (
     DEFAULT_OWN_PYTHON_STATIC,
     DEFAULT_TAILOR_INTERPRETER,
@@ -45,10 +47,7 @@ from smelt.dist import (
     assert_no_version_skew,
     build_dist,
     launcher_name,
-    resolve_dist_python,
-    resolve_own_python_static,
-    resolve_own_python_static_modules,
-    resolve_tailor_interpreter,
+    resolve_bundle,
     run_instructions,
     write_launcher_shim,
 )
@@ -844,28 +843,32 @@ def test_build_own_python_rejects_static_modules_without_static_linkage() -> Non
         build_own_python(static_modules=["_socket"])
 
 
+def _declared(settings: BundleSettings) -> list[Level[BundleSettings]]:
+    return [Level("[tool.smelt.bundle]", settings)]
+
+
 def test_resolve_own_python_static_prefers_the_caller_then_the_declaration() -> None:
-    assert resolve_own_python_static(EntrypointOptions()) is DEFAULT_OWN_PYTHON_STATIC
-    assert resolve_own_python_static(EntrypointOptions({"own-python-static": True})) is True
-    assert resolve_own_python_static(EntrypointOptions({"own-python-static": True}), False) is False
+    declared = _declared(BundleSettings(interpreter=InterpreterGroup(static=True)))
+    assert resolve_bundle([]).own_python_static is DEFAULT_OWN_PYTHON_STATIC
+    assert resolve_bundle(declared).own_python_static is True
+    cli = BundleSettings(interpreter=InterpreterGroup(static=False))
+    assert resolve_bundle(declared, cli).own_python_static is False
 
 
-def test_resolve_own_python_static_modules_prefers_the_caller_then_the_declaration() -> None:
-    assert resolve_own_python_static_modules(EntrypointOptions()) == ()
-    assert resolve_own_python_static_modules(
-        EntrypointOptions({"own-python-static-modules": ["zlib", "_socket"]})
-    ) == ("zlib", "_socket")
-    assert resolve_own_python_static_modules(
-        EntrypointOptions({"own-python-static-modules": ["zlib"]}), ["_socket"]
-    ) == ("_socket",)
+def test_resolve_own_python_static_modules_append_across_levels() -> None:
+    declared = _declared(BundleSettings(interpreter=InterpreterGroup(static_modules=["zlib"])))
+    assert resolve_bundle([]).own_python_static_modules == ()
+    assert resolve_bundle(declared).own_python_static_modules == ("zlib",)
+    cli = BundleSettings(interpreter=InterpreterGroup(static_modules=["_socket"]))
+    assert resolve_bundle(declared, cli).own_python_static_modules == ("zlib", "_socket")
 
 
 def test_resolve_tailor_interpreter_prefers_the_caller_then_the_declaration() -> None:
-    assert resolve_tailor_interpreter(EntrypointOptions()) is DEFAULT_TAILOR_INTERPRETER
-    assert resolve_tailor_interpreter(EntrypointOptions({"tailor-interpreter": False})) is False
-    assert (
-        resolve_tailor_interpreter(EntrypointOptions({"tailor-interpreter": False}), True) is True
-    )
+    declared = _declared(BundleSettings(interpreter=InterpreterGroup(tailor=False)))
+    assert resolve_bundle([]).tailor_interpreter is DEFAULT_TAILOR_INTERPRETER
+    assert resolve_bundle(declared).tailor_interpreter is False
+    cli = BundleSettings(interpreter=InterpreterGroup(tailor=True))
+    assert resolve_bundle(declared, cli).tailor_interpreter is True
 
 
 def test_compile_tree_reports_both_halves(tmp_path: Path) -> None:
@@ -998,22 +1001,17 @@ def test_launcher_name_follows_the_folder_name() -> None:
 
 
 def test_resolve_dist_python_defaults_to_byo() -> None:
-    assert resolve_dist_python(EntrypointOptions()) == "byo"
+    assert resolve_bundle([]).python == "byo"
 
 
 def test_resolve_dist_python_reads_the_entrypoint_declaration() -> None:
-    assert resolve_dist_python(EntrypointOptions({"python": "own"})) == "own"
+    assert resolve_bundle(_declared(BundleSettings(python="own"))).python == "own"
 
 
 def test_resolve_dist_python_lets_the_cli_win() -> None:
     # both directions: the flag overrides the declaration whichever way it points
-    assert resolve_dist_python(EntrypointOptions({"python": "byo"}), "own") == "own"
-    assert resolve_dist_python(EntrypointOptions({"python": "own"}), "byo") == "byo"
-
-
-def test_resolve_dist_python_refuses_an_unknown_mode() -> None:
-    with pytest.raises(DistError, match="'byo'"):
-        resolve_dist_python(EntrypointOptions({"python": "system"}))
+    assert resolve_bundle(_declared(BundleSettings(python="byo")), BundleSettings(python="own")).python == "own"
+    assert resolve_bundle(_declared(BundleSettings(python="own")), BundleSettings(python="byo")).python == "byo"
 
 
 # ---------------------------------------------------------------------------

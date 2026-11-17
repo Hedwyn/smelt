@@ -21,7 +21,7 @@ Commands:
   show-config              Shows the smelt config as defined in the...
 ```
 
-Every command reads its configuration from a `pyproject.toml`, either from `[tool.smelt]` or `[tool.hatch.build.hooks.smelt]` (whichever is present - see [Build Hook](build-hook.md#standalone-toolsmelt-config)).
+Every command reads its configuration from a `pyproject.toml`, from `[tool.smelt]` (see [Build Hook](build-hook.md#configuration-location)).
 
 ## build-standalone-binary
 

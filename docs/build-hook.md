@@ -23,24 +23,26 @@ my-cli = "my_project.cli:main"
 packages = ["src/my_project"]
 
 [tool.hatch.build.hooks.smelt]
-packages_location = { "my_project" = "src/my_project" }
 
-[[tool.hatch.build.hooks.smelt.mypyc_modules]]
+[tool.smelt]
+package-dirs = { "my_project" = "src/my_project" }
+
+[[tool.smelt.mypyc_modules]]
 import_path = "my_project.fib"
 
-[[tool.hatch.build.hooks.smelt.nuitka_modules]]
+[[tool.smelt.nuitka_modules]]
 import_path = "my_project.cli"
 
-[[tool.hatch.build.hooks.smelt.c_extensions]]
+[[tool.smelt.c_extensions]]
 import_path = "my_project.hello"
 sources = ["src/my_project/hello.c"]
 
-[[tool.hatch.build.hooks.smelt.zig_modules]]
+[[tool.smelt.zig_modules]]
 import_path = "my_project.zighello"
 name = "zighello"
 folder = "src/my_project/zighello"
 
-[[tool.hatch.build.hooks.smelt.cython_modules]]
+[[tool.smelt.cython_modules]]
 import_path = "my_project.fib_cython"
 source = "src/my_project/fib_cython.pyx"
 ```
@@ -49,11 +51,11 @@ Every module is compiled to a native `.so`/`.pyd` sitting right next to its pure
 
 ## Configuration reference
 
-All of the following keys live under `[tool.hatch.build.hooks.smelt]`.
+All of the following keys live under `[tool.smelt]`. The `[tool.hatch.build.hooks.smelt]` table stays empty: it only enables the hook.
 
 | Key | Type | Description |
 | --- | --- | --- |
-| `packages_location` | `dict[str, str]` | Maps a package's top-level import name to the folder it lives in (e.g. `{"my_project" = "src/my_project"}`). Used to resolve `import_path`s declared below to actual files on disk. |
+| `package-dirs` | `dict[str, str]` | Maps a package's top-level import name to the folder it lives in (e.g. `{"my_project" = "src/my_project"}`). Used to resolve `import_path`s declared below to actual files on disk. |
 | `mypyc_modules` | list of tables | Modules to compile with [mypyc](https://mypyc.readthedocs.io/). Each entry has an `import_path` and an optional `source` (path override) and `extras`. |
 | `cython_modules` | list of tables | Modules to compile with [Cython](https://cython.org/). Each entry has an `import_path`, an optional `source` (defaults to a `.py`/`.pyx` file matching the import path) and `extras`. |
 | `nuitka_modules` | list of tables | Modules to compile with [Nuitka](https://nuitka.net/), as thin per-module extensions sharing one runtime library. See [Nuitka internals](advanced.md#nuitka-internals) for why this needs special handling. Each entry has an `import_path`, an optional `source`, and `extras`. |
@@ -71,7 +73,7 @@ All of the following keys live under `[tool.hatch.build.hooks.smelt]`.
 Any of the module tables above (`mypyc_modules`, `cython_modules`, `nuitka_modules`, `c_extensions`, `zig_modules`) accepts an `extras` list. If any of the listed `[project.optional-dependencies]` extras isn't installed in the current environment, the build hook silently skips that module instead of failing - handy for optional native acceleration that shouldn't block a plain install:
 
 ```toml
-[[tool.hatch.build.hooks.smelt.mypyc_modules]]
+[[tool.smelt.mypyc_modules]]
 import_path = "my_project.fast_path"
 extras = ["speedups"]
 ```
@@ -80,6 +82,6 @@ extras = ["speedups"]
 
 `auto_mode` (`"package"`/`"all"`) currently never proposes a package's own `__init__.py`, at any depth - only its concrete submodules. This isn't an oversight: see [Nuitka internals](advanced.md#nuitka-internals) for why whole-package compilation doesn't fit Smelt's per-module model yet.
 
-## Standalone `[tool.smelt]` config
+## Configuration location
 
-If you don't use Hatchling, the same schema can be declared under `[tool.smelt]` instead of `[tool.hatch.build.hooks.smelt]`. This form isn't wired into any build backend automatically - it's read by the [CLI](cli.md) (`smelt build-extensions`, `smelt build-standalone-binary`, ...) so you can drive the build yourself, e.g. from a `Makefile` or CI step. The two forms are mutually exclusive: Smelt raises an error if both are present in the same `pyproject.toml`.
+The hook and the [CLI](cli.md) read the same `[tool.smelt]` table. Settings written under `[tool.hatch.build.hooks.smelt]` by earlier releases are still read, with a deprecation warning, when `[tool.smelt]` is absent; having settings in both tables is an error.

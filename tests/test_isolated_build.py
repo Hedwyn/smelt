@@ -18,15 +18,16 @@ from pathlib import Path
 
 import pytest
 
-from smelt.config import EntrypointOptions, SmeltConfig
+from smelt.config import SmeltConfig
+from smelt.resolver import Level, TargetLevel
+from smelt.schema import BundleSettings, IsolatedBuildGroup, parse_project_config
 from smelt.dist import (
     DEFAULT_ISOLATED_BUILD,
     DistError,
     IsolatedBuildError,
     assert_supported_platforms,
     build_dist,
-    resolve_isolated_build,
-    resolve_isolated_build_versions,
+    resolve_bundle,
     resolve_target_platforms,
 )
 from smelt.isolated_build import (
@@ -42,7 +43,7 @@ from smelt.isolated_build import (
     resolve_isolated_build_version,
     wheel_platform_tags,
 )
-from smelt.utils import assert_is_valid_import_path
+from smelt.utils import SmeltConfigError, assert_is_valid_import_path
 
 
 def _network_reachable() -> bool:
@@ -175,56 +176,59 @@ def test_isolated_build_cache_dir_keys_on_dist_name_version_and_target() -> None
 # --- resolve_isolated_build / _versions / _target (dist.py) -------------------------
 
 
+def _declared(settings: BundleSettings) -> list[Level[BundleSettings]]:
+    return [Level("[tool.smelt.bundle]", settings)]
+
+
 def test_resolve_isolated_build_prefers_the_caller_then_the_declaration() -> None:
-    assert resolve_isolated_build(EntrypointOptions()) is DEFAULT_ISOLATED_BUILD
-    assert resolve_isolated_build(EntrypointOptions({"isolated-build": True})) is True
-    assert resolve_isolated_build(EntrypointOptions({"isolated-build": True}), False) is False
+    declared = _declared(BundleSettings(isolated_build=IsolatedBuildGroup(enabled=True)))
+    assert resolve_bundle([]).isolated_build is DEFAULT_ISOLATED_BUILD
+    assert resolve_bundle(declared).isolated_build is True
+    cli = BundleSettings(isolated_build=IsolatedBuildGroup(enabled=False))
+    assert resolve_bundle(declared, cli).isolated_build is False
 
 
-def test_resolve_isolated_build_rejects_a_non_boolean() -> None:
-    with pytest.raises(DistError):
-        resolve_isolated_build(EntrypointOptions({"isolated-build": "yes"}))  # type: ignore[typeddict-item]
+def test_isolated_build_rejects_a_non_boolean_at_parse_time() -> None:
+    with pytest.raises(SmeltConfigError):
+        parse_project_config({"bundle": {"isolated-build": {"enabled": "yes"}}})
 
 
 def test_resolve_isolated_build_versions_prefers_the_caller_then_the_declaration() -> None:
-    assert resolve_isolated_build_versions(EntrypointOptions()) == DEFAULT_ISOLATED_BUILD_VERSIONS
-    assert (
-        resolve_isolated_build_versions(EntrypointOptions({"isolated-build-versions": "lock"}))
-        == "lock"
-    )
-    assert (
-        resolve_isolated_build_versions(
-            EntrypointOptions({"isolated-build-versions": "lock"}), "pyproject"
-        )
-        == "pyproject"
-    )
+    assert resolve_bundle([]).isolated_build_versions == DEFAULT_ISOLATED_BUILD_VERSIONS
+    declared = _declared(BundleSettings(isolated_build=IsolatedBuildGroup(versions="pyproject")))
+    assert resolve_bundle(declared).isolated_build_versions == "pyproject"
+    cli = BundleSettings(isolated_build=IsolatedBuildGroup(versions="local"))
+    assert resolve_bundle(declared, cli).isolated_build_versions == "local"
 
 
-def test_resolve_isolated_build_versions_rejects_an_unknown_strategy() -> None:
-    with pytest.raises(DistError):
-        resolve_isolated_build_versions(
-            EntrypointOptions({"isolated-build-versions": "bogus"})  # type: ignore[typeddict-item]
-        )
+@pytest.mark.parametrize("strategy", ["bogus", "lock"])
+def test_isolated_build_versions_rejects_an_unknown_strategy_at_parse_time(strategy: str) -> None:
+    with pytest.raises(SmeltConfigError):
+        parse_project_config({"bundle": {"isolated-build": {"versions": strategy}}})
 
 
-def test_resolve_target_platforms_prefers_the_caller_then_the_declaration() -> None:
-    assert resolve_target_platforms(EntrypointOptions()) == [None]
-    assert resolve_target_platforms(EntrypointOptions({"target": ["aarch64-linux-gnu"]})) == [
-        "aarch64-linux-gnu"
-    ]
-    assert resolve_target_platforms(
-        EntrypointOptions({"target": ["aarch64-linux-gnu"]}),
-        ["x86_64-linux-musl"],
-    ) == ["x86_64-linux-musl"]
-    assert resolve_target_platforms(EntrypointOptions(), ["host"]) == [None]
+def test_resolve_target_platforms_defaults_to_host_and_maps_host_to_none() -> None:
+    assert resolve_target_platforms() == [None]
+    assert resolve_target_platforms(["x86_64-linux-musl"]) == ["x86_64-linux-musl"]
+    assert resolve_target_platforms(["host"]) == [None]
 
 
 def test_assert_supported_platforms_rejects_a_target_outside_the_allowlist() -> None:
-    entrypoint_options = EntrypointOptions({"supported-platforms": ["aarch64-linux-gnu"]})
-    assert_supported_platforms(entrypoint_options, ["aarch64-linux-gnu"])
-    assert_supported_platforms(entrypoint_options, [None])  # host always allowed
+    levels = (TargetLevel("[tool.smelt.bundle]", ("aarch64-linux-gnu",)),)
+    assert_supported_platforms(levels, ["aarch64-linux-gnu"])
+    assert_supported_platforms(levels, [None])  # host always allowed
+    with pytest.raises(DistError, match=r"\[tool.smelt.bundle\]"):
+        assert_supported_platforms(levels, ["x86_64-linux-musl"])
+
+
+def test_assert_supported_platforms_checks_every_level() -> None:
+    levels = (
+        TargetLevel("[tool.smelt]", ("aarch64-linux-gnu", "x86_64-linux-musl")),
+        TargetLevel("[tool.smelt.bundle]", ("aarch64-linux-gnu",)),
+    )
+    assert_supported_platforms(levels, ["aarch64-linux-gnu"])
     with pytest.raises(DistError):
-        assert_supported_platforms(entrypoint_options, ["x86_64-linux-musl"])
+        assert_supported_platforms(levels, ["x86_64-linux-musl"])
 
 
 # --- fetch_wheel / extract_wheel / locate_native_in_wheel (needs network) ----------

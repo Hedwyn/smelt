@@ -8,16 +8,19 @@ Config definitions for Smelt.
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from collections.abc import Callable, Iterable
-from typing import Literal, Self, TypedDict
+from typing import Literal, Self
 
+from smelt.resolver import Level
 from smelt.schema import (
     BundleSettings,
     NuitkaBinarySettings,
     ProjectConfig,
+    SmeltDeprecationWarning,
     TomlValue,
     build_datacls_from_toml,
     merge_settings,
@@ -54,30 +57,49 @@ type _TomlData = str | list[_TomlData] | dict[str, _TomlData]
 type TomlData = dict[str, _TomlData]
 
 
-def auto_detect_is_build_hook(toml_data: TomlData) -> bool:
+def select_smelt_table(toml_data: TomlData) -> dict[str, _TomlData]:
     """
-    Given the extracted TOML config `toml_data`,
-    detects whether Smelt Config was passed as a build hook
-    (in which case it would be nested under whatever subsection_name
-    the build backend uses for hooks), or a tool config.
+    Returns the table holding Smelt's configuration: `[tool.smelt]`.
+
+    `[tool.hatch.build.hooks.smelt]` only enables the hatch hook. Configuration
+    written there by earlier releases is still read when `[tool.smelt]` is absent,
+    with a deprecation warning; having settings in both tables is an error.
+
+    Raises
+    ------
+    SmeltConfigError
+        If no Smelt table exists, or both tables carry settings.
     """
-    has_tool_config = "smelt" in toml_data.get("tool", {})
-    has_build_hook_conf = "smelt" in toml_get_nested_section(
-        toml_data, "tool", "hatch", "build", "hooks"
-    )
-    if has_tool_config and has_build_hook_conf:
-        # TODO: for now, not allowing this.
-        # We can however consider using the hatch one only for build time
-        # and the tool one for CLI use.
-        # that can get confusing though.
+    tool_table = toml_get_nested_section(toml_data, "tool", "smelt")
+    hooks = toml_get_nested_section(toml_data, "tool", "hatch", "build", "hooks")
+    assert isinstance(hooks, dict)
+    has_tool = "smelt" in toml_get_nested_section(toml_data, "tool")
+    has_hook = "smelt" in hooks
+    hook_table = toml_get_nested_section(toml_data, "tool", "hatch", "build", "hooks", "smelt")
+    assert isinstance(tool_table, dict) and isinstance(hook_table, dict)
+
+    if has_tool and hook_table:
+        if tool_table:
+            raise SmeltConfigError(
+                "Smelt settings found both in [tool.smelt] and "
+                "[tool.hatch.build.hooks.smelt]. Keep them in [tool.smelt] only; "
+                "the hook table must stay empty."
+            )
         raise SmeltConfigError(
-            "Smelt configuration found both in [tool.smelt] and "
-            "[tool.hatch.build.hooks.smelt]. Please keep only one."
+            "[tool.smelt] is empty but [tool.hatch.build.hooks.smelt] carries settings. "
+            "Move them to [tool.smelt]."
         )
-    if has_build_hook_conf:
-        return True
-    if has_tool_config:
-        return False
+    if has_tool:
+        return tool_table
+    if has_hook:
+        if hook_table:
+            warnings.warn(
+                "Smelt settings in [tool.hatch.build.hooks.smelt] are deprecated; "
+                "move them to [tool.smelt] and leave the hook table empty.",
+                SmeltDeprecationWarning,
+                stacklevel=2,
+            )
+        return hook_table
     raise SmeltConfigError("No smelt config detected")
 
 
@@ -168,135 +190,8 @@ class ZigExecutable:
     extras: list[str] = field(default_factory=list)
 
 
-EntrypointOptions = TypedDict(
-    "EntrypointOptions",
-    {
-        # Distribution-folder options (`smelt build-dist`, see `smelt.dist`).
-        "include-modules": list[str],
-        "include-package": list[str],
-        "include-package-data": list[str],
-        # `discovery` is one of "static", "trace" or "both".
-        "discovery": str,
-        "exclude-modules": list[str],
-        "include-distribution-metadata": list[str],
-        # `python` is one of "byo" (bring your own interpreter, the default) or "own"
-        # (ship one smelt builds itself, so the folder needs no Python installed).
-        "python": str,
-        # Platform(s) to build the distribution for: Zig target triples (e.g.
-        # "x86_64-linux-musl") or the literal "host". Drives the `python = "own"`
-        # interpreter build and the `isolated-build` native-dependency reinstall
-        # alike -- see `smelt.dist.resolve_target_platforms`. Omitted, or "host",
-        # means a native build against the host's own libc.
-        "target": list[str],
-        # Allowlist `target` is checked against, entrypoint by entrypoint --
-        # requesting a platform outside it fails the build before anything is built.
-        # "host" is always implicitly allowed regardless of this list. Omitted means
-        # any requested platform is accepted. See `smelt.dist.assert_supported_platforms`.
-        "supported-platforms": list[str],
-        # CPython release the `python = "own"` interpreter is built from, one of
-        # meta-python's curated `-Dcpython-version` choices (e.g. "3.15.0rc2").
-        # Omitted means the release matching the running interpreter's own minor
-        # version -- see `smelt.own_python.resolve_own_python_version` for why that,
-        # and not some fixed default, is the only minor version a build can ship.
-        "own-python-version": str,
-        # Whether the `python = "own"` interpreter's contents follow this entrypoint's
-        # dependency closure (the default) instead of being the whole standard
-        # library. See `smelt.dist.DEFAULT_TAILOR_INTERPRETER` for the trade-off.
-        "tailor-interpreter": bool,
-        "drop-stdlib-groups": list[str],
-        # Whether to leave out the modules only reachable through an import their own
-        # importer already handles the failure of. Off by default: every one of them is
-        # droppable without an `ImportError`, but what the fallback costs is not
-        # knowable from here. See `smelt.dist.DEFAULT_DROP_OPTIONAL_IMPORTS`.
-        "drop-optional-imports": bool,
-        # Whether the finished folder is additionally packed into a single file (see
-        # `smelt.onefile`). The shape follows `python`: an executable zip application
-        # for "byo", a compiled launcher carrying the compressed folder for "own".
-        "onefile": bool,
-        # How that single file's payload is compressed: "xz" (the default, smallest),
-        # "gzip" (faster to inflate on the target's first run) or "none".
-        "onefile-compression": str,
-        "onefile-compression-preset": int,
-        # Whether an extracting single file reuses a previous extraction found at
-        # its cache directory instead of always re-extracting. On by default -- see
-        # `smelt.onefile.DEFAULT_ONEFILE_CACHE`.
-        "onefile-cache": bool,
-        # Whether `static_modules` (smelt's own compiled extensions passed to
-        # `build_dist`) are actually linked into the `python = "own"` interpreter via
-        # PyImport_AppendInittab, instead of being refused. Off by default -- see
-        # `smelt.dist.DEFAULT_USE_INITTAB`.
-        "use-inittab": bool,
-        # Whether a `ModuleKind.EXTENSION` closure entry is reinstalled for the actual
-        # target instead of copied from the local environment. Off by default -- see
-        # `smelt.isolated_build.DEFAULT_ISOLATED_BUILD`.
-        "isolated-build": bool,
-        # Which version-resolution strategy a reinstalled native dependency uses --
-        # see `smelt.isolated_build.IsolatedBuildVersions` and
-        # `DEFAULT_ISOLATED_BUILD_VERSIONS`.
-        "isolated-build-versions": str,
-        # Whether the `python = "own"` interpreter is built as one monolithic,
-        # static-PIE executable (no libpythonX.Y.so) instead of the ordinary
-        # dynamic-libc/dynamic-libpython shape. Off by default -- see
-        # `smelt.own_python.DEFAULT_OWN_PYTHON_LINKAGE`.
-        "own-python-static": bool,
-        # CPython stdlib module names to compile as builtins (no dlopen) instead of
-        # lib-dynload/*.so, when "own-python-static" is on -- see
-        # `smelt.own_python.build_own_python`'s `static_modules`.
-        "own-python-static-modules": list[str],
-    },
-    total=False,
-)
-
-
-def bundle_entrypoint_options(settings: BundleSettings) -> EntrypointOptions:
-    """
-    Flattens merged bundler settings into the flat per-entrypoint keys `smelt.dist`
-    reads. Only declared (non-None, non-empty) settings are emitted, so the dist
-    defaults still apply to the rest.
-    """
-    options = EntrypointOptions()
-    content, interpreter, onefile = settings.content, settings.interpreter, settings.onefile
-    if settings.python is not None:
-        options["python"] = settings.python
-    if content.discovery is not None:
-        options["discovery"] = content.discovery
-    if content.include_modules:
-        options["include-modules"] = content.include_modules
-    if content.include_packages:
-        options["include-package"] = content.include_packages
-    if content.exclude_modules:
-        options["exclude-modules"] = content.exclude_modules
-    if content.drop_optional_imports is not None:
-        options["drop-optional-imports"] = content.drop_optional_imports
-    if content.package_data:
-        options["include-package-data"] = package_data_specs(content.package_data)
-    if content.distribution_metadata:
-        options["include-distribution-metadata"] = content.distribution_metadata
-    if interpreter.version is not None:
-        options["own-python-version"] = interpreter.version
-    if interpreter.tailor is not None:
-        options["tailor-interpreter"] = interpreter.tailor
-    if interpreter.drop_stdlib_groups:
-        options["drop-stdlib-groups"] = interpreter.drop_stdlib_groups
-    if interpreter.static is not None:
-        options["own-python-static"] = interpreter.static
-    if interpreter.static_modules:
-        options["own-python-static-modules"] = interpreter.static_modules
-    if interpreter.inittab is not None:
-        options["use-inittab"] = interpreter.inittab
-    if onefile.enabled is not None:
-        options["onefile"] = onefile.enabled
-    if onefile.compression is not None:
-        options["onefile-compression"] = onefile.compression
-    if onefile.compression_preset is not None:
-        options["onefile-compression-preset"] = onefile.compression_preset
-    if onefile.cache is not None:
-        options["onefile-cache"] = onefile.cache
-    if settings.isolated_build.enabled is not None:
-        options["isolated-build"] = settings.isolated_build.enabled
-    if settings.isolated_build.versions is not None:
-        options["isolated-build-versions"] = settings.isolated_build.versions
-    return options
+#: The declared (non-CLI, non-default) bundler levels of one entrypoint, least specific first.
+type EntrypointLevels = tuple[Level[BundleSettings], ...]
 
 
 def package_data_specs(package_data: dict[str, list[str]]) -> list[str]:
@@ -350,11 +245,11 @@ class SmeltConfig:
     archs: list[str] | None = None
     #: Declared `supported-targets` of `[tool.smelt]` (Zig-triple patterns).
     supported_targets: list[str] | None = None
-    #: Bundler options per entrypoint, in the flat form `smelt.dist` reads. Keyed by
-    #: `module.path:func` spec.
-    entrypoints: dict[str, EntrypointOptions] = field(default_factory=dict)
-    #: The same options, as declared in the schema and merged per entrypoint.
-    bundle: dict[str, BundleSettings] = field(default_factory=dict)
+    #: Declared bundler levels per entrypoint, keyed by `module.path:func` spec: the
+    #: `[tool.smelt]`, `[tool.smelt.bundle]` and entrypoint tables, least specific
+    #: first. Not merged here: `smelt.dist.resolve_bundle` adds the defaults and the
+    #: command line around them and resolves.
+    entrypoints: dict[str, EntrypointLevels] = field(default_factory=dict)
     #: `[tool.smelt.nuitka-binary]` options per entrypoint.
     nuitka_binary: dict[str, NuitkaBinaryOptions] = field(default_factory=dict)
     script_names: dict[str, str] = field(default_factory=dict)
@@ -444,13 +339,26 @@ class SmeltConfig:
                 bundle_by_key[resolved] = schema.bundle.entrypoints[declared]
             if declared in schema.nuitka_binary.entrypoints:
                 nuitka_by_key[resolved] = schema.nuitka_binary.entrypoints[declared]
-        bundle: dict[str, BundleSettings] = {}
-        entrypoints: dict[str, EntrypointOptions] = {}
+        entrypoints: dict[str, EntrypointLevels] = {}
+        project_level = Level(
+            "[tool.smelt]", BundleSettings(supported_targets=schema.supported_targets)
+        )
+        bundle_level = Level("[tool.smelt.bundle]", schema.bundle)
         nuitka_binary: dict[str, NuitkaBinaryOptions] = {}
         for key in entrypoint_keys:
-            merged = merge_settings(BundleSettings, schema.bundle, bundle_by_key.get(key))
-            bundle[key] = merged
-            entrypoints[key] = bundle_entrypoint_options(merged)
+            declared_as = next(
+                (name for name, resolved in resolved_key.items() if resolved == key), None
+            )
+            entrypoints[key] = (
+                project_level,
+                bundle_level,
+                Level(
+                    f"[tool.smelt.bundle.entrypoints.{declared_as}]"
+                    if declared_as in schema.bundle.entrypoints
+                    else "",
+                    bundle_by_key.get(key),
+                ),
+            )
             nuitka_merged = merge_settings(
                 NuitkaBinarySettings, schema.nuitka_binary, nuitka_by_key.get(key)
             )
@@ -503,7 +411,6 @@ class SmeltConfig:
             archs=schema.archs,
             supported_targets=schema.supported_targets,
             entrypoints=entrypoints,
-            bundle=bundle,
             nuitka_binary=nuitka_binary,
             script_names=script_names,
             auto_mode=ext.auto.mode,
@@ -545,3 +452,52 @@ class SmeltConfig:
             self.debug = True
         if report_path := os.environ.get("SMELT_REPORT"):
             self.report_path = report_path
+
+
+def parse_config_from_pyproject(
+    toml_data: TomlData,
+    project_root: Path | None = None,
+) -> SmeltConfig:
+    """
+    Extracts Smelt config from TOML data coming out of a pyproject.toml.
+    Shared by the CLI and the build hook, so both see the same config.
+    """
+    tool_config = toml_data.get("tool", {})
+    if not isinstance(tool_config, dict):
+        raise SmeltConfigError(
+            f"`tool` section in toml data is not a dictionary, got {tool_config}. "
+            "Does the TOML data come from a valid pyproject ?",
+        )
+    smelt_config = select_smelt_table(toml_data)
+
+    project_scripts_decl = toml_get_nested_section(toml_data, "project", "scripts")
+    if not isinstance(project_scripts_decl, dict):
+        raise SmeltConfigError(
+            f"`project.scripts` section should be a dictionary, got {project_scripts_decl}. ",
+        )
+    project_scripts: dict[str, str] = {}
+    for name, target in project_scripts_decl.items():
+        if not isinstance(target, str):
+            raise SmeltConfigError(f"`project.scripts.{name}` should be a string, got {target}. ")
+        project_scripts[name] = target
+
+    project_section = toml_get_nested_section(toml_data, "project")
+    project_dependencies_decl = project_section.get("dependencies", [])
+    if not isinstance(project_dependencies_decl, list):
+        raise SmeltConfigError(
+            f"`project.dependencies` section should be a list, got {project_dependencies_decl}. "
+        )
+    project_dependencies: list[str] = []
+    for dependency in project_dependencies_decl:
+        if not isinstance(dependency, str):
+            raise SmeltConfigError(
+                f"`project.dependencies` entries should be strings, got {dependency}. "
+            )
+        project_dependencies.append(dependency)
+
+    return SmeltConfig.from_toml_data(
+        smelt_config,
+        project_root=project_root,
+        project_scripts=project_scripts,
+        project_dependencies=project_dependencies,
+    )

@@ -7,6 +7,7 @@ Build hook hatchling backend.
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import fields
 from functools import cached_property
 from importlib import metadata as importlib_metadata
@@ -19,7 +20,7 @@ from hatchling.plugin import hookimpl
 from packaging.utils import canonicalize_name
 
 from smelt.backend import run_backend, write_auto_mode_report
-from smelt.config import SmeltConfig
+from smelt.config import SmeltConfig, parse_config_from_pyproject
 from smelt.schema import ProjectConfig, toml_key
 from smelt.utils import ImportPath, ModpathType
 
@@ -71,14 +72,13 @@ class HatchlingBuildHook(BuildHookInterface):
     @cached_property
     def smelt_config(self) -> SmeltConfig:
         try:
-            config = SmeltConfig.from_toml_data(
-                self.config, project_scripts=self.metadata.core.scripts
-            )
+            with open(Path(self.root) / "pyproject.toml", "rb") as toml_file:
+                toml_data = tomllib.load(toml_file)
+            config = parse_config_from_pyproject(toml_data, project_root=Path(self.root))
         except Exception as exc:
             raise ValueError(
-                "Smelt config is invalid:"
-                f"Current config: {self.config}"
-                "Valid parameters are:\n"
+                f"Smelt config is invalid: {exc}\n"
+                "Valid [tool.smelt] parameters are:\n"
                 f"{[toml_key(f.name) for f in fields(ProjectConfig)]}"
             ) from exc
         config.load_env()

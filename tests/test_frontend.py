@@ -98,7 +98,7 @@ def test_parse(toml_data: TomlData, project_root: Path) -> None:
 
     # entrypoints come from [project.scripts], and are keyed by their target so that a
     # declaration under [tool.smelt.entrypoints] can customize the same one
-    assert config.entrypoints == {"minimal.cli:minimal": {}}
+    assert set(config.entrypoints) == {"minimal.cli:minimal"}
     assert config.script_names == {"minimal-demo": "minimal.cli:minimal"}
 
     assert [module.import_path for module in config.c_extensions] == ["minimal.hello"]

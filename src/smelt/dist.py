@@ -78,7 +78,7 @@ from smelt.bytecode import (
     compile_to_pyc,
 )
 from smelt.compiler import SupportedPlatforms
-from smelt.config import Backend, EntrypointOptions, SmeltConfig
+from smelt.config import Backend, SmeltConfig, package_data_specs
 from smelt.explorer import (
     ModuleKind,
     ResolvedModule,
@@ -93,7 +93,6 @@ from smelt.hooks import hidden_imports
 from smelt.isolated_build import (
     DEFAULT_ISOLATED_BUILD,
     DEFAULT_ISOLATED_BUILD_VERSIONS,
-    ISOLATED_BUILD_VERSIONS,
     IsolatedBuildError,
     IsolatedBuildVersions,
     IsolatedNativesResult,
@@ -109,6 +108,14 @@ from smelt.native_deps import (
     BundledNatives,
     bundle_native_dependencies,
     describe_command_failure,
+)
+from smelt.resolver import SOURCE_CLI, SOURCE_DEFAULT, Level, TargetLevel, resolve
+from smelt.schema import (
+    BundleSettings,
+    ContentGroup,
+    InterpreterGroup,
+    IsolatedBuildGroup,
+    OnefileGroup,
 )
 from smelt.nuitkaify import Stdout, import_path_search_root
 from smelt.onefile import (
@@ -592,288 +599,176 @@ def write_launcher_shim(
     return dest.relative_to(dist_root)
 
 
-def resolve_dist_python(
-    entrypoint_options: EntrypointOptions,
-    python: DistPython | None = None,
-) -> DistPython:
+#: The lowest level of every bundler setting: what applies when nothing declares it.
+#: Settings with no entry here (`interpreter.version`, `optimize`, the list and table
+#: settings) are legitimately empty, and resolved by their consumers.
+BUNDLE_DEFAULTS: Final[BundleSettings] = BundleSettings(
+    python=DEFAULT_DIST_PYTHON,
+    guard_version=True,
+    isolate=True,
+    content=ContentGroup(
+        discovery=DEFAULT_DISCOVERY,
+        drop_optional_imports=DEFAULT_DROP_OPTIONAL_IMPORTS,
+    ),
+    interpreter=InterpreterGroup(
+        tailor=DEFAULT_TAILOR_INTERPRETER,
+        static=DEFAULT_OWN_PYTHON_STATIC,
+        inittab=DEFAULT_USE_INITTAB,
+    ),
+    onefile=OnefileGroup(
+        enabled=DEFAULT_ONEFILE,
+        compression=DEFAULT_ONEFILE_COMPRESSION,
+        compression_preset=DEFAULT_ONEFILE_COMPRESSION_PRESET,
+        cache=DEFAULT_ONEFILE_CACHE,
+        keep_folder=True,
+    ),
+    isolated_build=IsolatedBuildGroup(
+        enabled=DEFAULT_ISOLATED_BUILD,
+        versions=DEFAULT_ISOLATED_BUILD_VERSIONS,
+    ),
+)
+
+
+@dataclass(frozen=True)
+class ResolvedBundle:
     """
-    Which interpreter the distribution runs on: `python` where the caller named one
-    (the CLI wins over the declaration), then the entrypoint's own `python` option,
-    then `DEFAULT_DIST_PYTHON`.
+    Every bundler setting of one entrypoint, resolved across the default, the
+    `[tool.smelt]` / `[tool.smelt.bundle]` / entrypoint tables and the command line
+    (see `resolve_bundle`). `sources` says which of them each declared setting came
+    from.
     """
-    declared = python or entrypoint_options.get("python", DEFAULT_DIST_PYTHON)
-    for mode in DIST_PYTHON_MODES:
-        if declared == mode:
-            return mode
-    raise DistError(
-        f"Invalid python mode {declared!r}, expected one of 'byo' (bring your own "
-        "interpreter, the default) or 'own' (ship one smelt builds itself)."
+
+    python: DistPython
+    #: `-1` follows the running interpreter, as in `PycTargetTag.current`.
+    optimize: int
+    guard_version: bool
+    isolate: bool
+    discovery: DiscoveryMode
+    include_modules: list[str]
+    include_packages: list[str]
+    exclude_modules: list[str]
+    drop_optional_imports: bool
+    package_data: dict[str, list[str]]
+    distribution_metadata: list[str]
+    own_python_version: str | None
+    tailor_interpreter: bool
+    drop_stdlib_groups: list[str]
+    own_python_static: bool
+    own_python_static_modules: tuple[str, ...]
+    use_inittab: bool
+    onefile: bool
+    onefile_compression: OnefileCompression
+    onefile_compression_preset: int
+    onefile_cache: bool
+    onefile_keep_folder: bool
+    isolated_build: bool
+    isolated_build_versions: IsolatedBuildVersions
+    #: Every level declaring `supported-targets`, least specific first.
+    supported_targets: tuple[TargetLevel, ...]
+    sources: dict[str, tuple[str, ...]]
+
+
+def _defaulted[T](value: T | None, key: str) -> T:
+    assert value is not None, f"{key} has no value: BUNDLE_DEFAULTS must declare it"
+    return value
+
+
+def resolve_bundle(
+    declared: Iterable[Level[BundleSettings]],
+    cli: BundleSettings | None = None,
+) -> ResolvedBundle:
+    """
+    Resolves one entrypoint's bundler settings: the command line (`cli`) over
+    `declared` (the `SmeltConfig.entrypoints` levels, least specific first) over
+    `BUNDLE_DEFAULTS`. Scalars replace, lists append, `supported-targets` is kept per
+    level -- see `smelt.resolver`.
+    """
+    resolved = resolve(
+        BundleSettings,
+        [
+            Level(SOURCE_DEFAULT, BUNDLE_DEFAULTS),
+            *declared,
+            Level(SOURCE_CLI, cli),
+        ],
+    )
+    v = resolved.value
+    return ResolvedBundle(
+        python=_defaulted(v.python, "python"),
+        optimize=-1 if v.optimize is None else v.optimize,
+        guard_version=_defaulted(v.guard_version, "guard-version"),
+        isolate=_defaulted(v.isolate, "isolate"),
+        discovery=_defaulted(v.content.discovery, "content.discovery"),
+        include_modules=v.content.include_modules,
+        include_packages=v.content.include_packages,
+        exclude_modules=v.content.exclude_modules,
+        drop_optional_imports=_defaulted(
+            v.content.drop_optional_imports, "content.drop-optional-imports"
+        ),
+        package_data=v.content.package_data,
+        distribution_metadata=v.content.distribution_metadata,
+        own_python_version=v.interpreter.version,
+        tailor_interpreter=_defaulted(v.interpreter.tailor, "interpreter.tailor"),
+        drop_stdlib_groups=v.interpreter.drop_stdlib_groups,
+        own_python_static=_defaulted(v.interpreter.static, "interpreter.static"),
+        own_python_static_modules=tuple(v.interpreter.static_modules),
+        use_inittab=_defaulted(v.interpreter.inittab, "interpreter.inittab"),
+        onefile=_defaulted(v.onefile.enabled, "onefile.enabled"),
+        onefile_compression=resolve_compression(v.onefile.compression),
+        onefile_compression_preset=_defaulted(
+            v.onefile.compression_preset, "onefile.compression-preset"
+        ),
+        onefile_cache=_defaulted(v.onefile.cache, "onefile.cache"),
+        onefile_keep_folder=_defaulted(v.onefile.keep_folder, "onefile.keep-folder"),
+        isolated_build=_defaulted(v.isolated_build.enabled, "isolated-build.enabled"),
+        isolated_build_versions=_defaulted(v.isolated_build.versions, "isolated-build.versions"),
+        supported_targets=resolved.supported_targets,
+        sources=resolved.sources,
     )
 
 
-def resolve_tailor_interpreter(
-    entrypoint_options: EntrypointOptions,
-    tailor_interpreter: bool | None = None,
-) -> bool:
-    """
-    Whether the mode `own` interpreter's contents follow the application's closure:
-    `tailor_interpreter` where the caller decided (the CLI wins over the declaration),
-    then the entrypoint's own `tailor-interpreter` option, then
-    `DEFAULT_TAILOR_INTERPRETER`.
-    """
-    if tailor_interpreter is not None:
-        return tailor_interpreter
-    declared = entrypoint_options.get("tailor-interpreter", DEFAULT_TAILOR_INTERPRETER)
-    if not isinstance(declared, bool):
-        raise DistError(
-            f"Invalid tailor-interpreter {declared!r}, expected a boolean: true (the "
-            "default, ship only what the application needs) or false (ship the whole "
-            "standard library)."
-        )
-    return declared
+def _package_data_from_cli(specs: Iterable[str]) -> dict[str, list[str]]:
+    """`["pkg", "pkg:*.json,*.yaml"]` (the `PACKAGE[:PATTERN,...]` flag form) -> a table."""
+    table: dict[str, list[str]] = {}
+    for spec in specs:
+        package, _, patterns = spec.partition(":")
+        table.setdefault(package, []).extend(p for p in patterns.split(",") if p)
+    return table
 
 
-def resolve_use_inittab(
-    entrypoint_options: EntrypointOptions,
-    use_inittab: bool | None = None,
-) -> bool:
-    """
-    Whether `static_modules` is honoured at all (see `DEFAULT_USE_INITTAB`):
-    `use_inittab` where the caller decided (the CLI wins over the declaration), then
-    the entrypoint's own `use-inittab` option, then `DEFAULT_USE_INITTAB` (off).
-    """
-    if use_inittab is not None:
-        return use_inittab
-    declared = entrypoint_options.get("use-inittab", DEFAULT_USE_INITTAB)
-    if not isinstance(declared, bool):
-        raise DistError(
-            f"Invalid use-inittab {declared!r}, expected a boolean: true (statically "
-            "link static_modules into the interpreter) or false (the default -- ship "
-            "them as ordinary .so files)."
-        )
-    return declared
-
-
-def resolve_own_python_static(
-    entrypoint_options: EntrypointOptions,
-    own_python_static: bool | None = None,
-) -> bool:
-    """
-    Whether the mode `own` interpreter is built with `own_python.OwnPythonLinkage`
-    `"static"` instead of `"dynamic"`: `own_python_static` where the caller decided
-    (the CLI wins over the declaration), then the entrypoint's own `own-python-static`
-    option, then `DEFAULT_OWN_PYTHON_STATIC` (off).
-    """
-    if own_python_static is not None:
-        return own_python_static
-    declared = entrypoint_options.get("own-python-static", DEFAULT_OWN_PYTHON_STATIC)
-    if not isinstance(declared, bool):
-        raise DistError(
-            f"Invalid own-python-static {declared!r}, expected a boolean: true (build "
-            "a monolithic static-PIE interpreter) or false (the default -- the "
-            "ordinary dynamic-libc/dynamic-libpython shape)."
-        )
-    return declared
-
-
-def resolve_own_python_static_modules(
-    entrypoint_options: EntrypointOptions,
-    own_python_static_modules: Iterable[str] | None = None,
-) -> tuple[str, ...]:
-    """
-    CPython stdlib module names to compile as builtins under `own_python_static`:
-    `own_python_static_modules` where the caller decided (the CLI wins over the
-    declaration), then the entrypoint's own `own-python-static-modules` option, then
-    empty -- there is no sensible default set (see `own_python.build_own_python`'s
-    `static_modules`).
-    """
-    if own_python_static_modules is not None:
-        return tuple(own_python_static_modules)
-    declared = entrypoint_options.get("own-python-static-modules", [])
-    if not isinstance(declared, list) or not all(isinstance(name, str) for name in declared):
-        raise DistError(
-            f"Invalid own-python-static-modules {declared!r}, expected a list of "
-            "module name strings."
-        )
-    return tuple(declared)
-
-
-def resolve_drop_optional_imports(
-    entrypoint_options: EntrypointOptions,
-    drop_optional_imports: bool | None = None,
-) -> bool:
-    """
-    Whether to leave the optional modules out: `drop_optional_imports` where the caller
-    decided (the CLI wins over the declaration), then the entrypoint's own
-    `drop-optional-imports` option, then `DEFAULT_DROP_OPTIONAL_IMPORTS`.
-    """
-    if drop_optional_imports is not None:
-        return drop_optional_imports
-    declared = entrypoint_options.get("drop-optional-imports", DEFAULT_DROP_OPTIONAL_IMPORTS)
-    if not isinstance(declared, bool):
-        raise DistError(
-            f"Invalid drop-optional-imports {declared!r}, expected a boolean: false "
-            "(the default, ship what the closure reached) or true (leave out every "
-            "module its own importer handles the absence of)."
-        )
-    return declared
-
-
-def resolve_isolated_build(
-    entrypoint_options: EntrypointOptions,
-    isolated_build: bool | None = None,
-) -> bool:
-    """
-    Whether a `ModuleKind.EXTENSION` closure entry is reinstalled for the actual
-    target instead of copied from the local environment: `isolated_build` where the
-    caller decided (the CLI wins over the declaration), then the entrypoint's own
-    `isolated-build` option, then `DEFAULT_ISOLATED_BUILD` (off).
-    """
-    if isolated_build is not None:
-        return isolated_build
-    declared = entrypoint_options.get("isolated-build", DEFAULT_ISOLATED_BUILD)
-    if not isinstance(declared, bool):
-        raise DistError(
-            f"Invalid isolated-build {declared!r}, expected a boolean: true (reinstall "
-            "third-party native dependencies for the actual target instead of copying "
-            "them from the local environment) or false (the default -- copy them as-is)."
-        )
-    return declared
-
-
-def resolve_isolated_build_versions(
-    entrypoint_options: EntrypointOptions,
-    isolated_build_versions: IsolatedBuildVersions | None = None,
-) -> IsolatedBuildVersions:
-    """
-    Which version-resolution strategy `isolated-build` uses for a reinstalled native
-    dependency: `isolated_build_versions` where the caller decided (the CLI wins over
-    the declaration), then the entrypoint's own `isolated-build-versions` option, then
-    `DEFAULT_ISOLATED_BUILD_VERSIONS`.
-    """
-    declared = isolated_build_versions or entrypoint_options.get(
-        "isolated-build-versions", DEFAULT_ISOLATED_BUILD_VERSIONS
-    )
-    for strategy in ISOLATED_BUILD_VERSIONS:
-        if declared == strategy:
-            return strategy
-    raise DistError(
-        f"Invalid isolated-build-versions {declared!r}, expected one of "
-        f"{ISOLATED_BUILD_VERSIONS!r}."
-    )
-
-
-def resolve_target_platforms(
-    entrypoint_options: EntrypointOptions,
-    target_platforms: Iterable[str] = (),
-) -> list[str | None]:
+def resolve_target_platforms(target_platforms: Iterable[str] = ()) -> list[str | None]:
     """
     Platform(s) to build for -- drives the `python = "own"` interpreter build and
     `isolated-build`'s native-dependency reinstall alike, since there is no build
     where those would sensibly target different platforms: `target_platforms` where
-    the caller passed any (the CLI wins over the declaration, replacing it rather
-    than merging), else the entrypoint's own `target` option, else a single native
-    build. The literal `"host"` (in either source) resolves to `None`, the sentinel
-    every cross-aware step downstream already treats as "native, no zig -target flag"
-    (see `own_python.DEFAULT_OWN_PYTHON_TARGET`).
+    the caller passed any, else a single native build. The literal `"host"` resolves
+    to `None`, the sentinel every cross-aware step downstream already treats as
+    "native, no zig -target flag" (see `own_python.DEFAULT_OWN_PYTHON_TARGET`).
     """
-    declared = list(target_platforms) or entrypoint_options.get("target") or []
+    declared = list(target_platforms)
     if not declared:
         return [None]
     return [None if platform == "host" else platform for platform in declared]
 
 
 def assert_supported_platforms(
-    entrypoint_options: EntrypointOptions,
+    supported_targets: Iterable[TargetLevel],
     resolved_target_platforms: Iterable[str | None],
 ) -> None:
     """
     Fails fast -- before any build starts -- for a resolved target outside the
-    entrypoint's own `supported-platforms` allowlist. `None` ("host") is always
-    implicitly allowed regardless of that list; an unset list accepts anything.
+    `supported-targets` of any level declaring them. `None` ("host") is always
+    implicitly allowed; with no level declaring any, everything is accepted.
     """
-    supported = entrypoint_options.get("supported-platforms")
-    if supported is None:
-        return
+    levels = list(supported_targets)
     for target in resolved_target_platforms:
-        if target is not None and target not in supported:
-            raise DistError(
-                f"Target platform {target!r} is not in this entrypoint's "
-                f"supported-platforms {supported!r}."
-            )
-
-
-def resolve_onefile(
-    entrypoint_options: EntrypointOptions,
-    onefile: bool | None = None,
-) -> bool:
-    """
-    Whether to additionally pack the folder into a single file: `onefile` where the
-    caller decided (the CLI wins over the declaration), then the entrypoint's own
-    `onefile` option, then `DEFAULT_ONEFILE`.
-    """
-    if onefile is not None:
-        return onefile
-    declared = entrypoint_options.get("onefile", DEFAULT_ONEFILE)
-    if not isinstance(declared, bool):
-        raise DistError(
-            f"Invalid onefile {declared!r}, expected a boolean: false (the default, "
-            "assemble the folder only) or true (also pack it into a single file)."
-        )
-    return declared
-
-
-def resolve_onefile_compression(
-    entrypoint_options: EntrypointOptions,
-    onefile_compression: str | None = None,
-) -> OnefileCompression:
-    """
-    How the single file's payload is compressed (see `onefile.OnefileCompression`),
-    resolved the same way as every other option here.
-    """
-    return resolve_compression(
-        onefile_compression or entrypoint_options.get("onefile-compression", None)
-    )
-
-
-def resolve_onefile_compression_preset(
-    entrypoint_options: EntrypointOptions,
-    compression_preset: int | None = None,
-) -> int:
-    """
-    Compression preset (1-9 for gzip, 0-9 for xz), resolved the same way as every
-    other option here. Defaults to DEFAULT_ONEFILE_COMPRESSION_PRESET.
-    """
-    if compression_preset is not None:
-        return compression_preset
-    preset = entrypoint_options.get(
-        "onefile-compression-preset", DEFAULT_ONEFILE_COMPRESSION_PRESET
-    )
-    if not isinstance(preset, int):
-        raise DistError(f"Invalid onefile-compression-preset {preset!r}, expected an integer.")
-    return preset
-
-
-def resolve_onefile_cache(
-    entrypoint_options: EntrypointOptions,
-    onefile_cache: bool | None = None,
-) -> bool:
-    """
-    Whether an extracting single file reuses a previous extraction found at its
-    cache directory, resolved the same way as every other option here: `onefile_cache`
-    where the caller decided (the CLI wins over the declaration), then the
-    entrypoint's own `onefile-cache` option, then `DEFAULT_ONEFILE_CACHE`.
-    """
-    if onefile_cache is not None:
-        return onefile_cache
-    declared = entrypoint_options.get("onefile-cache", DEFAULT_ONEFILE_CACHE)
-    if not isinstance(declared, bool):
-        raise DistError(
-            f"Invalid onefile-cache {declared!r}, expected a boolean: true (the "
-            "default, reuse a previous extraction found at the cache directory) or "
-            "false (always re-extract)."
-        )
-    return declared
+        if target is None:
+            continue
+        for level in levels:
+            if target not in level.patterns:
+                raise DistError(
+                    f"Target platform {target!r} is not in the supported-targets "
+                    f"{list(level.patterns)!r} declared by {level.source}."
+                )
 
 
 def assert_no_version_skew(
@@ -1903,7 +1798,7 @@ def build_dist(
     entrypoint: str | None = None,
     output_dir: Path = Path("dist"),
     path_solver: PathSolver | None = None,
-    optimize: int = -1,
+    optimize: Literal[0, 1, 2] | None = None,
     stdout: Stdout | None = None,
     build_extensions: bool = True,
     discovery: DiscoveryMode | None = None,
@@ -1912,8 +1807,8 @@ def build_dist(
     own_python_version: str | None = None,
     tailor_interpreter: bool | None = None,
     drop_stdlib_groups: Iterable[str] = (),
-    guard_version: bool = True,
-    isolate: bool = True,
+    guard_version: bool | None = None,
+    isolate: bool | None = None,
     include_modules: Iterable[str] = (),
     include_packages: Iterable[str] = (),
     include_package_data: Iterable[str] = (),
@@ -1922,15 +1817,15 @@ def build_dist(
     drop_optional_imports: bool | None = None,
     onefile: bool | None = None,
     onefile_only: bool = False,
-    onefile_compression: str | None = None,
+    onefile_compression: Literal["xz", "gzip", "none"] | None = None,
     onefile_compression_preset: int | None = None,
     onefile_cache: bool | None = None,
     static_modules: Mapping[str, Iterable[PathExists]] = {},
     use_inittab: bool | None = None,
     isolated_build: bool | None = None,
-    isolated_build_versions: IsolatedBuildVersions | None = None,
+    isolated_build_versions: Literal["local", "pyproject"] | None = None,
     own_python_static: bool | None = None,
-    own_python_static_modules: Iterable[str] | None = None,
+    own_python_static_modules: Iterable[str] = (),
 ) -> DistReport:
     """
     Assembles the distribution folder for one of `config`'s entrypoints under
@@ -2013,7 +1908,7 @@ def build_dist(
     eligibility judgment.
 
     `static_modules` (auto-discovered or hand-supplied) only takes effect when
-    `use_inittab` resolves true (see `resolve_use_inittab`, `DEFAULT_USE_INITTAB`) --
+    `use_inittab` resolves true (see `DEFAULT_USE_INITTAB`) --
     **off by default**, and passing a non-empty `static_modules` without it raises
     rather than silently ignoring it. Static linking overwrites the interpreter's own
     entrypoint with a freshly built one; unlike every other option here, a bad build
@@ -2055,27 +1950,59 @@ def build_dist(
     path_solver = path_solver or config.get_path_solver()
     entrypoint_spec = resolve_entrypoint_spec(config, entrypoint)
     entrypoint_module = assert_is_valid_import_path(entrypoint_spec.partition(":")[0])
-    entrypoint_options = config.entrypoints[entrypoint_spec]
-
-    # Resolved ahead of `run_backend` on purpose: whether it is worth having it stage
+    # Every setting is resolved once, up front: arguments (the command line) over the
+    # entrypoint's declared levels over the defaults.
+    bundle = resolve_bundle(
+        config.entrypoints[entrypoint_spec],
+        BundleSettings(
+            python=python,
+            optimize=optimize,
+            guard_version=guard_version,
+            isolate=isolate,
+            content=ContentGroup(
+                discovery=discovery,
+                include_modules=list(include_modules),
+                include_packages=list(include_packages),
+                exclude_modules=list(exclude_modules),
+                drop_optional_imports=drop_optional_imports,
+                package_data=_package_data_from_cli(include_package_data),
+                distribution_metadata=list(include_distribution_metadata),
+            ),
+            interpreter=InterpreterGroup(
+                version=own_python_version,
+                tailor=tailor_interpreter,
+                drop_stdlib_groups=list(drop_stdlib_groups),
+                static=own_python_static,
+                static_modules=list(own_python_static_modules),
+                inittab=use_inittab,
+            ),
+            onefile=OnefileGroup(
+                enabled=onefile,
+                compression=onefile_compression,
+                compression_preset=onefile_compression_preset,
+                cache=onefile_cache,
+                keep_folder=False if onefile_only else None,
+            ),
+            isolated_build=IsolatedBuildGroup(
+                enabled=isolated_build, versions=isolated_build_versions
+            ),
+        ),
+    )
+    # Needed ahead of `run_backend` on purpose: whether it is worth having it stage
     # object files at all (`static_link` below) depends on both.
-    resolved_python = resolve_dist_python(entrypoint_options, python)
-    resolved_use_inittab = resolve_use_inittab(entrypoint_options, use_inittab)
-    resolved_isolated_build = resolve_isolated_build(entrypoint_options, isolated_build)
-    resolved_isolated_build_versions = resolve_isolated_build_versions(
-        entrypoint_options, isolated_build_versions
-    )
-    resolved_own_python_static = resolve_own_python_static(entrypoint_options, own_python_static)
-    resolved_own_python_static_modules = resolve_own_python_static_modules(
-        entrypoint_options, own_python_static_modules
-    )
+    resolved_python = bundle.python
+    resolved_use_inittab = bundle.use_inittab
+    resolved_isolated_build = bundle.isolated_build
+    resolved_isolated_build_versions = bundle.isolated_build_versions
+    resolved_own_python_static = bundle.own_python_static
+    resolved_own_python_static_modules = bundle.own_python_static_modules
     # Hoisted ahead of `run_backend` (below) so its own compile step cross-compiles
     # for the same target the mode `own` interpreter build further down resolves --
     # that block still reads this via the `target` local it assigns from it. Also
     # what `isolated_build` reinstalls native dependencies for, further down: one
     # target drives both, see `resolve_target_platforms`'s own doc for why.
     declared_target_platforms = resolve_target_platforms(
-        entrypoint_options, (target_platform,) if target_platform is not None else ()
+        (target_platform,) if target_platform is not None else ()
     )
     if len(declared_target_platforms) != 1:
         raise DistError(
@@ -2084,7 +2011,7 @@ def build_dist(
             "pass target_platform explicitly, or use `smelt build-dist`/`smelt "
             "compile-module`, which loop over all of them."
         )
-    assert_supported_platforms(entrypoint_options, declared_target_platforms)
+    assert_supported_platforms(bundle.supported_targets, declared_target_platforms)
     (resolved_target_platform,) = declared_target_platforms
     # `run_backend`'s own `crosscompile` is the narrower, Zig-target-spelled enum its
     # compile primitives take (see `SupportedPlatforms.from_triple`'s own doc) --
@@ -2130,13 +2057,7 @@ def build_dist(
             f"static_modules names {sorted(unknown_static)}, which smelt did not "
             f"build for this project. Known built modules: {sorted(built)}."
         )
-    declared_discovery = discovery or entrypoint_options.get("discovery", DEFAULT_DISCOVERY)
-    if declared_discovery not in ("static", "trace", "both"):
-        raise DistError(
-            f"Invalid discovery mode {declared_discovery!r}, expected one of "
-            "'static', 'trace', 'both'."
-        )
-    resolved_discovery: DiscoveryMode = declared_discovery
+    resolved_discovery = bundle.discovery
     if static_modules and not resolved_use_inittab:
         raise DistError(
             f"static_modules names {sorted(static_modules)}, but use_inittab is off "
@@ -2149,33 +2070,29 @@ def build_dist(
             f"runs on python={resolved_python!r}: static linking has an interpreter "
             "of smelt's own to link into only in mode 'own'."
         )
-    drop_optional = resolve_drop_optional_imports(entrypoint_options, drop_optional_imports)
-    pack_onefile = resolve_onefile(entrypoint_options, onefile)
-    compression = resolve_onefile_compression(entrypoint_options, onefile_compression)
-    compression_preset = resolve_onefile_compression_preset(
-        entrypoint_options, onefile_compression_preset
-    )
-    reuse_cache = resolve_onefile_cache(entrypoint_options, onefile_cache)
-    if onefile_only and not pack_onefile:
+    drop_optional = bundle.drop_optional_imports
+    pack_onefile = bundle.onefile
+    compression = bundle.onefile_compression
+    compression_preset = bundle.onefile_compression_preset
+    reuse_cache = bundle.onefile_cache
+    if not bundle.onefile_keep_folder and not pack_onefile:
         raise DistError(
-            "--onefile-only asks for the distribution folder to be deleted once it is "
-            "packed, but packing was not requested. Add --onefile."
+            "Deleting the distribution folder once it is packed (--onefile-only, or "
+            "onefile.keep-folder = false) needs a packed file to keep, but packing was "
+            "not requested. Add --onefile."
         )
-    tag = PycTargetTag.current(optimize)
+    tag = PycTargetTag.current(bundle.optimize)
 
     search_paths = project_search_paths(path_solver)
-    forced_modules = [*entrypoint_options.get("include-modules", []), *include_modules]
-    forced_packages = [*entrypoint_options.get("include-package", []), *include_packages]
+    forced_modules = bundle.include_modules
+    forced_packages = bundle.include_packages
     closure = collect_closure(
         entrypoint_module,
         search_paths,
         extra_modules=forced_modules,
         extra_packages=forced_packages,
         discovery=resolved_discovery,
-        exclude_modules=[
-            *entrypoint_options.get("exclude-modules", []),
-            *exclude_modules,
-        ],
+        exclude_modules=bundle.exclude_modules,
     )
     # Reported whether or not they are dropped: an optional module is the one kind of
     # over-collection the closure can name precisely, so leaving it unsaid would hide
@@ -2215,7 +2132,7 @@ def build_dist(
         target = resolved_target_platform
         interpreter_target = target
         python_version = resolve_own_python_version(
-            own_python_version or entrypoint_options.get("own-python-version")
+            bundle.own_python_version
         )
         # Fails now rather than after the build below: `assert_no_version_skew` would
         # catch the same mismatch, but only once a several-minutes cross-compiled
@@ -2246,7 +2163,7 @@ def build_dist(
         stdlib_modules = sorted(
             import_path for import_path, resolved in closure.items() if resolved.is_stdlib
         )
-        tailor = resolve_tailor_interpreter(entrypoint_options, tailor_interpreter)
+        tailor = bundle.tailor_interpreter
         if tailor and is_windows_zig_target(target):
             # Tailoring needs `bootstrap_modules` to probe the built interpreter by
             # running it, and a cross-compiled `python.exe` cannot run on the
@@ -2309,10 +2226,7 @@ def build_dist(
                 stdlib_modules,
                 built_interpreter,
                 include_modules=forced_modules,
-                drop_stdlib_groups=[
-                    *entrypoint_options.get("drop-stdlib-groups", []),
-                    *drop_stdlib_groups,
-                ],
+                drop_stdlib_groups=bundle.drop_stdlib_groups,
                 follow_optional=not drop_optional,
             )
 
@@ -2438,7 +2352,7 @@ def build_dist(
                             resolved.origin,
                             payload_root,
                             is_package=resolved.is_package,
-                            optimize=optimize,
+                            optimize=bundle.optimize,
                         )
                     )
                 except BytecodeCompilationError as exc:
@@ -2510,20 +2424,14 @@ def build_dist(
         include_system_dirs=not is_musl_zig_target(interpreter_target),
     )
 
-    data_specs = [
-        *entrypoint_options.get("include-package-data", []),
-        *include_package_data,
-    ]
+    data_specs = package_data_specs(bundle.package_data)
     report.data_files = collect_package_data(data_specs, payload_root, search_paths)
 
     report.metadata_files = collect_distribution_metadata(
         [artifact.import_path for artifact in report.bytecode]
         + [artifact.import_path for artifact in report.natives],
         payload_root,
-        extra_distributions=[
-            *entrypoint_options.get("include-distribution-metadata", []),
-            *include_distribution_metadata,
-        ],
+        extra_distributions=bundle.distribution_metadata,
         search_paths=search_paths,
     )
 
@@ -2543,9 +2451,9 @@ def build_dist(
         entrypoint_spec,
         payload_root,
         tag=report.tag,
-        guard_version=guard_version,
-        isolate=isolate,
-        optimize=optimize,
+        guard_version=bundle.guard_version,
+        isolate=bundle.isolate,
+        optimize=bundle.optimize,
         onefile_cleanup_env_var=CLEANUP_ENV_VAR if (pack_onefile and not reuse_cache) else None,
     )
     report.entrypoint_file = entrypoint_file.relative_to(payload_root)
@@ -2608,7 +2516,7 @@ def build_dist(
         # single file is the one written above and does not describe the packing --
         # a manifest cannot record the digest of an archive it is itself part of.
         (dist_root / MANIFEST_NAME).write_text(json.dumps(report.serialize(), indent=2))
-        if onefile_only:
+        if not bundle.onefile_keep_folder:
             shutil.rmtree(dist_root)
             _logger.info("Removed %s, only %s was asked for", dist_root, report.onefile.path)
 
