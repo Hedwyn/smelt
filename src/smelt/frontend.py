@@ -40,7 +40,9 @@ from smelt.config import (
     PyprojectConfig,
     SmeltConfig,
     TomlData,
+    SMELT_TOML_NAME,
     load_pyproject_config,
+    overlay_smelt_toml,
     parse_config_from_pyproject,
     toml_get_nested_section,
 )
@@ -243,7 +245,7 @@ def smelt(ctx: Context, project: PathExists, log_level: str | None, report: str 
 
 def _load_pyproject(state: CliState) -> PyprojectConfig:
     """
-    Reads and validates the project's pyproject.toml, exiting with a message when the
+    Reads and validates the project's pyproject.toml (plus its smelt.toml, if any), exiting with a message when the
     project has no readable one.
     """
     pyproject_path = state.project / "pyproject.toml"
@@ -254,6 +256,17 @@ def _load_pyproject(state: CliState) -> PyprojectConfig:
             toml_data = tomllib.load(f)
         except tomllib.TOMLDecodeError as exc:
             error_exit(f"Invalid TOML file [{pyproject_path}]: {exc}")
+    smelt_toml_path = state.project / SMELT_TOML_NAME
+    if path_exists(smelt_toml_path):
+        with smelt_toml_path.open("rb") as f:
+            try:
+                smelt_toml_data = tomllib.load(f)
+            except tomllib.TOMLDecodeError as exc:
+                error_exit(f"Invalid TOML file [{smelt_toml_path}]: {exc}")
+        try:
+            toml_data = overlay_smelt_toml(toml_data, smelt_toml_data)
+        except SmeltError as exc:
+            error_exit(str(exc))
     return load_pyproject_config(toml_data, project_root=state.project)
 
 

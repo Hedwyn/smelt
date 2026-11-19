@@ -123,6 +123,34 @@ def toml_get_nested_section(toml_data: TomlData, *path: str) -> _TomlData:
     return section
 
 
+SMELT_TOML_NAME = "smelt.toml"
+
+
+def overlay_smelt_toml(toml_data: TomlData, smelt_toml_data: TomlData) -> TomlData:
+    """
+    Returns `toml_data` (a pyproject.toml's data) with `smelt_toml_data`, the content
+    of a standalone `smelt.toml`, installed as its `[tool.smelt]` table.
+
+    A `smelt.toml` carries the keys of `[tool.smelt]` at its top level (e.g.
+    `[bundle]` instead of `[tool.smelt.bundle]`). It lets a project be bundled without
+    editing its pyproject.toml.
+
+    Raises
+    ------
+    SmeltConfigError
+        If the pyproject.toml already carries settings in `[tool.smelt]`.
+    """
+    tool = toml_data.get("tool", {})
+    if not isinstance(tool, dict):
+        raise SmeltConfigError(f"`tool` section in toml data is not a dictionary, got {tool}.")
+    if tool.get("smelt"):
+        raise SmeltConfigError(
+            f"Smelt settings found both in {SMELT_TOML_NAME} and [tool.smelt] of "
+            "pyproject.toml. Keep them in one place."
+        )
+    return {**toml_data, "tool": {**tool, "smelt": smelt_toml_data}}
+
+
 class Backend(StrEnum):
     """
     A backend for modules discovered by auto mode, selectable via `backend_priority_order`.
