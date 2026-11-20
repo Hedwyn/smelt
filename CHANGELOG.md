@@ -2,6 +2,17 @@
 
 All notable changes to Smelt are documented here. Entries before 0.8.0 were reconstructed retroactively from commit history, since changes were not logged release by release at the time; they may be less exhaustive than later entries.
 
+## [0.8.1]
+
+### Added
+
+* Smelt settings can live in a standalone `smelt.toml` next to `pyproject.toml`, so a project can be built or bundled without editing its `pyproject.toml`. It carries the keys of `[tool.smelt]` at its top level (e.g. `[bundle]` instead of `[tool.smelt.bundle]`). Declaring settings in both `smelt.toml` and `[tool.smelt]` is an error.
+
+### Fixed
+
+* Zig and C extensions living under a package root declared in `packages-location` were written to a `.py` file (e.g. `_native.py`, actually an ELF binary) instead of a file with the platform extension suffix (`_native.cpython-312-x86_64-linux-gnu.so`). Projects without `packages-location` were not affected.
+* Import path resolution for declared package roots matched on a bare string prefix, so a root `pkg` also captured modules of an unrelated package such as `pkg2`.
+
 ## [0.8.0]
 
 The headline of this release is the bundler, `smelt bundle`: it turns an entrypoint into a standalone distribution (a folder or a single file), optionally with its own interpreter. The configuration and the CLI were also reworked into one consistent interface; see **Changed** and **Deprecated** for migrating a 0.7 project.
