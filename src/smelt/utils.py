@@ -603,15 +603,15 @@ class PathSolver:
         for root_path, path in self.known_roots:
             if import_path == root_path:
                 return path
-            if not import_path.startswith(root_path):
+            if not import_path.startswith(root_path + "."):
                 continue
             root = Path(path)
-            sub_import_path = import_path.replace(root_path + ".", "")
+            sub_import_path = import_path[len(root_path) + 1 :]
             assert is_valid_import_path(sub_import_path), (
                 f"internal path substitution logic error {sub_import_path}"
             )
 
-            subpath = convert_to_path(sub_import_path)
+            subpath = convert_to_path(sub_import_path, file_extension)
             module_path = root / subpath
             if should_exist and not path_exists(module_path):
                 raise SmeltConfigError(

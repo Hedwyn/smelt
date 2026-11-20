@@ -87,3 +87,21 @@ def test_convert_to_fs_path(
     assert convert_to_fs_path(import_path, layout=layout, extension=extension) == Path(
         expected_path
     )
+
+
+def test_resolve_import_path_known_root_uses_extension(tmp_path: Path) -> None:
+    from smelt.utils import ImportPath, PackageRootPath, PathSolver
+
+    root = tmp_path / "bindings" / "pkg"
+    root.mkdir(parents=True)
+    solver = PathSolver([PackageRootPath(ImportPath("pkg"), root)])
+    suffix = ".cpython-312-x86_64-linux-gnu.so"
+    resolved = solver.resolve_import_path(
+        ImportPath("pkg._native"), suffix, should_exist=False
+    )
+    assert resolved == root / f"_native{suffix}"
+    # sibling root with shared prefix must not match
+    other = solver.resolve_import_path(
+        ImportPath("pkg2.mod"), suffix, should_exist=False
+    )
+    assert root not in other.parents
